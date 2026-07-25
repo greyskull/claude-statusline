@@ -251,6 +251,105 @@ def tree_order(subs: list[RunningSubagent]) -> list[tuple[RunningSubagent, int, 
     return out
 
 
+def group_trees(subs: list[RunningSubagent]) -> list[list[RunningSubagent]]:
+    '''Group a candidate cohort into parent-rooted trees.
+
+    Each group is a root (an agent whose parent isn't in ``subs``) plus every
+    transitive descendant, linked the same way as ``tree_order`` (matched by
+    ``parent_id`` against ``agent_id``, with or without the ``agent-``
+    prefix). Within a group, members appear in discovery order (root first,
+    then each child's own subtree); groups are returned in root
+    ``first_timestamp`` order (the order ``subs`` arrives in).
+    '''
+    by_id: dict[str, RunningSubagent] = {}
+    for sub in subs:
+        if sub.agent_id:
+            by_id[sub.agent_id] = sub
+            by_id[sub.agent_id.removeprefix('agent-')] = sub
+    children: dict[int, list[RunningSubagent]] = {}
+    roots: list[RunningSubagent] = []
+    for sub in subs:
+        parent = by_id.get(sub.parent_id) if sub.parent_id else None
+        if parent is not None and parent is not sub:
+            children.setdefault(id(parent), []).append(sub)
+        else:
+            roots.append(sub)
+
+    def collect(sub: RunningSubagent, out: list[RunningSubagent]) -> None:
+        out.append(sub)
+        for kid in children.get(id(sub), []):
+            collect(kid, out)
+
+    groups: list[list[RunningSubagent]] = []
+    for root in roots:
+        group: list[RunningSubagent] = []
+        collect(root, group)
+        groups.append(group)
+    return groups
+
+
+def cap_tree_groups(subs: list[RunningSubagent], cap: int) -> list[RunningSubagent]:
+    '''Cap a visible cohort for tree mode without splitting a parent from a
+    still-active child.
+
+    Groups ``subs`` into parent-rooted trees (``group_trees``) and evicts
+    whole groups — fully-finished groups first (lowest max ``end_ts``
+    evicted first), then still-active groups (lowest max ``mtime`` evicted
+    first) — until the total entry count is <= ``cap``. Eviction always
+    removes a complete group, so a parent with a still-running descendant
+    is never separated from it; only entirely-finished groups are dropped
+    ahead of any group containing a live agent. A group is never evicted
+    down to zero: whole-group eviction stops once a single group remains,
+    and if that last group alone still exceeds ``cap``, it is trimmed in
+    place (root kept, only its most-recently-active ``cap - 1`` descendants
+    kept) rather than dropped entirely.
+    '''
+    groups = group_trees(subs)
+    total = sum(len(g) for g in groups)
+    if total <= cap:
+        return subs
+
+    finished = sorted(
+        (g for g in groups if all(sub.end_ts > 0 for sub in g)),
+        key=lambda g: max(sub.end_ts for sub in g),
+    )
+    active = sorted(
+        (g for g in groups if any(sub.end_ts == 0 for sub in g)),
+        key=lambda g: max(sub.mtime for sub in g),
+    )
+
+    kept = groups[:]
+    for g in finished:
+        if total <= cap or len(kept) == 1:
+            break
+        kept.remove(g)
+        total -= len(g)
+    if total > cap:
+        for g in active:
+            if total <= cap or len(kept) == 1:
+                break
+            kept.remove(g)
+            total -= len(g)
+
+    kept_ids = {id(g) for g in kept}
+    ordered = [g for g in groups if id(g) in kept_ids]
+
+    if total > cap and len(ordered) == 1:
+        # A single group survives eviction but still exceeds cap on its own
+        # (e.g. one root plus more live children than fit). Trim within it
+        # instead of dropping it wholesale: keep the root, plus the
+        # most-recently-active cap - 1 descendants, in original order.
+        root, *descendants = ordered[0]
+        keep_ids = {
+            id(sub) for sub in
+            sorted(descendants, key=lambda sub: sub.mtime, reverse=True)[:cap - 1]
+        }
+        trimmed = [root] + [sub for sub in descendants if id(sub) in keep_ids]
+        return trimmed
+
+    return [sub for g in ordered for sub in g]
+
+
 class RunningSubagent:
     __slots__ = (
         'agent_type', 'description', 'billed_in', 'output', 'first_timestamp',

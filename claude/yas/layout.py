@@ -27,7 +27,7 @@ from yas.constants import (
     WORKFLOW_RUN_CAP,
 )
 from yas.info import SessionView, _fmt_elapsed_clock
-from yas.info.subagents import RunningSubagent, read_last_prompt_ts, tree_order
+from yas.info.subagents import RunningSubagent, cap_tree_groups, read_last_prompt_ts, tree_order
 from yas.render.gradient import model_display
 from yas.render.pill import Pill
 from yas.renderer import Renderer
@@ -201,16 +201,26 @@ def tree_columns(cells: list[tuple[RunningSubagent, str]], width: int) -> tuple[
     # (front_w == desc_col - 1 once padded, plus the ' · ' separator), so
     # stats_col must clear desc_col + 3 + SUBAGENT_DESC_MIN_WIDTH to guarantee a
     # SUBAGENT_DESC_MIN_WIDTH-char description column (p90 of mined real titles
-    # — see .scratch/session-analysis.md). The 30%-of-width anchor stays as the
-    # floor for narrower terminals; the guarantee only engages when there's
-    # still room left over for the activity column plus a usable snippet after
-    # it, so it degrades gracefully instead of pushing activity_col past width.
+    # — see .scratch/session-analysis.md). Unlike the old design, the guarantee
+    # is now a CAP rather than a floor: the description column never grows
+    # past SUBAGENT_DESC_MIN_WIDTH just because the terminal is wide, so a
+    # 300-col box still gets a ~45-char description, not one riding 30% of the
+    # box. The 30%-of-width anchor only kicks in when the guarantee itself
+    # can't fit (very narrow terminals), as a graceful floor.
     stats_pct       = max(desc_col + 8, round(width * 0.30))
     stats_guarantee = desc_col + 3 + SUBAGENT_DESC_MIN_WIDTH
-    stats_col = stats_pct
     if stats_guarantee + 16 + 10 <= width:  # +16: activity_col floor, +10: min snippet
-        stats_col = max(stats_col, stats_guarantee)
+        stats_col = stats_guarantee
+    else:
+        stats_col = stats_pct
 
+    # The activity column follows the stats/model cluster with at least a
+    # 16-col gap (room for the model-only fallback), but also anchors to
+    # ~50% of the box width so wider terminals leave the full share%/tok/model
+    # cluster room to render instead of collapsing to the model-only
+    # fallback — a fixed +16 gap is only enough for 'stats_col + model', not
+    # the richer cluster, and starves the plan/task-list side-by-side layout
+    # of its stats column on wide boxes.
     activity_col = max(stats_col + 16, round(width * 0.50))
     activity_col = min(activity_col, width)  # never past the row's target width
     return desc_col, stats_col, activity_col
@@ -358,7 +368,14 @@ def build_narrow(
     tasks     = view.tasks
     subagents = view.subagents
     last_prompt_ts = read_last_prompt_ts(session.session_id)
-    visible_subs   = subagents.visible(time.time(), last_prompt_ts)[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs   = subagents.visible(time.time(), last_prompt_ts)
+    if view.cfg.subagent_tree:
+        # Tree mode: cap by whole parent+descendant group so a still-running
+        # parent can't be evicted while a finished child (later timestamp)
+        # lingers and fills the flat cap's slice.
+        visible_subs = cap_tree_groups(visible_subs, SUBAGENT_DISPLAY_CAP)
+    else:
+        visible_subs = visible_subs[-SUBAGENT_DISPLAY_CAP:]
     spec = LayoutSpec(width=width, fill=fill, session_id=session.session_id)
     if pill_pct:
         rows: list[RowSpec] = [
@@ -449,7 +466,14 @@ def build_medium(
     tasks     = view.tasks
     subagents = view.subagents
     last_prompt_ts = read_last_prompt_ts(session.session_id)
-    visible_subs   = subagents.visible(time.time(), last_prompt_ts)[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs   = subagents.visible(time.time(), last_prompt_ts)
+    if view.cfg.subagent_tree:
+        # Tree mode: cap by whole parent+descendant group so a still-running
+        # parent can't be evicted while a finished child (later timestamp)
+        # lingers and fills the flat cap's slice.
+        visible_subs = cap_tree_groups(visible_subs, SUBAGENT_DISPLAY_CAP)
+    else:
+        visible_subs = visible_subs[-SUBAGENT_DISPLAY_CAP:]
     rows: list[RowSpec] = [top_row, content_row, sep_row]
     if tasks.is_visible():
         for line in r.task_row(tasks, width - 4):
@@ -949,7 +973,14 @@ def build_wide(
         pending_ups = ()
 
     last_prompt_ts = read_last_prompt_ts(session.session_id)
-    visible_subs   = subagents.visible(time.time(), last_prompt_ts)[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs   = subagents.visible(time.time(), last_prompt_ts)
+    if view.cfg.subagent_tree:
+        # Tree mode: cap by whole parent+descendant group so a still-running
+        # parent can't be evicted while a finished child (later timestamp)
+        # lingers and fills the flat cap's slice.
+        visible_subs = cap_tree_groups(visible_subs, SUBAGENT_DISPLAY_CAP)
+    else:
+        visible_subs = visible_subs[-SUBAGENT_DISPLAY_CAP:]
 
     # Side-by-side composition (D2/D3/D5/D7): when the wide layout has BOTH a
     # visible checklist AND >=1 visible subagent, lay the checklist (left) and

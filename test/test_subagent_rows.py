@@ -776,6 +776,62 @@ def test_subagent_cells_flat_mode_unchanged() -> None:
     assert layout.subagent_cells(subs, False) == [(subs[0], ''), (subs[1], '')]
 
 
+def test_cap_tree_groups_keeps_active_parent_with_child() -> None:
+    # Parent started first (ts_off=0) and is still running (end_ts=0). Its
+    # child started later (ts_off=1) so a flat "last N" slice would keep the
+    # child but drop the parent. Five unrelated finished singletons round out
+    # the cohort past the cap.
+    parent = _make_tree_sub('agent-a', ts_off=0, agent_type='parent', end_ts=0.0)
+    child  = _make_tree_sub('agent-b', parent_id='a', ts_off=1, agent_type='child', end_ts=0.0)
+    finished = [
+        _make_tree_sub(f'agent-f{i}', ts_off=2 + i, agent_type=f'done{i}', end_ts=time.time())
+        for i in range(5)
+    ]
+    subs = [parent, child, *finished]
+    got = subagents_mod.cap_tree_groups(subs, 6)
+    assert parent in got and child in got
+    assert len(got) == 6
+    # Finished singleton groups are evicted first, ahead of the still-active pair.
+    assert sum(1 for s in got if s in finished) == 4
+
+
+def test_cap_tree_groups_trims_within_the_last_surviving_group() -> None:
+    # A single group can't be evicted whole -- that would return an empty
+    # cohort. Once it's the only group left, cap_tree_groups trims *within*
+    # it instead: keep the root, drop descendants down to cap - 1.
+    parent = _make_tree_sub('agent-a', ts_off=0, agent_type='parent', end_ts=0.0)
+    child  = _make_tree_sub('agent-b', parent_id='a', ts_off=1, agent_type='child', end_ts=0.0)
+    got = subagents_mod.cap_tree_groups([parent, child], 1)
+    assert got == [parent]  # root always kept; cap - 1 == 0 descendants
+
+
+def test_cap_tree_groups_never_evicts_a_group_to_zero() -> None:
+    # One parent + 10 active children, all one group, over cap: the group
+    # must never be evicted wholesale down to nothing -- it gets trimmed to
+    # the root plus its most-recently-active `cap - 1` descendants instead.
+    root = _make_tree_sub('agent-root', ts_off=0, agent_type='spec-implementer', end_ts=0.0)
+    children = [
+        _make_tree_sub(f'agent-c{i}', parent_id='root', ts_off=1 + i,
+                        agent_type=f'child{i}', end_ts=0.0, mtime=time.time() - 100 + i)
+        for i in range(10)
+    ]
+    subs = [root, *children]
+    got = subagents_mod.cap_tree_groups(subs, 6)
+    assert len(got) == 6
+    assert got[0] is root
+    # The 5 kept descendants are the most-recently-active ones (highest mtime).
+    kept_ids = {id(sub) for sub in got[1:]}
+    most_recent_ids = {id(sub) for sub in sorted(children, key=lambda s: s.mtime, reverse=True)[:5]}
+    assert kept_ids == most_recent_ids
+
+
+def test_cap_tree_groups_noop_under_cap() -> None:
+    parent = _make_tree_sub('agent-a', ts_off=0)
+    child  = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
+    subs = [parent, child]
+    assert subagents_mod.cap_tree_groups(subs, 6) == subs
+
+
 def test_tree_prefix_two_line_widths_and_indent() -> None:
     sub = _make_sub()
     line1, line2 = _two(sub, 136, tree_prefix='├ ')
@@ -856,9 +912,11 @@ def test_tree_single_activity_column_aligned_across_prefix_depths() -> None:
 def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     # layout.tree_columns: desc_col is the widest (prefix + duration + type)
     # across the cohort, so the shortest names/prefixes get padded up to it;
-    # stats_col/activity_col target ~30%/~50% of the row width (or the
-    # SUBAGENT_DESC_MIN_WIDTH guarantee, whichever is larger when width
-    # allows), never left of where the preceding field ends.
+    # stats_col caps at the SUBAGENT_DESC_MIN_WIDTH guarantee (never grows
+    # past it just because the box is wide) and activity_col follows at
+    # least a 16-col gap, but also anchors to ~50% of the box width so wide
+    # terminals leave the full stats cluster (share%/tok/model) room instead
+    # of collapsing to the model-only fallback.
     root = _make_tree_sub('agent-a', agent_type='spec-author')     # prefix '', long type
     kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api')  # prefix '├ ', short type
     cells = [(root, ''), (kid, '├ ')]
@@ -869,8 +927,8 @@ def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     assert activity_col >= stats_col + 16
     assert activity_col <= 140
     stats_guarantee = desc_col + 3 + SUBAGENT_DESC_MIN_WIDTH
-    assert stats_col in (round(140 * 0.30), desc_col + 8, stats_guarantee)
-    assert activity_col in (round(140 * 0.50), stats_col + 16, 140)
+    assert stats_col == stats_guarantee
+    assert activity_col == max(stats_col + 16, round(140 * 0.50))
 
 
 def test_tree_single_description_aligned_across_depths_and_names() -> None:
@@ -933,6 +991,27 @@ def test_tree_columns_degrades_gracefully_at_narrow_width() -> None:
     assert activity_col >= stats_col + 16
     assert activity_col <= 50
     assert stats_col > 0 and activity_col > 0
+
+
+def test_tree_columns_caps_desc_but_not_activity_at_very_wide_width() -> None:
+    # Standalone cohort at a very wide terminal (e.g. 300 cols): stats_col
+    # must NOT scale up with width once the SUBAGENT_DESC_MIN_WIDTH guarantee
+    # is satisfied (the description column stays ~45 chars, not 30% of a
+    # 300-col box). activity_col DOES scale with width past that point, so
+    # the stats cluster (share%/tok/model) has room to render in full instead
+    # of collapsing to its model-only fallback -- see the
+    # subagent-tree-plan demo scenario.
+    root = _make_tree_sub('agent-a', agent_type='spec-implementer')
+    cells = [(root, '')]
+    desc_col_140, stats_col_140, activity_col_140 = layout.tree_columns(cells, 140)
+    desc_col_300, stats_col_300, activity_col_300 = layout.tree_columns(cells, 300)
+    assert desc_col_140 == desc_col_300
+    assert stats_col_140 == stats_col_300
+    assert activity_col_300 > activity_col_140
+    # And the anchor is exactly the capped guarantee, not a width-scaled value.
+    stats_guarantee = desc_col_300 + 3 + SUBAGENT_DESC_MIN_WIDTH
+    assert stats_col_300 == stats_guarantee
+    assert activity_col_300 == max(stats_col_300 + 16, round(300 * 0.50))
 
 
 def test_tree_single_constant_gap_with_model_padded_to_cohort_width() -> None:
