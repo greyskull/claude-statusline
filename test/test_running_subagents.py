@@ -295,9 +295,12 @@ def test_end_ts_set_when_end_turn_present(tmp_home: Path) -> None:
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    assert sub.end_ts > 0
-    # 2026-05-22T18:00:00Z → epoch ≈ 1779472800
-    assert 1779472799 < sub.end_ts < 1779472801
+    # end_turn alone is transcript inference, not the authoritative
+    # <task-notification> signal — RunningSubagent.end_ts/status now come
+    # ONLY from the notification map (see test_subagent_notifications.py),
+    # so with no notification present the agent is still "running".
+    assert sub.end_ts == 0.0
+    assert sub.status == 'running'
 
 
 def _assistant_line_full(
@@ -361,9 +364,13 @@ def test_end_turn_detected_when_id_shared_with_earlier_partial(tmp_home: Path) -
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    assert sub.end_ts > 0
-    # 2026-05-22T18:00:00Z → epoch ≈ 1779472800
-    assert 1779472799 < sub.end_ts < 1779472801
+    # Same migration note as test_end_ts_set_when_end_turn_present: end_turn
+    # is no longer a completion signal for RunningSubagent — only the
+    # authoritative <task-notification>. The dedup-vs-terminal-capture
+    # regression this test protects still lives in parse_transcript's
+    # own end_ts return, exercised directly where needed; here we only
+    # assert from_session no longer surfaces it as Done.
+    assert sub.end_ts == 0.0
 
 
 def test_shared_id_usage_counted_exactly_once(tmp_home: Path) -> None:
@@ -386,8 +393,9 @@ def test_shared_id_usage_counted_exactly_once(tmp_home: Path) -> None:
     # Counted once: a single message's billed_in (input + cache_creation) and output.
     assert sub.billed_in == 17
     assert sub.output    == 20
-    # And the agent is still detected as Done.
-    assert sub.end_ts > 0
+    # end_ts is no longer derived from end_turn (see migration note above);
+    # only the token-dedup behaviour is under test here.
+    assert sub.end_ts == 0.0
 
 
 def test_streamed_trailing_text_does_not_mask_tool_use(tmp_home: Path) -> None:
@@ -444,7 +452,8 @@ def test_streamed_usage_last_line_wins(tmp_home: Path) -> None:
     sub = result.subagents[0]
     assert sub.billed_in == 26
     assert sub.output    == 301
-    assert sub.end_ts > 0
+    # end_ts is no longer derived from end_turn (see migration note above).
+    assert sub.end_ts == 0.0
 
 
 def test_end_ts_cleared_when_agent_resumes_after_end_turn(tmp_home: Path) -> None:
@@ -471,9 +480,10 @@ def test_end_ts_cleared_when_agent_resumes_after_end_turn(tmp_home: Path) -> Non
 
 
 def test_resumed_agent_done_again_via_terminal_text(tmp_home: Path) -> None:
-    # The resumed agent finishes its follow-up with a terminal text report and
-    # no new end_turn: the stale end_ts is cleared by the resume, then the
-    # terminal-text fallback marks it Done again at the LATER timestamp.
+    # Regression guard for the bias rule: a follow-up terminal-looking text
+    # report with no new end_turn and no <task-notification> must NOT mark
+    # the agent Done — the deleted terminal-text fallback used to do exactly
+    # this. Absent a notification, the agent stays "running".
     now = time.time()
     sdir = _subagents_dir(tmp_home)
     _write_agent(
@@ -489,8 +499,8 @@ def test_resumed_agent_done_again_via_terminal_text(tmp_home: Path) -> None:
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    # 2026-05-22T18:30:00Z → epoch ≈ 1779474600 (not the 18:00 end_turn)
-    assert 1779474599 < sub.end_ts < 1779474601
+    assert sub.end_ts == 0.0
+    assert sub.status == 'running'
 
 
 def test_end_ts_zero_when_no_end_turn(tmp_home: Path) -> None:
@@ -519,13 +529,12 @@ def _tool(name: str = 'Bash') -> dict:
 
 
 def test_terminal_text_null_stop_reason_detects_done(tmp_home: Path) -> None:
-    # Regression: some sidechain (sub-agent) transcripts NEVER emit
-    # stop_reason: "end_turn". Every assistant line is either "tool_use" or null,
-    # including the final result message. The agent is finished, but the strict
-    # end_turn rule left end_ts == 0 so it rendered as running forever. The
-    # terminal-text fallback marks it Done from the LAST assistant line: a text
-    # block with no tool_use. Interstitial null-stop text lines mid-stream
-    # (below) must NOT trigger it — only the final line decides.
+    # Some sidechain (sub-agent) transcripts NEVER emit stop_reason: "end_turn"
+    # — every assistant line is either "tool_use" or null, including the final
+    # result message. The now-deleted terminal-text fallback used to mark this
+    # Done from prose; per the bias rule that is no longer a completion signal
+    # at all — without a <task-notification>, the agent stays "running"
+    # regardless of how final its last text block looks.
     now = time.time()
     sdir = _subagents_dir(tmp_home)
     final_ts = '2026-05-22T18:00:10.000Z'
@@ -549,9 +558,8 @@ def test_terminal_text_null_stop_reason_detects_done(tmp_home: Path) -> None:
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    assert sub.end_ts > 0
-    # 2026-05-22T18:00:10Z → epoch ≈ 1779472810
-    assert 1779472809 < sub.end_ts < 1779472811
+    assert sub.end_ts == 0.0
+    assert sub.status == 'running'
 
 
 def test_last_line_tool_use_not_done(tmp_home: Path) -> None:
@@ -597,8 +605,9 @@ def test_interstitial_text_with_trailing_tool_use_not_done(tmp_home: Path) -> No
 
 
 def test_end_turn_takes_precedence_over_terminal_text_fallback(tmp_home: Path) -> None:
-    # When end_turn IS present its timestamp wins; the fallback must not override
-    # it with a later/earlier terminal-text timestamp.
+    # The terminal-text fallback this test named is deleted; end_turn alone is
+    # also no longer a completion signal for RunningSubagent — only the
+    # authoritative <task-notification> is. No notification here, so running.
     now = time.time()
     sdir = _subagents_dir(tmp_home)
     end_turn_ts = '2026-05-22T18:00:00.000Z'
@@ -613,14 +622,13 @@ def test_end_turn_takes_precedence_over_terminal_text_fallback(tmp_home: Path) -
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    # 2026-05-22T18:00:00Z → epoch ≈ 1779472800
-    assert 1779472799 < sub.end_ts < 1779472801
+    assert sub.end_ts == 0.0
 
 
 def test_structured_output_tool_use_detects_done(tmp_home: Path) -> None:
-    # Workflow agents finish by calling StructuredOutput with stop_reason:
-    # "tool_use" (not "end_turn"). This is a completion signal, not an
-    # intermediate tool call awaiting results. end_ts should be set.
+    # The StructuredOutput-block heuristic is deleted per the bias rule: a
+    # StructuredOutput tool_use, however final-looking, is no longer treated
+    # as a completion signal. Only a <task-notification> can mark Done now.
     now = time.time()
     sdir = _subagents_dir(tmp_home)
     struct_out_ts = '2026-05-22T18:00:00.000Z'
@@ -637,19 +645,14 @@ def test_structured_output_tool_use_detects_done(tmp_home: Path) -> None:
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    # StructuredOutput completion should set end_ts
-    assert sub.end_ts > 0
-    # 2026-05-22T18:00:00Z → epoch ≈ 1779472800
-    assert 1779472799 < sub.end_ts < 1779472801
+    # No <task-notification> present: StructuredOutput alone no longer sets end_ts.
+    assert sub.end_ts == 0.0
 
 
 def test_structured_output_null_stop_reason_detects_done(tmp_home: Path) -> None:
-    # Regression: real workflow transcripts sometimes end with the
-    # StructuredOutput tool_use carrying stop_reason: null (a streamed write
-    # whose stop was never finalized on disk), not "tool_use". This previously
-    # fell through both fallbacks, undercounting a run's done agents (e.g.
-    # "12 done" when 15 were finished). A null stop on a final StructuredOutput
-    # call must still be detected as done.
+    # Same deleted heuristic as above, exercised with the null stop_reason
+    # shape a streamed-but-not-finalized write can have. Still must stay
+    # "running" absent a <task-notification>.
     now = time.time()
     sdir = _subagents_dir(tmp_home)
     struct_ts = '2026-05-22T18:00:00.000Z'
@@ -666,15 +669,12 @@ def test_structured_output_null_stop_reason_detects_done(tmp_home: Path) -> None
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    assert sub.end_ts > 0
-    assert 1779472799 < sub.end_ts < 1779472801
+    assert sub.end_ts == 0.0
 
 
 def test_structured_output_duplicate_message_detects_done(tmp_home: Path) -> None:
-    # Bug fix: when the final message in the transcript is a duplicate
-    # (same mid already seen), the StructuredOutput detection must still work.
-    # This happens when a message is re-streamed (partial then final write).
-    # The code must use the content from the final write, not an earlier message.
+    # Same deleted heuristic, exercised with a re-streamed duplicate message
+    # id. Still must stay "running" absent a <task-notification>.
     now = time.time()
     sdir = _subagents_dir(tmp_home)
     struct_ts = '2026-05-22T18:00:00.000Z'
@@ -697,6 +697,4 @@ def test_structured_output_duplicate_message_detects_done(tmp_home: Path) -> Non
 
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = result.subagents[0]
-    # StructuredOutput completion should set end_ts even when it's a duplicate message
-    assert sub.end_ts > 0
-    assert 1779472799 < sub.end_ts < 1779472801
+    assert sub.end_ts == 0.0

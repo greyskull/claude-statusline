@@ -6,6 +6,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from yas.constants import CLAUDE_DIR, _sanitize
 
@@ -41,6 +42,188 @@ def _parse_iso_to_epoch(ts: str) -> float:
         return 0.0
 
 
+# Closed enum confirmed across a real-world sample of 2974 <task-notification>
+# records. An unrecognised status string (or no notification at all) MUST be
+# treated as still-running — never as done — per the bias rule: prose/absence
+# is never a completion signal, only this structured tag is.
+_TERMINAL_STATUSES = frozenset(('completed', 'killed', 'failed', 'stopped'))
+
+_TASK_NOTIF_RE      = re.compile(r'<task-notification>(.*?)</task-notification>', re.DOTALL)
+_TASK_ID_TAG_RE      = re.compile(r'<task-id>(.*?)</task-id>', re.DOTALL)
+_TOOL_USE_ID_TAG_RE  = re.compile(r'<tool-use-id>(.*?)</tool-use-id>', re.DOTALL)
+_STATUS_TAG_RE       = re.compile(r'<status>(.*?)</status>', re.DOTALL)
+
+class _TailCacheEntry(NamedTuple):
+    '''One cached tail-read state: (mtime, size, byte-offset consumed, notifications found).'''
+    mtime:         float
+    size:          int
+    offset:        int
+    notifications: list['_Notification']
+
+
+# Tail-read cache for notification scanning, keyed by absolute path string.
+# Transcripts only ever grow, so an unchanged (mtime, size) pair means "no new
+# notifications possible" — return the cached list with zero I/O. This runs
+# on every statusline render, so re-parsing whole transcripts each time would
+# be far too slow; only the bytes appended since the last read are scanned.
+_notif_tail_cache: dict[str, _TailCacheEntry] = {}
+
+
+class _Notification:
+    '''One parsed <task-notification> occurrence.'''
+    __slots__ = ('task_id', 'tool_use_id', 'status', 'ts')
+
+    def __init__(self, task_id: str, tool_use_id: str, status: str, ts: float) -> None:
+        self.task_id     = task_id
+        self.tool_use_id = tool_use_id
+        self.status      = status
+        self.ts          = ts
+
+
+def _extract_notifications(line: str) -> list[_Notification]:
+    '''Extract zero or more <task-notification> blocks from one JSONL line.
+
+    Handles both confirmed record shapes: a top-level
+    ``{"type":"queue-operation","content":"<task-notification>..."}`` record,
+    and a ``{"type":"user","message":{"content":"<task-notification>..."}}``
+    record whose message content is a plain string (not the usual
+    content-block list) carrying the same XML fragment. Falls back to a raw
+    substring scan of the line when the JSON doesn't parse cleanly or doesn't
+    match either known shape, so a notification embedded in some other record
+    shape is never silently dropped.
+    '''
+    out: list[_Notification] = []
+    text_blob: str | None = None
+    ts = 0.0
+    try:
+        d = json.loads(line)
+    except (ValueError, TypeError):
+        d = None
+    if isinstance(d, dict):
+        ts_raw = d.get('timestamp', '')
+        if ts_raw:
+            ts = _parse_iso_to_epoch(str(ts_raw))
+        rtype = d.get('type')
+        if rtype == 'queue-operation':
+            content = d.get('content')
+            if isinstance(content, str):
+                text_blob = content
+        elif rtype == 'user':
+            msg_raw = d.get('message')
+            msg = msg_raw if isinstance(msg_raw, dict) else {}
+            content = msg.get('content')
+            if isinstance(content, str):
+                text_blob = content
+    if text_blob is None and '<task-notification>' in line:
+        text_blob = line
+    if text_blob is None or '<task-notification>' not in text_blob:
+        return out
+    for block in _TASK_NOTIF_RE.findall(text_blob):
+        tid_m    = _TASK_ID_TAG_RE.search(block)
+        tool_m   = _TOOL_USE_ID_TAG_RE.search(block)
+        status_m = _STATUS_TAG_RE.search(block)
+        task_id     = tid_m.group(1).strip()    if tid_m    else ''
+        tool_use_id = tool_m.group(1).strip()   if tool_m   else ''
+        status      = status_m.group(1).strip() if status_m else ''
+        if task_id:
+            out.append(_Notification(task_id, tool_use_id, status, ts))
+    return out
+
+
+def _tail_read_notifications(path: Path) -> list[_Notification]:
+    '''Read new <task-notification> records from path since it was last seen.
+
+    Cached by (path, mtime, size): an unchanged file returns the cached list
+    with no I/O. A changed file is read only from the previously recorded
+    byte offset onward — never the whole transcript — and the offset only
+    ever advances to a completed line boundary, so a line still being
+    streamed mid-write is re-read whole on the next call rather than parsed
+    partially. Never raises; an unreadable file yields whatever was already
+    cached (or nothing, on first sight).
+    '''
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        cached = _notif_tail_cache.get(key)
+        return cached.notifications if cached else []
+
+    cached = _notif_tail_cache.get(key)
+    if cached is not None and cached.mtime == st.st_mtime and cached.size == st.st_size:
+        return cached.notifications
+
+    # A shrunk file (rotated/truncated) can't be tailed sanely — rescan from 0.
+    reusable    = cached is not None and cached.size <= st.st_size
+    prev_offset = cached.offset if reusable and cached is not None else 0
+    notifications = list(cached.notifications) if reusable and cached is not None else []
+
+    try:
+        with path.open('rb') as fh:
+            fh.seek(prev_offset)
+            chunk = fh.read()
+    except OSError:
+        _notif_tail_cache[key] = _TailCacheEntry(st.st_mtime, st.st_size, prev_offset, notifications)
+        return notifications
+
+    last_nl = chunk.rfind(b'\n')
+    if last_nl == -1:
+        # No complete line has arrived since the last read; leave the offset
+        # put so the still-growing partial line is re-read whole next time.
+        _notif_tail_cache[key] = _TailCacheEntry(st.st_mtime, st.st_size, prev_offset, notifications)
+        return notifications
+
+    new_offset = prev_offset + last_nl + 1
+    for raw_line in chunk[:last_nl].split(b'\n'):
+        if b'<task-notification>' not in raw_line:
+            continue
+        notifications.extend(_extract_notifications(raw_line.decode('utf-8', errors='ignore')))
+
+    _notif_tail_cache[key] = _TailCacheEntry(st.st_mtime, st.st_size, new_offset, notifications)
+    return notifications
+
+
+class _NotifLookup(NamedTuple):
+    '''Aggregated notification state for one task-id: latest status/ts, total occurrence count.'''
+    status:       str
+    ts:           float
+    notif_count:  int
+
+
+def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dict[str, _NotifLookup]:
+    '''Build a ``{task_id: _NotifLookup(status, ts, count)}`` map for one session tree.
+
+    Scans the top-level session ``.jsonl`` AND every ``subagents/agent-*.jsonl``
+    — a nested agent's completion notification lands in its PARENT AGENT's own
+    transcript, not necessarily in the top-level session file, so every
+    transcript in the tree must be scanned. Aggregates every
+    ``<task-notification>`` seen per task-id: the occurrence with the latest
+    timestamp decides ``status``/``ts`` (so a later re-notification of a
+    resumed agent wins), and ``count`` is the total number of notifications
+    observed for that task-id (a resumed agent notifies more than once).
+    '''
+    by_task: dict[str, list[_Notification]] = {}
+
+    def _absorb(path: Path) -> None:
+        for note in _tail_read_notifications(path):
+            if note.task_id:
+                by_task.setdefault(note.task_id, []).append(note)
+
+    if session_jsonl.is_file():
+        _absorb(session_jsonl)
+    if subagents_dir.is_dir():
+        try:
+            for jsonl in subagents_dir.glob('agent-*.jsonl'):
+                _absorb(jsonl)
+        except OSError:
+            pass
+
+    result: dict[str, _NotifLookup] = {}
+    for task_id, notes in by_task.items():
+        latest = max(notes, key=lambda n: n.ts)
+        result[task_id] = _NotifLookup(status=latest.status, ts=latest.ts, notif_count=len(notes))
+    return result
+
+
 def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float]:
     """Parse one agent-*.jsonl transcript into the subagent metric tuple.
 
@@ -60,15 +243,6 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     end_ts       = 0.0
     model        = ''
     last_activity: tuple[str, str, dict[str, object]] = ('', '', {})
-    # Shape of the most recent assistant+usage line, used for the terminal-
-    # text Done fallback after the loop (see below). Overwritten each line so
-    # only the LAST assistant message decides — interstitial null-stop text
-    # lines mid-stream are superseded by whatever assistant line follows.
-    last_stop:     str | None = None
-    last_has_tool             = False
-    last_has_text             = False
-    last_ts                   = 0.0
-    last_content: list[str]   = []  # content from the final terminal-state line
     # Activity is scoped to the FINAL message: block memory accumulates across
     # the streamed writes of one message id and resets when the id changes, so
     # a message's later tool_use/text writes are observed — its first streamed
@@ -106,9 +280,12 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
                 # end_ts, and a later NON-terminal line clears it — a subagent
                 # can be resumed after its turn ends (SendMessage to a warm
                 # agent), and the stale end_ts would render a working agent as
-                # Done. Done therefore means the transcript currently ENDS in
-                # an ended turn; a resumed agent that finishes again goes Done
-                # at the later time via a new end_turn or a post-loop fallback.
+                # Done. This end_turn-derived end_ts is a real API field, not
+                # prose pattern-matching, and is kept for callers that still
+                # consult parse_transcript directly (e.g. info/workflows.py);
+                # RunningSubagent.end_ts is always overwritten from the
+                # authoritative <task-notification> map instead — see
+                # _collect_task_notifications above.
                 try:
                     stop   = msg.get('stop_reason')
                     ts_raw = d.get('timestamp', '')
@@ -117,14 +294,6 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
                         end_ts = line_ts
                     elif stop != 'end_turn':
                         end_ts = 0.0
-                    # Record this line's shape for the post-loop fallback.
-                    # Runs pre-dedup so the final full write of a streamed
-                    # message is always observed even if its id was seen.
-                    cont = msg.get('content') or []
-                    last_has_tool = any(isinstance(b, dict) and b.get('type') == 'tool_use' for b in cont)
-                    last_has_text = any(isinstance(b, dict) and b.get('type') == 'text'     for b in cont)
-                    last_stop, last_ts = stop, line_ts
-                    last_content = cont
                 except (ValueError, TypeError, AttributeError):
                     pass
                 if not mid:
@@ -196,22 +365,17 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     # is a tool_use (or it is mid-streaming), so this cannot fire once work
     # is genuinely done. Only the last line is considered, so interstitial
     # null-stop text mid-stream never triggers it.
-    if end_ts == 0.0 and last_ts and last_has_text and not last_has_tool and last_stop != 'tool_use':
-        end_ts = last_ts
-    # Structured-output done detection. Workflow agents finish by calling
-    # StructuredOutput as their terminal action. The final assistant line may
-    # carry stop_reason: "tool_use" OR stop_reason: null (a streamed write whose
-    # stop never got finalized on disk) — both mean done. The StructuredOutput
-    # call IS the completion marker; a later retry (schema mismatch) would append
-    # further assistant lines, so only a truly terminal call reaches here.
-    if end_ts == 0.0 and last_ts and last_has_tool and last_stop in ('tool_use', None):
-        # Check if the only tool_use in the final message is StructuredOutput.
-        # This is a completion signal, not an intermediate tool call.
-        for item in last_content:
-            if isinstance(item, dict) and item.get('type') == 'tool_use':
-                if item.get('name') == 'StructuredOutput':
-                    end_ts = last_ts
-                    break
+    # NOTE: this used to also infer "done" from prose (a terminal-looking text
+    # block with no trailing tool_use) and from a StructuredOutput tool_use as
+    # the final action. Both were deleted: prose/heuristic completion caused a
+    # confirmed false positive (an agent narrating "still waiting for the
+    # actual completion notification..." was marked done while still alive).
+    # The authoritative signal is now the <task-notification> record scanned
+    # in RunningSubagents.from_session — see _collect_task_notifications
+    # below. This function's end_ts remains end_turn-only (a real API field,
+    # not prose pattern-matching) for callers that still consult it (e.g.
+    # info/workflows.py), but RunningSubagent.end_ts is overwritten from the
+    # notification map, never from this heuristic.
     return billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts
 
 
@@ -355,6 +519,7 @@ class RunningSubagent:
         'agent_type', 'description', 'billed_in', 'output', 'first_timestamp',
         'model', 'cache_read_in', 'total_input', 'last_activity', 'end_ts',
         'mtime', 'agent_id', 'jsonl_path', 'parent_id', 'spawn_depth',
+        'status', 'run_count', 'is_fork', 'resumed',
     )
 
     def __init__(
@@ -368,12 +533,16 @@ class RunningSubagent:
         cache_read_in:   int = 0,
         total_input:     int = 0,
         last_activity:   tuple[str, str, dict[str, object]] | None = None,
-        end_ts:          float = 0.0,  # end_turn ts, else terminal-text ts; Done iff > 0
+        end_ts:          float = 0.0,  # authoritative <task-notification> ts; 0 while running
         mtime:           float = 0.0,  # transcript last-modified time (st_mtime)
         agent_id:        str = '',     # transcript filename stem; matches run-JSON agentId (workflow cohort)
         jsonl_path:      str = '',     # absolute path to this agent's transcript (for tool-count rescan)
         parent_id:       str = '',     # meta.json parentAgentId — spawner's agent id ('' → top-level)
         spawn_depth:     int = 0,      # meta.json spawnDepth (1 = spawned by main; 0 when absent)
+        status:          str = 'running',  # "running"|"completed"|"killed"|"failed"|"stopped"
+        run_count:       int = 0,      # <task-notification> occurrences seen for this agent; 0 while never finished
+        is_fork:         bool = False,  # meta.json "isFork" (equivalently agentType == "fork")
+        resumed:         bool = False,  # a later notification/activity postdates the last-seen notification
     ) -> None:
         self.agent_type      = agent_type
         self.description      = description
@@ -390,6 +559,10 @@ class RunningSubagent:
         self.jsonl_path       = jsonl_path
         self.parent_id        = parent_id
         self.spawn_depth      = spawn_depth
+        self.status           = status
+        self.run_count        = run_count
+        self.is_fork          = is_fork
+        self.resumed          = resumed
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RunningSubagent):
@@ -402,9 +575,15 @@ class RunningSubagent:
             self.first_timestamp, self.model, self.cache_read_in, self.total_input,
             self.last_activity, self.end_ts, self.mtime, self.agent_id,
             self.jsonl_path, self.parent_id, self.spawn_depth,
+            self.status, self.run_count, self.is_fork, self.resumed,
         )
 
     __hash__ = None  # type: ignore[assignment]
+
+    @property
+    def is_done(self) -> bool:
+        '''Derived, not stored: true once an authoritative end_ts is set.'''
+        return self.end_ts > 0
 
     def __repr__(self) -> str:
         return (f'RunningSubagent(agent_type={self.agent_type!r}, description={self.description!r}, '
@@ -412,7 +591,9 @@ class RunningSubagent:
                 f'model={self.model!r}, cache_read_in={self.cache_read_in}, total_input={self.total_input}, '
                 f'last_activity={self.last_activity!r}, end_ts={self.end_ts}, mtime={self.mtime}, '
                 f'agent_id={self.agent_id!r}, jsonl_path={self.jsonl_path!r}, '
-                f'parent_id={self.parent_id!r}, spawn_depth={self.spawn_depth})')
+                f'parent_id={self.parent_id!r}, spawn_depth={self.spawn_depth}, '
+                f'status={self.status!r}, run_count={self.run_count}, is_fork={self.is_fork}, '
+                f'resumed={self.resumed})')
 
 
 class RunningSubagents:
@@ -454,9 +635,16 @@ class RunningSubagents:
         # Unix; on Windows paths start with a drive letter (no leading '-'
         # in CC's dir name) so the f-string prefix gave a wrong path.
         project_slug = re.sub(r'[^A-Za-z0-9]', '-', project_dir)
-        subagents_dir = CLAUDE_DIR / 'projects' / project_slug / session_id / 'subagents'
+        session_dir = CLAUDE_DIR / 'projects' / project_slug / session_id
+        subagents_dir = session_dir / 'subagents'
         if not subagents_dir.is_dir():
             return cls()
+        # Authoritative completion source (never prose): scan the top-level
+        # session .jsonl AND every subagents/agent-*.jsonl for structured
+        # <task-notification> records, keyed by task-id == agent-<id>.jsonl
+        # filename stem minus the "agent-" prefix. See _collect_task_notifications.
+        session_jsonl = CLAUDE_DIR / 'projects' / project_slug / f'{session_id}.jsonl'
+        notif_map = _collect_task_notifications(session_jsonl, subagents_dir)
         subagents: list[RunningSubagent] = []
         try:
             for meta in subagents_dir.glob('*.meta.json'):
@@ -464,6 +652,8 @@ class RunningSubagents:
                 description = ''
                 parent_id = ''
                 spawn_depth = 0
+                is_fork = False
+                meta_model = ''
                 try:
                     data = json.loads(meta.read_text())
                     agent_type = _sanitize(data.get('agentType', '') or '')
@@ -474,6 +664,8 @@ class RunningSubagents:
                     parent_id = str(data.get('parentAgentId', '') or '')
                     raw_depth = data.get('spawnDepth', 0)
                     spawn_depth = int(raw_depth) if isinstance(raw_depth, (int, float)) else 0
+                    is_fork = bool(data.get('isFork', False)) or agent_type == 'fork'
+                    meta_model = str(data.get('model', '') or '')
                 except Exception:
                     continue
 
@@ -485,7 +677,32 @@ class RunningSubagents:
                 except OSError:
                     continue
 
-                billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts = cls._parse_transcript(jsonl)
+                billed_in, cache_read_in, output, first_ts, model, last_activity, _ = cls._parse_transcript(jsonl)
+                if meta_model:
+                    model = meta_model
+
+                # Authoritative status: an unrecognised or missing notification
+                # NEVER means done — only a known terminal status, from the
+                # LATEST notification seen, does. run_count/resumed surface the
+                # same-task-id-notifies-more-than-once resume case (bias rule
+                # + resume detection — never inferred from transcript prose).
+                task_id = jsonl.stem.removeprefix('agent-')
+                lookup = notif_map.get(task_id) or notif_map.get(jsonl.stem)
+                status    = 'running'
+                run_count = 0
+                notif_ts  = 0.0
+                if lookup is not None:
+                    run_count = lookup.notif_count
+                    notif_ts  = lookup.ts
+                    raw_status = lookup.status
+                    if raw_status in _TERMINAL_STATUSES:
+                        status = raw_status
+                # Resumed: more than one notification seen, or the transcript
+                # kept being written after the last-seen notification (a
+                # resumed agent appends more turns to the same jsonl).
+                resumed = run_count > 1 or (notif_ts > 0 and mtime > notif_ts)
+                end_ts = notif_ts if status != 'running' else 0.0
+
                 subagents.append(RunningSubagent(
                     agent_type      = agent_type,
                     description     = description,
@@ -502,6 +719,10 @@ class RunningSubagents:
                     jsonl_path      = str(jsonl),
                     parent_id       = parent_id,
                     spawn_depth     = spawn_depth,
+                    status          = status,
+                    run_count       = run_count,
+                    is_fork         = is_fork,
+                    resumed         = resumed,
                 ))
         except OSError:
             pass

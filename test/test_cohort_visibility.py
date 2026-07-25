@@ -5,14 +5,37 @@ fast and deterministic.  The mtime and end_ts fields are set explicitly to
 simulate various age/done combinations.
 
 One test (test_streaming_duplicate_id_end_turn_reaches_done_state) is an
-end-to-end exception: it parses a real fixture transcript through from_session
-so the Done-state (end_ts > 0) it asserts is produced by the production
-_parse_transcript path, not hand-set.
+end-to-end exception: it parses a real fixture transcript (plus a session-level
+<task-notification> record — the only authoritative completion signal now
+that the terminal-text/StructuredOutput heuristics are deleted) through
+from_session so the Done-state (end_ts > 0) it asserts is produced by the
+production notification-scanning path, not hand-set.
+
+Another end-to-end exception (test_tree_states_scenario_shows_all_six_states)
+renders ops/demo.py's 'subagent-tree-states' scenario through the real
+statusline subprocess. That scenario sits at exactly SUBAGENT_DISPLAY_CAP with
+zero headroom by design (see the comment on the scenario in ops/demo.py) —
+a 7th row previously bumped it over the cap and the mtime-based trim silently
+evicted the killed row, so the ✗ marker rendered nowhere while pytest stayed
+green. This guard makes that failure mode loud again.
 '''
 import json
+import re
+import sys
+import tempfile
 from pathlib import Path
 
+from yas.constants import (
+    GLYPH_SUBAGENT_DONE,
+    GLYPH_SUBAGENT_ENDED,
+    GLYPH_SUBAGENT_FAILED,
+    GLYPH_SUBAGENT_RESUME,
+    SUBAGENT_DISPLAY_CAP,
+    subagent_marker_glyph,
+)
 from yas.info.subagents import RunningSubagent, RunningSubagents
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'ops'))
 
 
 NOW = 1_000_000.0  # arbitrary fixed epoch
@@ -243,6 +266,24 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
         _streaming_partial_line('msg_same', timestamp='2026-05-22T17:50:00.000Z')
         + _end_turn_line('msg_same', timestamp='2026-05-22T17:50:30.000Z'),
     )
+    # Authoritative completion signal: a <task-notification> in the top-level
+    # session .jsonl, keyed by task-id == the agent-*.jsonl filename stem
+    # (minus the "agent-" prefix).
+    session_dir = tmp_home / '.claude' / 'projects' / f'-{_PROJECT_SLUG}'
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / f'{_SESSION_ID}.jsonl').write_text(json.dumps({
+        'type': 'queue-operation',
+        'operation': 'enqueue',
+        'timestamp': '2026-05-22T17:50:30.000Z',
+        'content': (
+            '<task-notification>\n'
+            '<task-id>dup</task-id>\n'
+            '<tool-use-id>toolu_dup</tool-use-id>\n'
+            '<status>completed</status>\n'
+            '<summary>done</summary>\n'
+            '</task-notification>'
+        ),
+    }) + '\n')
 
     parsed = RunningSubagents.from_session(_SESSION_ID, _PROJECT_DIR)
     assert len(parsed.subagents) == 1
@@ -276,3 +317,88 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
     # Sanity: it retired strictly before the 60 s janitor horizon, proving it
     # was treated as Done rather than as an active/dirty agent.
     assert (GRACE + 1) < JANITOR
+
+
+# ---------------------------------------------------------------------------
+# Regression guard: the six-state tree-mode demo scenario must render every
+# lifecycle marker. The scenario is pinned at exactly SUBAGENT_DISPLAY_CAP
+# (root + 5 children); a stray extra row silently trims the oldest-mtime row
+# off the bottom instead of raising, which is exactly the failure this test
+# exists to catch.
+# ---------------------------------------------------------------------------
+
+def _find_tree_states_scenario():
+    '''Locate the 'subagent-tree-states' ScenarioConfig from ops/demo.py.'''
+    import demo as ops_demo  # ops/demo.py, reached via the sys.path.insert above
+    for cfg in ops_demo.SCENARIOS:
+        if cfg.name == 'subagent-tree-states':
+            return ops_demo, cfg
+    raise AssertionError("'subagent-tree-states' scenario not found in ops/demo.py SCENARIOS")
+
+
+def _render_tree_states_scenario(tmp_path: Path, cfg_override=None) -> str:
+    '''Render the tree-states scenario (or an override copy of it) to plain text
+    via the same hermetic path make demo/img uses, and return the raw output.'''
+    import dataclasses
+    import os
+
+    ops_demo, cfg = _find_tree_states_scenario()
+    if cfg_override is not None:
+        cfg = dataclasses.replace(cfg, subagents=cfg_override)
+
+    fixture = json.loads(ops_demo.FIXTURE_PATH.read_text())
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    session_id = fixture['session_id']
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        home = Path(raw_tmp)
+        ops_demo.build_synthetic_env(home, session_id)
+        env = os.environ.copy()
+        env['HOME'] = str(home)
+        env['CLAUDE_CONFIG_DIR'] = str(home / '.claude')
+        ops_demo.render_scenario(env, fixture, home, session_id, cfg, out_dir)
+    return (out_dir / f'{cfg.name}.txt').read_text()
+
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def test_tree_states_scenario_shows_all_six_states(tmp_path: Path) -> None:
+    '''All six subagent lifecycle markers must be present in the rendered
+    scenario: the root's plain running row (no terminal marker), ✓ completed,
+    ✗ killed, ✗ stopped, ! failed, and ↺ resumed with its ×2 suffix. This
+    scenario is pinned at exactly SUBAGENT_DISPLAY_CAP with zero headroom — if
+    this regresses, the display cap's mtime-based trim is the prime suspect.
+    '''
+    with tempfile.TemporaryDirectory() as td:
+        out = _render_tree_states_scenario(Path(td))
+    plain = _ANSI_RE.sub('', out)
+
+    # Tree mode reserves a fixed-width marker column: a terminal-state glyph
+    # for finished rows, two blank spaces for the still-running root — so the
+    # root's own row is identified by *absence* of every terminal glyph on it,
+    # not by a glyph of its own (subagent_marker_glyph('running') == '').
+    root_line = next(
+        (line for line in plain.splitlines() if 'Coordinate four-state lifecycle demo' in line),
+        None,
+    )
+    terminal_glyphs = (GLYPH_SUBAGENT_DONE, GLYPH_SUBAGENT_ENDED, GLYPH_SUBAGENT_FAILED, GLYPH_SUBAGENT_RESUME)
+
+    checks = {
+        'running row (root, unmarked)': root_line is not None and not any(g in root_line for g in terminal_glyphs),
+        'completed marker (✓)':      subagent_marker_glyph('completed') == GLYPH_SUBAGENT_DONE and GLYPH_SUBAGENT_DONE in plain,
+        'killed marker (✗)':         subagent_marker_glyph('killed') == GLYPH_SUBAGENT_ENDED and GLYPH_SUBAGENT_ENDED in plain,
+        'stopped marker (✗)':        subagent_marker_glyph('stopped') == GLYPH_SUBAGENT_ENDED and plain.count(GLYPH_SUBAGENT_ENDED) >= 2,
+        'failed marker (!)':         subagent_marker_glyph('failed') == GLYPH_SUBAGENT_FAILED and GLYPH_SUBAGENT_FAILED in plain,
+        'resumed marker (↺) with ×2': GLYPH_SUBAGENT_RESUME in plain and '×2' in plain,
+    }
+    missing = [name for name, present in checks.items() if not present]
+    assert not missing, (
+        f'subagent-tree-states scenario is missing: {missing}. '
+        f'This scenario is pinned at exactly SUBAGENT_DISPLAY_CAP={SUBAGENT_DISPLAY_CAP} '
+        f'rows (root + 5 children) with zero headroom; the mtime-based cap trim '
+        f'silently evicts the oldest row when the cohort exceeds the cap, which is '
+        f'the most likely cause if a marker went missing here without a test '
+        f'failure elsewhere. Check for an accidentally-added 7th subagent row or '
+        f'a change to the cap/trim logic.\n--- rendered output ---\n{plain}'
+    )

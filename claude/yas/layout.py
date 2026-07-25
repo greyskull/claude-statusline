@@ -18,6 +18,9 @@ from yas.constants import (
     RESET,
     SUBAGENT_DESC_MIN_WIDTH,
     SUBAGENT_DISPLAY_CAP,
+    SUBAGENT_RETENTION_SECONDS,
+    subagent_is_terminal,
+    subagent_status,
     SUBAGENT_TREE_PLAN_WIDTH,
     TOKENS_COST_MIN_WIDTH,
     TWO_COL_SUBAGENT_WIDTH,
@@ -156,6 +159,78 @@ def zip_columns(
     return rows
 
 
+def select_visible_cohort(
+    visible_subs: list[RunningSubagent],
+    cap: int,
+    *,
+    tree: bool,
+    now: float | None = None,
+) -> list[RunningSubagent]:
+    """Apply retention, cascade-clear, then the display cap to a raw cohort.
+
+    Retention: a terminal (non-running) row drops outright once
+    ``SUBAGENT_RETENTION_SECONDS`` have passed since its ``end_ts`` — a
+    maximum, not a guarantee; the cap below can still evict it sooner.
+
+    Cascade clear: once a parent reaches any terminal status, every
+    descendant still showing 'running' is forced to the parent's terminal
+    status (and end_ts) too. This is sound by construction — a notification
+    only fires once an agent has no live children, so a 'running' descendant
+    at that point is a missed notification, not live work — and it prevents
+    a stale child from pinning a finished parent's cohort open forever.
+
+    Eviction: tree mode defers to ``cap_tree_groups`` (whole-group eviction,
+    oldest-completion-first, never separating a live parent from a running
+    child); flat mode keeps the existing trailing-slice cap. Both keep every
+    running row before evicting any terminal one, and terminal rows are
+    always evicted oldest-``end_ts``-first regardless of which terminal
+    state they ended in.
+    """
+    if now is None:
+        now = time.time()
+
+    visible_subs = [
+        sub for sub in visible_subs
+        if not subagent_is_terminal(subagent_status(sub))
+        or now - sub.end_ts <= SUBAGENT_RETENTION_SECONDS
+    ]
+
+    by_id: dict[str, RunningSubagent] = {}
+    for sub in visible_subs:
+        if sub.agent_id:
+            by_id[sub.agent_id] = sub
+            by_id[sub.agent_id.removeprefix('agent-')] = sub
+
+    def terminal_ancestor(sub: RunningSubagent) -> RunningSubagent | None:
+        seen: set[int] = set()
+        parent = by_id.get(sub.parent_id) if sub.parent_id else None
+        while parent is not None and id(parent) not in seen:
+            if subagent_is_terminal(subagent_status(parent)):
+                return parent
+            seen.add(id(parent))
+            parent = by_id.get(parent.parent_id) if parent.parent_id else None
+        return None
+
+    for sub in visible_subs:
+        if subagent_is_terminal(subagent_status(sub)):
+            continue
+        ancestor = terminal_ancestor(sub)
+        if ancestor is None:
+            continue
+        try:
+            sub.status  = subagent_status(ancestor)
+            sub.end_ts  = ancestor.end_ts
+        except AttributeError:
+            pass  # `.status` isn't a slot on this build yet — nothing to cascade.
+
+    if tree:
+        # Tree mode: cap by whole parent+descendant group so a still-running
+        # parent can't be evicted while a finished child (later timestamp)
+        # lingers and fills the flat cap's slice.
+        return cap_tree_groups(visible_subs, cap)
+    return visible_subs[-cap:]
+
+
 def subagent_cells(
     visible_subs: list[RunningSubagent],
     tree: bool,
@@ -194,7 +269,10 @@ def tree_columns(cells: list[tuple[RunningSubagent, str]], width: int) -> tuple[
     desc_col = 0
     for sub, prefix in cells:
         prefix_w = _visible_width(prefix)
-        front_w  = 5 + 1 + _visible_width(sub.agent_type or '?')  # dur(5) + ' ' + type
+        # +2: reserved marker column ('✓ ' when finished, '  ' otherwise) that
+        # `subagent_row` inserts between the prefix and the duration in tree
+        # mode — keep in lockstep with its own front_w formula.
+        front_w  = 5 + 1 + _visible_width(sub.agent_type or '?') + 2  # dur(5) + ' ' + type + marker(2)
         desc_col = max(desc_col, prefix_w + front_w + 1)  # +1: leading space of ' · '
 
     # `subagent_row`'s anchored path computes desc_max = stats_col - desc_col - 3
@@ -369,13 +447,7 @@ def build_narrow(
     subagents = view.subagents
     last_prompt_ts = read_last_prompt_ts(session.session_id)
     visible_subs   = subagents.visible(time.time(), last_prompt_ts)
-    if view.cfg.subagent_tree:
-        # Tree mode: cap by whole parent+descendant group so a still-running
-        # parent can't be evicted while a finished child (later timestamp)
-        # lingers and fills the flat cap's slice.
-        visible_subs = cap_tree_groups(visible_subs, SUBAGENT_DISPLAY_CAP)
-    else:
-        visible_subs = visible_subs[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs = select_visible_cohort(visible_subs, SUBAGENT_DISPLAY_CAP, tree=view.cfg.subagent_tree)
     spec = LayoutSpec(width=width, fill=fill, session_id=session.session_id)
     if pill_pct:
         rows: list[RowSpec] = [
@@ -467,13 +539,7 @@ def build_medium(
     subagents = view.subagents
     last_prompt_ts = read_last_prompt_ts(session.session_id)
     visible_subs   = subagents.visible(time.time(), last_prompt_ts)
-    if view.cfg.subagent_tree:
-        # Tree mode: cap by whole parent+descendant group so a still-running
-        # parent can't be evicted while a finished child (later timestamp)
-        # lingers and fills the flat cap's slice.
-        visible_subs = cap_tree_groups(visible_subs, SUBAGENT_DISPLAY_CAP)
-    else:
-        visible_subs = visible_subs[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs = select_visible_cohort(visible_subs, SUBAGENT_DISPLAY_CAP, tree=view.cfg.subagent_tree)
     rows: list[RowSpec] = [top_row, content_row, sep_row]
     if tasks.is_visible():
         for line in r.task_row(tasks, width - 4):
@@ -974,13 +1040,7 @@ def build_wide(
 
     last_prompt_ts = read_last_prompt_ts(session.session_id)
     visible_subs   = subagents.visible(time.time(), last_prompt_ts)
-    if view.cfg.subagent_tree:
-        # Tree mode: cap by whole parent+descendant group so a still-running
-        # parent can't be evicted while a finished child (later timestamp)
-        # lingers and fills the flat cap's slice.
-        visible_subs = cap_tree_groups(visible_subs, SUBAGENT_DISPLAY_CAP)
-    else:
-        visible_subs = visible_subs[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs = select_visible_cohort(visible_subs, SUBAGENT_DISPLAY_CAP, tree=view.cfg.subagent_tree)
 
     # Side-by-side composition (D2/D3/D5/D7): when the wide layout has BOTH a
     # visible checklist AND >=1 visible subagent, lay the checklist (left) and

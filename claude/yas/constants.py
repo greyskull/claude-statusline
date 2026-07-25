@@ -92,10 +92,12 @@ class BarChars:
     EMPTY  = '░'
 
 
-RESET  = '\033[0m'
-BOLD   = '\033[1m'
-FAINT  = '\033[2m'
-ITALIC = '\033[3m'
+RESET   = '\033[0m'
+BOLD    = '\033[1m'
+FAINT   = '\033[2m'
+ITALIC  = '\033[3m'
+STRIKE  = '\033[9m'   # SGR strikethrough on  (finished-subagent task description)
+UNSTRIKE = '\033[29m'  # SGR strikethrough off
 
 # Tools excluded from the per-tool tool_use counts row: todo/UI-plumbing tools,
 # not "work". `Task` is deliberately NOT in this set — it represents a subagent
@@ -138,8 +140,11 @@ GLYPH_BURN_FAST     = '\uef76' # nf-cod-zap         (shown when the burn rate is
 GLYPH_BURN_SLOW     = '\uf490' # nf-oct-flame       (shown when the burn rate is _not_ too fast)
 GLYPH_FOLDER        = '\uef85' # nf-custom folder   (path row)
 GLYPH_SUBAGENT      = '\uf135' # nf-fa-tasks        (subagent list)
-GLYPH_SUBAGENT_ROW  = '\u25b6' # U+25B6             (per-row Running Subagent marker)
-GLYPH_SUBAGENT_DONE = '\u2713' # U+2713             (Done subagent row marker)
+GLYPH_SUBAGENT_ROW    = '\u25b6' # U+25B6             (per-row Running Subagent marker)
+GLYPH_SUBAGENT_DONE   = '\u2713' # U+2713             (Completed subagent row marker)
+GLYPH_SUBAGENT_ENDED  = '\u2717' # U+2717             (Killed/Stopped subagent row marker \u2014 "ended early by intent")
+GLYPH_SUBAGENT_FAILED = '!' # U+0021 '!'         (Failed subagent row marker \u2014 ended by error)
+GLYPH_SUBAGENT_RESUME = '\u21ba' # U+21BA             (Resumed-running subagent row marker, replaces GLYPH_SUBAGENT_ROW)
 GLYPH_PLUGINS       = '\uf1e6' # nf-fa-plug         (plugins label)
 GLYPH_HELPER        = '\uf4cd' # nf-mdi-star_circle (5h rate-limit helper)
 ICON_TOK_RATE       = '\U000f18a7'  # nf-md gauge         (t/m rate label)
@@ -268,6 +273,8 @@ ASCII_GLYPHS: dict[str, str] = {
     WF_PHASE_DOT:       '.',
     GLYPH_SUBAGENT_ROW: '>',
     GLYPH_SUBAGENT_DONE:'v',
+    GLYPH_SUBAGENT_ENDED: 'x',
+    GLYPH_SUBAGENT_RESUME: '>',
     GLYPH_WF_HEADER:    '>',
     GLYPH_WF_CURRENT:   '>',
     GLYPH_CONFIG_WARN:  '!',
@@ -397,6 +404,12 @@ WORKFLOW_RUN_CAP          = 2
 # older overflow. Matches WORKFLOW_AGENT_CAP so both sections cap identically.
 SUBAGENT_DISPLAY_CAP      = 6
 
+# A terminal (completed/killed/stopped/failed) subagent row is retained for at
+# most this many seconds after its end_ts before it drops from the cohort
+# entirely, independent of the display-cap eviction below (see
+# layout.select_visible_cohort).
+SUBAGENT_RETENTION_SECONDS = 120
+
 # Tree-single rows: the minimum visible description-column width to guarantee
 # where terminal width allows (p90 of mined real subagent titles is 45 chars —
 # see .scratch/session-analysis.md). Below this the description still
@@ -407,6 +420,38 @@ SUBAGENT_DESC_MIN_WIDTH        = 45
 # activity snippet in tree-single rows, once the model label is padded to the
 # cohort's widest model width (see renderer.Renderer.subagent_row).
 SUBAGENT_STATS_ACTIVITY_GAP    = 2
+
+# Four-state subagent lifecycle: 'running' (live), 'completed' (normal finish),
+# 'killed'/'stopped' (ended early by intent — same glyph, see
+# subagent_marker_glyph), 'failed' (ended by error). `RunningSubagent.status`
+# is the source of truth once populated; these helpers fall back to the
+# original end_ts-only binary (running/completed) for any object that doesn't
+# carry the attribute yet, so callers never need an isinstance/hasattr guard.
+def subagent_status(sub: object) -> str:
+    """Resolve a subagent's lifecycle state ('running'/'completed'/'killed'/
+    'stopped'/'failed'), defaulting to the end_ts binary when `.status` is
+    absent."""
+    status = getattr(sub, 'status', None)
+    if status:
+        return str(status)
+    return 'completed' if getattr(sub, 'end_ts', 0.0) > 0 else 'running'
+
+
+def subagent_is_terminal(status: str) -> bool:
+    """True for any non-running lifecycle state."""
+    return status != 'running'
+
+
+def subagent_marker_glyph(status: str) -> str:
+    """The single-glyph row marker for a lifecycle state ('' while running —
+    the caller supplies the live ▶/↺ marker itself since that also depends on
+    resume state)."""
+    return {
+        'completed': GLYPH_SUBAGENT_DONE,
+        'killed':    GLYPH_SUBAGENT_ENDED,
+        'stopped':   GLYPH_SUBAGENT_ENDED,
+        'failed':    GLYPH_SUBAGENT_FAILED,
+    }.get(status, '')
 
 # Maximum lines to scan from the head of a transcript when searching for a
 # /clear marker. Keeps the lookup O(1) even on large transcripts.

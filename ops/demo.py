@@ -25,6 +25,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_PATH = REPO_ROOT / 'ops' / 'session-info-example.json'
 STATUSLINE_SCRIPT = REPO_ROOT / 'claude' / 'statusline_command.py'
 
+# Mirrors yas.info.subagents._TERMINAL_STATUSES: only these <task-notification>
+# status values are ever authoritative for "finished" — used by write_subagents
+# to decide whether a synthesised notification pins the transcript mtime idle
+# (terminal) or leaves it fresh (a resumed agent's non-terminal latest notif).
+_TERMINAL_STATUSES_DEMO = frozenset(('completed', 'killed', 'failed', 'stopped'))
+
 
 SKILLS_PROGRESSION: tuple[list[str], ...] = (
     [],
@@ -185,7 +191,7 @@ def write_subagents(
     age_seconds:  float = 0.0,
     mtime_age:    float = 0.0,
 ) -> None:
-    """Each subagent entry: (agentType, description, billed_in, output_tokens[, action[, done_seconds_ago[, parent]]]).
+    """Each subagent entry: (agentType, description, billed_in, output_tokens[, action[, done_seconds_ago[, parent[, notifications]]]]).
 
     parent (7th element, int > 0) is the 1-based index of this agent's spawner
     within `subagents`; it writes parentAgentId/spawnDepth into the meta.json so
@@ -204,6 +210,19 @@ def write_subagents(
     mtime to match.
     mtime_age shifts the mtime of every non-Done agent's jsonl into the past by
     that many seconds (used to simulate idle/dirty cohort agents).
+
+    notifications (8th element) is the authoritative four-state lifecycle
+    signal: a chronological list of ``(status, seconds_ago)`` pairs, each
+    written as a ``<task-notification>`` record (RunningSubagents.from_session
+    ignores done_seconds_ago/end_turn entirely for status — only these tags
+    decide 'completed'/'killed'/'failed'/'stopped' vs 'running'). The LATEST
+    pair's status wins for ``RunningSubagent.status``; an empty status string
+    in the latest pair keeps the agent 'running' even with earlier terminal
+    pairs, which is how a resumed-and-still-live agent is synthesised (see
+    RESUME below). ``len(notifications) > 1`` (or a growing mtime past the
+    last notification) sets ``resumed``/``run_count`` accordingly. When the
+    latest status is terminal, the file mtime is pinned to that pair's
+    timestamp (frozen/idle); otherwise mtime is left fresh (still active).
     """
     # Match Claude Code's projects/ dir convention (cross-platform).
     # See statusline_command.py:RunningSubagents.from_session for full notes.
@@ -227,6 +246,7 @@ def write_subagents(
         done_secs     = float(done_secs_raw) if isinstance(done_secs_raw, (int, float)) and done_secs_raw > 0 else None
         parent_raw    = row[6] if len(row) > 6 else None
         parent_idx    = int(parent_raw) if isinstance(parent_raw, (int, float)) and parent_raw > 0 else None
+        notifications = row[7] if len(row) > 7 else None
         agent_type    = str(agent_type_raw)
         description   = str(description_raw)
         billed_in     = int(billed_in_raw) if isinstance(billed_in_raw, (int, float)) else 0
@@ -296,6 +316,44 @@ def write_subagents(
         else:
             file_mtime = now - mtime_age
             os.utime(jsonl, (file_mtime, file_mtime))
+
+        if isinstance(notifications, list) and notifications:
+            # Authoritative four-state signal: <task-notification> records,
+            # keyed by task-id == this transcript's filename stem (no
+            # "agent-" prefix on demo transcripts, so task_id == `name`).
+            # _collect_task_notifications only globs subagents/agent-*.jsonl
+            # (demo transcripts aren't agent-prefixed) so these are written to
+            # the top-level session transcript instead, which it always scans
+            # unconditionally. See RunningSubagents.from_session.
+            lines = []
+            last_status = ''
+            last_ts = now
+            for status_str, secs_ago in notifications:
+                notif_ts = now - float(secs_ago)
+                last_status, last_ts = str(status_str), notif_ts
+                content = (
+                    f'<task-notification><task-id>{name}</task-id>'
+                    f'<tool-use-id>tool_{name}</tool-use-id>'
+                    f'<status>{status_str}</status></task-notification>'
+                )
+                lines.append(json.dumps({
+                    'type':      'user',
+                    'timestamp': datetime.fromtimestamp(notif_ts).astimezone().isoformat(),
+                    'message':   {'role': 'user', 'content': content},
+                }))
+            session_jsonl = claude_dir / 'projects' / project_slug / f'{session_id}.jsonl'
+            session_jsonl.parent.mkdir(parents=True, exist_ok=True)
+            prior = session_jsonl.read_text() if session_jsonl.is_file() else ''
+            session_jsonl.write_text(prior + '\n'.join(lines) + '\n')
+            if last_status in _TERMINAL_STATUSES_DEMO:
+                # Terminal: transcript goes idle right at the last notification.
+                os.utime(jsonl, (last_ts, last_ts))
+            else:
+                # Non-terminal latest status (e.g. '') keeps the agent
+                # 'running' per from_session's TERMINAL_STATUSES gate even
+                # after an earlier terminal notification — the resumed-and-
+                # still-live case. Transcript stays fresh (still being written).
+                os.utime(jsonl, (now, now))
 
 
 def write_workflows(
@@ -1025,6 +1083,42 @@ SCENARIOS: list[ScenarioConfig] = [
         five_hour_pct = 30.0,
         seven_day_pct = 20.0,
         yas_toml    = '[layout]\nsubagent_tree = true\nmax_width = 300\n',
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-states',
+        context_pct = 0.35,
+        # Closes the four-state + resume coverage gap: no other tree-mode
+        # scenario sets a <task-notification> at all, so this is the only
+        # visual-gate coverage for the ✓/✗/!/↺ markers and their strikethrough.
+        # One running root + five children, one per remaining lifecycle
+        # state — sized to land exactly on SUBAGENT_DISPLAY_CAP (6 total rows:
+        # root + 5) so cap_tree_groups's mtime-based trim never has to evict
+        # one of them (a plain "no-notification running" filler child was
+        # dropped from this list on purpose: the root itself already renders
+        # 'running' with no notification, so a duplicate child added nothing
+        # but pushed the group 1 row over the cap and silently ate the killed
+        # row — see .scratch/verifier-four-state-lifecycle.md finding B):
+        #   1. running (root)   (no notification — the pre-existing default)
+        #   2. completed        (✓, dim strikethrough)
+        #   3. killed           (✗, dim strikethrough — "ended early by intent")
+        #   4. stopped          (✗, same glyph as killed)
+        #   5. failed           (!, dim strikethrough — ended by error)
+        #   6. resumed-running  (↺, live styling, ×2 suffix — a single
+        #      non-terminal notification with a growing mtime past it is
+        #      enough to flag `resumed`; run_count stays 1 so the renderer's
+        #      `run_count + 1` reads as "1 completed pass + the current live
+        #      one" = ×2, matching renderer.py:804-806's documented meaning)
+        subagents   = [
+            ('spec-implementer', 'Coordinate four-state lifecycle demo',    120_000, 4_200, ('Bash', {'command': 'echo coordinating'})),
+            ('general-purpose',  'Ported the border elbow math',             22_100,  1_310, None, None, 1, [('completed', 30)]),
+            ('general-purpose',  'Killed mid-way through a runaway grep',    14_700,    640, None, None, 1, [('killed', 45)]),
+            ('general-purpose',  'Stopped after the parent task wrapped up', 9_800,     410, None, None, 1, [('stopped', 20)]),
+            ('general-purpose',  'Crashed applying a malformed patch',       11_200,    380, None, None, 1, [('failed', 15)]),
+            ('general-purpose',  'Re-opened to fix a follow-up review note', 26_500,  1_850, ('Edit', {'file_path': 'render/borders.py'}), None, 1, [('', 5)]),
+        ],
+        five_hour_pct = 28.0,
+        seven_day_pct = 18.0,
+        yas_toml      = '[layout]\nsubagent_tree = true\n',
     ),
     # Five real-cohort tree-mode scenarios mined from production sessions (see
     # .scratch/session-analysis.md) — genuine 6-11-agent fan-outs, not a

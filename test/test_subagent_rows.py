@@ -12,8 +12,10 @@ from yas.config import Config
 
 from yas.constants import (
     GLYPH_REPLYING,
+    STRIKE,
     SUBAGENT_DESC_MIN_WIDTH,
     SUBAGENT_STATS_ACTIVITY_GAP,
+    UNSTRIKE,
 )
 from yas.info import SessionView
 from yas.info.subagents import RunningSubagent
@@ -41,12 +43,19 @@ def _make_sub(
     last_activity: tuple = ('tool_use', 'Bash', {'command': 'pytest -q'}),
     mtime: float | None = None,
     end_ts: float = 0.0,
+    status: str | None = None,
+    run_count: int = 0,
+    resumed: bool = False,
 ) -> RunningSubagent:
     now = time.time()
     if first_timestamp is None:
         first_timestamp = now - 47
     if mtime is None:
         mtime = now - 5
+    if status is None:
+        # Infer the pre-four-state default (end_ts > 0 => finished) so every
+        # existing caller that only sets end_ts keeps behaving as before.
+        status = 'completed' if end_ts > 0 else 'running'
     return RunningSubagent(
         agent_type      = agent_type,
         description     = description,
@@ -59,6 +68,9 @@ def _make_sub(
         total_input     = total_input,
         last_activity   = last_activity,
         end_ts          = end_ts,
+        status          = status,
+        run_count       = run_count,
+        resumed         = resumed,
     )
 
 
@@ -368,6 +380,98 @@ def test_done_two_line_no_marker() -> None:
     plain = strip_ansi(line1)
     assert '▶' not in plain
     assert '✓' not in plain
+
+
+# E2. Four-state lifecycle (completed/killed/stopped/failed) + resume --------
+
+def _make_state_sub(status: str, **kw) -> RunningSubagent:
+    now = time.time()
+    defaults = dict(first_timestamp=now - 120.0, end_ts=now - 30.0, status=status)
+    defaults.update(kw)
+    return _make_sub(**defaults)
+
+
+@pytest.mark.parametrize('status, glyph', [
+    ('completed', '✓'),
+    ('killed', '✗'),
+    ('stopped', '✗'),
+    ('failed', '!'),
+])
+def test_one_line_terminal_state_marker(status: str, glyph: str) -> None:
+    sub = _make_state_sub(status)
+    out = strip_ansi(_one(sub))
+    assert glyph in out
+    assert '▶' not in out
+
+
+def test_one_line_killed_and_stopped_share_glyph() -> None:
+    killed  = strip_ansi(_one(_make_state_sub('killed')))
+    stopped = strip_ansi(_one(_make_state_sub('stopped')))
+    # Same marker glyph for both — "ended early by intent".
+    assert '✗' in killed and '✗' in stopped
+
+
+def test_one_line_failed_marker_dim_styling() -> None:
+    line = _one(_make_state_sub('failed'))
+    assert _r.CTX_DIM in line
+
+
+@pytest.mark.parametrize('status', ['completed', 'killed', 'stopped', 'failed'])
+def test_two_line_terminal_marker_in_tree_column(status: str) -> None:
+    # Tree mode reserves a fixed marker column (tree_desc_col set) between
+    # the branch prefix and the duration; every terminal state renders its
+    # glyph there instead of a blank.
+    sub = _make_state_sub(status)
+    line1, _ = _two(sub, 136, tree_prefix='├ ', tree_desc_col=40)
+    plain = strip_ansi(line1)
+    marker = {'completed': '✓', 'killed': '✗', 'stopped': '✗', 'failed': '!'}[status]
+    assert marker in plain
+
+
+def test_two_line_strikethrough_applies_to_all_terminal_states() -> None:
+    for status in ('completed', 'killed', 'stopped', 'failed'):
+        sub = _make_state_sub(status, description='finish the report')
+        line1, _ = _two(sub, 136, stats_col=100)
+        assert STRIKE in line1 and UNSTRIKE in line1, f'status={status} missing strikethrough'
+
+
+def test_one_line_resumed_shows_resume_glyph_and_suffix() -> None:
+    sub = _make_sub(status='running', run_count=1, resumed=True,
+                    first_timestamp=time.time() - 47)
+    out = strip_ansi(_one(sub))
+    assert '↺' in out
+    assert '▶' not in out
+    assert '×2' in out
+
+
+def test_one_line_resumed_keeps_live_styling_not_dim() -> None:
+    sub = _make_sub(status='running', run_count=1, resumed=True)
+    line = _one(sub)
+    assert _r.SKILLS in line
+
+
+def test_one_line_resumed_elapsed_continues_from_original_spawn() -> None:
+    # Elapsed time is computed from first_timestamp regardless of resume —
+    # a resumed agent's duration is NOT reset by the resume.
+    sub = _make_sub(status='running', run_count=1, resumed=True,
+                    first_timestamp=time.time() - 90)
+    out = strip_ansi(_one(sub))
+    assert '1m30s' in out
+
+
+def test_two_line_resumed_shows_resume_glyph_in_tree_column() -> None:
+    sub = _make_sub(status='running', run_count=2, resumed=True)
+    line1, _ = _two(sub, 136, tree_prefix='├ ', tree_desc_col=40)
+    plain = strip_ansi(line1)
+    assert '↺' in plain
+    assert '×3' in plain  # run_count(2) + 1 total passes
+
+
+def test_one_line_not_resumed_without_resumed_flag_or_run_count() -> None:
+    sub = _make_sub(status='running')
+    out = strip_ansi(_one(sub))
+    assert '↺' not in out
+    assert '▶' in out
 
 
 # F. One-line collapse form ---------------------------------------------------
@@ -921,8 +1025,8 @@ def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api')  # prefix '├ ', short type
     cells = [(root, ''), (kid, '├ ')]
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 140)
-    # desc_col matches the widest row: '' + 5 + 1 + len('spec-author') + 1
-    assert desc_col == 0 + 5 + 1 + len('spec-author') + 1
+    # desc_col matches the widest row: '' + 5 + 1 + len('spec-author') + marker(2) + 1
+    assert desc_col == 0 + 5 + 1 + len('spec-author') + 2 + 1
     assert stats_col >= desc_col + 8
     assert activity_col >= stats_col + 16
     assert activity_col <= 140
@@ -1084,3 +1188,68 @@ def test_build_wide_tree_mode_renders_branches(monkeypatch: pytest.MonkeyPatch) 
     all_rows  = root_lines + kid_lines
     desc_cols = [ln.index(' · ') for ln in all_rows]
     assert len(set(desc_cols)) == 1, f'description column drifted: {desc_cols}'
+
+
+# I. select_visible_cohort: retention, cascade-clear, eviction ---------------
+
+def _rs(agent_id: str, status: str = 'running', end_ts: float = 0.0,
+        parent_id: str = '', mtime: float | None = None) -> RunningSubagent:
+    now = time.time()
+    return RunningSubagent(
+        agent_type='general-purpose', description='x', billed_in=1, output=1,
+        first_timestamp=now - 60, model='claude-sonnet-4-6', end_ts=end_ts,
+        mtime=mtime if mtime is not None else now, agent_id=agent_id,
+        parent_id=parent_id, status=status,
+    )
+
+
+def test_retention_drops_terminal_row_past_120s() -> None:
+    now = time.time()
+    fresh_done = _rs('a', status='completed', end_ts=now - 10)
+    stale_done = _rs('b', status='completed', end_ts=now - 200)
+    out = layout.select_visible_cohort([fresh_done, stale_done], cap=6, tree=False, now=now)
+    assert fresh_done in out
+    assert stale_done not in out
+
+
+def test_retention_never_drops_running_row() -> None:
+    now = time.time()
+    running = _rs('a', status='running')
+    out = layout.select_visible_cohort([running], cap=6, tree=False, now=now)
+    assert running in out
+
+
+def test_cascade_clear_forces_running_descendant_terminal() -> None:
+    now = time.time()
+    parent = _rs('p', status='completed', end_ts=now - 5)
+    child  = _rs('c', status='running', parent_id='p')
+    out = layout.select_visible_cohort([parent, child], cap=6, tree=True, now=now)
+    child_out = next(s for s in out if s.agent_id == 'c')
+    assert child_out.status == 'completed'
+    assert child_out.end_ts == parent.end_ts
+
+
+def test_cascade_clear_walks_multiple_ancestor_levels() -> None:
+    now = time.time()
+    grandparent = _rs('gp', status='killed', end_ts=now - 5)
+    parent      = _rs('p', status='running', parent_id='gp')
+    child       = _rs('c', status='running', parent_id='p')
+    out = layout.select_visible_cohort([grandparent, parent, child], cap=6, tree=True, now=now)
+    for sub in out:
+        if sub.agent_id in ('p', 'c'):
+            assert sub.status == 'killed'
+
+
+def test_eviction_drops_oldest_completion_first_across_states() -> None:
+    now = time.time()
+    subs = [
+        _rs('old-fail',   status='failed',    end_ts=now - 90),
+        _rs('mid-killed', status='killed',    end_ts=now - 60),
+        _rs('new-done',   status='completed', end_ts=now - 10),
+        _rs('run-1',      status='running'),
+        _rs('run-2',      status='running'),
+    ]
+    out = layout.select_visible_cohort(subs, cap=4, tree=True, now=now)
+    ids = {s.agent_id for s in out}
+    assert 'old-fail' not in ids           # oldest completion evicted first
+    assert 'run-1' in ids and 'run-2' in ids  # running rows never displaced

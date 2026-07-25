@@ -62,7 +62,10 @@ from yas.constants import (
     GLYPH_REPLYING,
     GLYPH_SKILLS,
     GLYPH_SUBAGENT_ROW,
-    GLYPH_SUBAGENT_DONE,
+    GLYPH_SUBAGENT_RESUME,
+    subagent_is_terminal,
+    subagent_marker_glyph,
+    subagent_status,
     GLYPH_TASKS,
     GLYPH_TASK_ACTIVE,
     GLYPH_TASK_DONE,
@@ -81,6 +84,8 @@ from yas.constants import (
     PILL_RIGHT,
     SEVEN_DAY_MINUTES,
     SEVEN_DAY_WARMUP_MINUTES,
+    STRIKE,
+    UNSTRIKE,
     SUBAGENT_STATS_ACTIVITY_GAP,
     TASK_HEADER_RIGHT_GAP_MIN,
     WF_NAME_MIN,
@@ -775,8 +780,11 @@ class Renderer:
                 tree_activity_col = max(0, tree_activity_col - prefix_w)
             if tree_desc_col is not None:
                 tree_desc_col = max(0, tree_desc_col - prefix_w)
-        now     = time.time()
-        is_done = sub.end_ts > 0
+        now         = time.time()
+        status      = subagent_status(sub)
+        is_done     = subagent_is_terminal(status)
+        run_count   = getattr(sub, 'run_count', 0)
+        is_resumed  = (not is_done) and (getattr(sub, 'resumed', False) or run_count >= 1)
         if is_done:
             dur = max(0.0, sub.end_ts - sub.first_timestamp)
         else:
@@ -792,17 +800,32 @@ class Renderer:
         step      = rainbow_step()
         c_marker  = rainbow_at(step, 12)
         type_text = sub.agent_type or '?'
+        if is_resumed:
+            # Resume suffix (×2, ×3, ...) counts total runs so far
+            # (run_count completed passes + the current live one).
+            type_text = f'{type_text} ×{run_count + 1}'
 
         target_w = content_width  # explicit content width supplied by the builder
 
         if twoline:
             # --- line 1: duration-first identity + right-aligned cluster (D6) ---
-            # No run-state marker: a Done agent dims every field and freezes its
-            # duration; a running one keeps live colours and a ticking duration.
+            # Outside tree mode there's still no run-state marker here: a Done
+            # agent dims every field and freezes its duration; a running one
+            # keeps live colours and a ticking duration. In tree mode
+            # (tree_prefix set) a fixed-width marker column sits between the
+            # branch prefix and the duration — a checkmark when Done, blank
+            # otherwise — so the elapsed/description columns stay aligned
+            # down the cohort regardless of finished state.
             # The right cluster is `· {share%}  {tok} · {model}`; under width
             # pressure the description truncates first, then the cluster sheds
             # share% and then tok. The model and the front duration always stay.
-            front_w = 5 + 1 + _visible_width(type_text)  # dur(5) + ' ' + type
+            # Reserve the marker column whenever a cohort-wide desc column is
+            # supplied (tree mode), not just when *this* row has a branch
+            # prefix — the root row has no prefix but still shares the same
+            # description column as its indented children.
+            tree_mode = tree_desc_col is not None
+            marker_w  = 2 if tree_mode else 0  # reserved for '✓ ' / '  '
+            front_w  = 5 + 1 + _visible_width(type_text) + marker_w  # dur(5) + ' ' + type
 
             # Tree view: pad the type field so the front (prefix + duration +
             # type) reaches a caller-supplied common width across the whole
@@ -810,7 +833,7 @@ class Renderer:
             # absolute column regardless of prefix depth or type-name length.
             if tree_desc_col is not None:
                 front_w = max(front_w, tree_desc_col - 1)  # -1: leading space of ' · '
-                type_text = type_text.ljust(max(0, front_w - 6))
+                type_text = type_text.ljust(max(0, front_w - 6 - marker_w))
 
             # Tree single-line: the current-activity continuation moves onto
             # line 1 as a right-hand column. The stats/model cluster right-
@@ -832,7 +855,12 @@ class Renderer:
 
             share     = subagent_share(sub.total_input + sub.output, session_inout)
             share_str = f'{share * 100:.1f}%' if share is not None else ''
-            tok_field = fmt_tok(sub.total_input).rjust(5)
+            # rjust(6): fmt_tok's own docstring caps its output at 6 visible
+            # chars ("999.9B"); rjust(5) let 6-char readings (e.g. "419.7K")
+            # through unpadded while 4-char ones ("1.4M") padded to 5, a
+            # 1-column drift that propagated into the model field and the
+            # constant activity gap after it (see SUBAGENT_STATS_ACTIVITY_GAP).
+            tok_field = fmt_tok(sub.total_input).rjust(6)
             if tree_single:
                 # A fixed-width share field keeps the cluster's total width
                 # deterministic across rows (needed so the constant activity
@@ -845,10 +873,23 @@ class Renderer:
             else:
                 model_str = short_model.rjust(6)
 
-            if is_done:
-                front_c = f'{self.CTX_DIM}{dur_s}{self.R} {self.CTX_DIM}{type_text}{self.R}'
+            # Tree mode's marker column: a checkmark for a finished subagent,
+            # a same-width blank otherwise, so it never shifts the duration/
+            # description columns that follow it down the cohort.
+            if marker_w:
+                if is_done:
+                    marker = f'{self.CTX_DIM}{subagent_marker_glyph(status)}{self.R} '
+                elif is_resumed:
+                    marker = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R} '
+                else:
+                    marker = '  '
             else:
-                front_c = f'{self.CTX}{dur_s}{self.R} {self.SKILLS}{type_text}{self.R}'
+                marker = ''
+
+            if is_done:
+                front_c = f'{marker}{self.CTX_DIM}{dur_s}{self.R} {self.CTX_DIM}{type_text}{self.R}'
+            else:
+                front_c = f'{marker}{self.CTX}{dur_s}{self.R} {self.SKILLS}{type_text}{self.R}'
 
             def build_cluster(show_share: bool, show_tok: bool) -> str:
                 if is_done:
@@ -898,7 +939,14 @@ class Renderer:
                         desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
                     desc_w = _visible_width(desc_text)
                     if is_done:
-                        sep_desc = f' {self.CTX_DIM}·{self.R} {self.CTX_DIM}{desc_text}{self.R}'
+                        # Strikethrough the description (not the type/model/
+                        # token fields) to mark the task itself as finished;
+                        # SGR-only, applied after truncation so it never
+                        # perturbs the width math above.
+                        sep_desc = (
+                            f' {self.CTX_DIM}·{self.R} '
+                            f'{self.CTX_DIM}{STRIKE}{desc_text}{UNSTRIKE}{self.R}'
+                        )
                     else:
                         sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{desc_text}{self.R}'
                     sep_desc_w = 3 + desc_w
@@ -927,7 +975,14 @@ class Renderer:
                         desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
                     desc_w = _visible_width(desc_text)
                     if is_done:
-                        sep_desc = f' {self.CTX_DIM}·{self.R} {self.CTX_DIM}{desc_text}{self.R}'
+                        # Strikethrough the description (not the type/model/
+                        # token fields) to mark the task itself as finished;
+                        # SGR-only, applied after truncation so it never
+                        # perturbs the width math above.
+                        sep_desc = (
+                            f' {self.CTX_DIM}·{self.R} '
+                            f'{self.CTX_DIM}{STRIKE}{desc_text}{UNSTRIKE}{self.R}'
+                        )
                     else:
                         sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{desc_text}{self.R}'
                     sep_desc_w = 3 + desc_w
@@ -1006,12 +1061,13 @@ class Renderer:
 
         if is_done:
             left_n = (
-                f'{self.CTX_DIM}{GLYPH_SUBAGENT_DONE}{self.R}  '
+                f'{self.CTX_DIM}{subagent_marker_glyph(status)}{self.R}  '
                 f'{self.CTX_DIM}{type_text}{self.R}'
             )
         else:
+            row_marker = GLYPH_SUBAGENT_RESUME if is_resumed else GLYPH_SUBAGENT_ROW
             left_n = (
-                f'{c_marker}{BOLD}{GLYPH_SUBAGENT_ROW}{self.R}  '
+                f'{c_marker}{BOLD}{row_marker}{self.R}  '
                 f'{self.SKILLS}{type_text}{self.R}'
                 f'  {self.CTX}{tool_verb}{self.R}'
             )
