@@ -21,3 +21,6 @@ ops/.bench-venv/
 
 # parallel research scratch (threads)
 ops/research/
+
+# ascii-mode render artifacts for eyeballing
+prototype/
