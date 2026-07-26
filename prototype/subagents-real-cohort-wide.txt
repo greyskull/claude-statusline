@@ -1,0 +1,37 @@
+YAS -- SUBAGENTS section, ASCII glyph mode -- real 6-agent fan-out at width 220
+================================================================================
+
+Scenario: subagent-tree-cohort1 (a genuine mined production cohort, per
+ops/demo.py's comment: a spec-implementer root fanning out into ~10
+general-purpose depth-2 workers; SUBAGENT_DISPLAY_CAP trims to the 6
+most-recently-started rows). Included because it shows the same column
+machinery as the width sweep but with longer, more realistic descriptions,
+so the desc column visibly absorbs the extra width instead of leaving a
+run of dead space after the activity text.
+
+Generated with:
+  env -u TMUX_PANE -u TMUX COLUMNS=220 YAS_MAX_WIDTH=220 YAS_GLYPH_MODE=ascii \
+    YAS_LABELS=true DEMO_ONLY=subagent-tree-cohort1 uv run python ops/demo.py \
+    --snapshots <dir>
+  .claude/skills/yas-demo-text/scripts/strip-ansi.sh <dir>/subagent-tree-cohort1.txt
+
++--51e977df-b46f-40d9-82b0-eb9ded60036d--sessio+-5h-remain--used--burn rate-+-7d-used--burn rate---------------------------------------------------------------------------------------------------------------------+
+| /  ~/my-project : demo/3219308b1  |    13:27 | T  (-2:00) 40.0% ^ -20.0%  | D  25.0% ^ -73.8%                                                                                                        @  Sonnet 4.6 |
++--context--fill-dumb---------------+----------+----------------------------+----------------------------------------------------------------------------------------------------------------------------------+
+| H  90.0K (45%)  60%                                                                                                                   >........................................................................... |
++-input sess/day---------------output sess/da+lines read/ch+----cost sess/day----+-tokens over time------------------------------------------------------------------------------------------------------------------+
+| v 93.5K/8.3M (950.4K/216.0M) ^ 10.8K/1.5M  | R  0  W  0  | $  $0.74 / $111.58  | ~  44.8K t/m                            +                                                           #                             |
++-subagents-----------------name-------------+-------------+---------------------+-----loc read / written--------model--------current activity-----------------------------------------------------------------------+
+|   1m29s spec-implementer  . Implement decouple-sections-and-apply-defaults change .         .  168M (69.0%) . sonnet       .  = Bash[mv openspec/changes/decouple-sections-and-apply-defaults]                     |
+| +   1m28s general-purpose . main.ts + migration (v6->v7)                           .         . 4.90M ( 2.0%) . haiku        .  = Write[report-A-main-migration.md]                                                  |
+| +   1m27s general-purpose . resolve.ts group/bar-range slots                      .         . 9.00M ( 3.7%) . sonnet[1m]   .  = Write[report-B-resolve.md]                                                         |
+| +   1m26s general-purpose . seed.ts bar-span groups + riff seeding                .         . 2.00M ( 0.8%) . sonnet       .  = Write[report-C-seed.md]                                                            |
+| +   1m25s general-purpose . session.ts + presets.ts instance variant removal      .         . 1.70M ( 0.7%) . haiku        .  = Write[report-D-session-presets.md]                                                 |
+| +   1m24s general-purpose . group-lane.ts absolute bars + danger highlight        .         . 5.00M ( 2.1%) . sonnet[1m]   .  = Write[report-E-group-lane.md]                                                      |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+Note: the read/written field ("." with nothing after it) is blank-on-zero for
+every row here -- this cohort's ToolCounts.per_agent has no entries, so the
+"R .. W .." pair correctly renders as empty rather than "R 0 W 0". The
+share% column also shows the 3-sig-fig constant-width formatting across a
+wide magnitude range in one render: "168M (69.0%)" down to "1.70M ( 0.7%)".

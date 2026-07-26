@@ -1,0 +1,90 @@
+YAS -- tree-mode plan + subagents side-by-side, ASCII glyph mode
+==================================================================
+
+Scenario: subagent-tree-plan (checklist column + tree-mode subagent cohort
+side by side; exercises the ~78-col plan-column cap rather than the old
+45%-of-inner even split). Included specifically because, unlike the
+single-column SUBAGENTS section above, this side-by-side layout still only
+labels the two group headers ("plan" / "subagents") -- it does NOT carry the
+per-column labels ("name" / "loc read / written" / "model" / "current
+activity") down into the subagents half. That's a real, currently-shipped
+gap worth eyeballing, not a demo-harness artifact.
+
+Generated with:
+  env -u TMUX_PANE -u TMUX COLUMNS=<N> YAS_GLYPH_MODE=ascii YAS_LABELS=true \
+    DEMO_ONLY=subagent-tree-plan uv run python ops/demo.py --snapshots <dir>
+  .claude/skills/yas-demo-text/scripts/strip-ansi.sh <dir>/subagent-tree-plan.txt
+
+(yas.toml for this scenario sets max_width=300, so widths up to ~300 render
+at their requested COLUMNS instead of being clamped to the 140 default.)
+
+
+----------------------------------------------------------------------
+WIDTH 90
+----------------------------------------------------------------------
+
++--51e977df-b46f-40d9-82b0-eb9ded60036d---+-7d-used--burn rate---------------------+
+| /  : demo  | T  (-2:00) 30.0% ^ -30.0%  | D  20.0% ^ -78.8%        @  Sonnet 4.6 |
++------------+----------------------------+----------------------------------------+
+|  53%                                        >..................................  |
++-plan---------------------------------+-subagents---------------------------------+
+| 4:13 =  2/5                          |   1m29s spec-author . F~ . sonnet       .  ~|
+| 2:32 x  2. Wire alert-mode pill      | +   1m28s api       . C~ . haiku        .  ~|
+| 1:07 >  3. Refactoring border math   | +   1m27s fractal   . R~ . sonnet[1m]   .  ~|
+|      o  4. Update CONTEXT.md         | +   1m26s ui        . G~ . sonnet       .  ~|
+|      o  5. Add sparkline buckets     | +   1m25s ops       . R~ . haiku        .  ~|
+|                                      |   +   1m24s probe   . C~ . sonnet[1m]   .  ~|
++--------------------------------------+-------------------------------------------+
+
+
+----------------------------------------------------------------------
+WIDTH 160
+----------------------------------------------------------------------
+
++--51e977df-b46f-40d9-82b0-eb9ded60036d--sessio+-5h-remain--used--burn rate-+-7d-used--burn rate---------------------------------------------------------+
+| /  ~/my-project : demo/3219308b1  |    13:27 | T  (-2:00) 30.0% ^ -30.0%  | D  20.0% ^ -78.8%                                            @  Sonnet 4.6 |
++--context--fill-dumb---------------+----------+----------------------------+----------------------------------------------------------------------------+
+| H  80.0K (40%)  53%                                                                      >............................................................ |
++-input sess/day---------------output sess/d+lines read/ch+----cost sess/day----+-tokens over time-------------------------------------------------------+
+| v 83.1K/8.3M (844.8K/215.8M) ^ 9.6K/1.5M  | R  0  W  0  | $  $0.66 / $111.50  | ~  39.8K t/m                           #                               |
++-plan--------------------------------------+-------------+-----------+-subagent+------------------------------------------------------------------------+
+| 4:13 =  2/5                                                         |   1m29s spec-author . Fetching opensp~ .         . 45.2K (4.0%) . sonnet       .  ~|
+| 2:32 x  2. Wire alert-mode pill                                     | +   1m28s api       . Creating tmp di~ .         . 57.1K (4.9%) . haiku        .  ~|
+| 1:07 >  3. Refactoring border math                                  | +   1m27s fractal   . Reading FramePi~ .         . 28.7K (2.5%) . sonnet[1m]   .  ~|
+|      o  4. Update CONTEXT.md                                        | +   1m26s ui        . Grepping for ca~ .         . 46.1K (4.0%) . sonnet       .  ~|
+|      o  5. Add sparkline buckets                                    | +   1m25s ops       . Reading render-~ .         . 46.3K (4.0%) . haiku        .  ~|
+|                                                                     |   +   1m24s probe   . Checking docker~ .         . 12.4K (1.1%) . sonnet[1m]   .  ~|
++---------------------------------------------------------------------+----------------------------------------------------------------------------------+
+
+Note the plan column ("| 4:13 = ... |" through "5. Add sparkline buckets")
+holds a fixed width here rather than splitting evenly -- the subagents half
+gets the rest, and its own descriptions are still ellipsis-truncated ("~")
+because that half doesn't get the wide-column treatment the standalone
+SUBAGENTS section does at this same 160 width (compare
+subagents-width-sweep.txt's 160-wide block, where descriptions fit in full).
+
+
+----------------------------------------------------------------------
+WIDTH 250
+----------------------------------------------------------------------
+
++--51e977df-b46f-40d9-82b0-eb9ded60036d--sessio+-5h-remain--used--burn rate-+-7d-used--burn rate---------------------------------------------------------------------------------------------------------------------------------------------------+
+| /  ~/my-project : demo/3219308b1  |    13:27 | T  (-2:00) 30.0% ^ -30.0%  | D  20.0% ^ -78.8%                                                                                                                                      @  Sonnet 4.6 |
++--context--fill-dumb---------------+----------+----------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| H  80.0K (40%)  53%                                                                                                                      >...................................................................................................... |
++-input sess/day---------------output sess/d+lines read/ch+----cost sess/day----+-tokens over time-------------------------------------------------------------------------------------------------------------------------------------------------+
+| v 83.1K/8.3M (844.8K/215.8M) ^ 9.6K/1.5M  | R  0  W  0  | $  $0.66 / $111.50  | ~  39.8K t/m                            +                                                           #                                                            |
++-plan--------------------------------------+-------------+---------------------++-subagents-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 4:13 =  2/5                                                                    |   1m29s spec-author . Fetching openspec artifact instructions   .         . 45.2K (4.0%) . sonnet       .  = Bash[openspec show --json]                         |
+| 2:32 x  2. Wire alert-mode pill                                                | +   1m28s api       . Creating tmp directory for report         .         . 57.1K (4.9%) . haiku        .  = Bash[mkdir -p /tmp/report]                         |
+| 1:07 >  3. Refactoring border math                                             | +   1m27s fractal   . Reading FramePipeline.load() signature    .         . 28.7K (2.5%) . sonnet[1m]   .  = Read[pipeline.py]                                  |
+|      o  4. Update CONTEXT.md                                                   | +   1m26s ui        . Grepping for capability flag usage        .         . 46.1K (4.0%) . sonnet       .  = Grep[capability]                                   |
+|      o  5. Add sparkline buckets                                               | +   1m25s ops       . Reading render-in-docker.md documentation .         . 46.3K (4.0%) . haiku        .  = Read[render-in-docker.md]                          |
+|                                                                                |   +   1m24s probe   . Checking docker daemon health             .         . 12.4K (1.1%) . sonnet[1m]   .  = Bash[docker info]                                  |
++--------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+The plan column has stopped growing at ~78 cols (the SUBAGENT_TREE_PLAN_WIDTH
+cap) between 160 and 250 -- all the extra width goes to the subagents half,
+which now shows full descriptions and tool-call detail. Across all three
+widths the plan/subagents divider labels never grow beyond "plan" /
+"subagents" -- the per-column labels only exist in the single-column layout.
