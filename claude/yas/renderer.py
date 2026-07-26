@@ -114,7 +114,7 @@ from yas.session import ContextWindow, RateBucket, RateLimits
 from yas.info.subagents import RunningSubagent
 from yas.info.workflows import RunningWorkflow
 from yas.info.tasks import TaskList
-from yas.render.text import _middle_ellipsis, _visible_width, fmt_tok
+from yas.render.text import _middle_ellipsis, _visible_width, fmt_tok, fmt_tok_fixed
 from yas.tokens import TokenRate
 
 if TYPE_CHECKING:
@@ -767,6 +767,7 @@ class Renderer:
         tree_activity_col: int | None = None,
         tree_model_w: int | None = None,
         tree_lines_w: int | None = None,
+        tree_share_w: int | None = None,
         lines: tuple[int, int] | None = None,
     ) -> str:
         # Tree view: a plain branch prefix ('├ ', '└ ', indented deeper) eats
@@ -860,47 +861,54 @@ class Renderer:
 
             share     = subagent_share(sub.total_input + sub.output, session_inout)
             share_str = f'{share * 100:.1f}%' if share is not None else ''
-            # rjust(6): fmt_tok's own docstring caps its output at 6 visible
-            # chars ("999.9B"); rjust(5) let 6-char readings (e.g. "419.7K")
-            # through unpadded while 4-char ones ("1.4M") padded to 5, a
-            # 1-column drift that propagated into the model field and the
-            # constant activity gap after it (see SUBAGENT_STATS_ACTIVITY_GAP).
-            tok_field = fmt_tok(sub.total_input).rjust(6)
-            # Self-scoped lines read/changed (Decision 10): renders blank
-            # (not '0') when there's no lines data, so subagents that neither
-            # read nor wrote don't add noise. The blank uses the SAME fixed
-            # width the populated field would have, so the cluster's total
-            # width — and therefore the constant activity gap after it in
-            # tree_single mode — stays deterministic regardless of whether
-            # this subagent has lines data.
+            # `fmt_tok_fixed` (3 significant figures) instead of `fmt_tok`: a
+            # subagent-row-only formatter so every row's tok reading lands at
+            # the SAME width regardless of mantissa digit count ('7.52M' /
+            # '3.50M' / '56.8K' are all 5 chars) — never applied to the
+            # session-level input/cache/output row or day totals, which keep
+            # `fmt_tok`'s original 1-decimal behaviour. `rjust(5)`:
+            # `fmt_tok_fixed`'s own docstring caps its output at 5 visible
+            # chars ("7.52M"); below 1000 it's an unsuffixed int of at most 3
+            # digits, so 5 is the guaranteed ceiling — same "measure the
+            # ceiling" reasoning the old `fmt_tok().rjust(6)` relied on.
+            tok_field = fmt_tok_fixed(sub.total_input).rjust(5)
+            # Share now renders as a parenthetical suffix on the tok field
+            # ('7.52M (10.5%)') instead of its own segment, per the redesigned
+            # cluster order (lines · tok(share) · model). `tree_share_w`: the
+            # cohort's own measured max share-string width (see
+            # `layout.tree_share_width`) so the '%' glyphs line up down the
+            # cohort even though '10.5%' and '4.9%' differ in length.
+            if share_str and tree_single:
+                share_str = share_str.rjust(tree_share_w) if tree_share_w else share_str
+            # Self-scoped lines read/changed (Decision 10): each of read/
+            # changed sheds independently — a subagent that read but didn't
+            # write (or vice versa) shows a blank for the zero side rather
+            # than a literal '0', while the OTHER side still renders. Every
+            # blank occupies exactly the width the populated field would have
+            # (glyph + space + value), so the cluster's total width — and
+            # therefore the constant activity gap after it in tree_single mode
+            # — stays deterministic regardless of which fields are populated.
             read_lc, changed_lc = lines if lines is not None else (0, 0)
             if tree_single:
-                # `tree_lines_w`: the cohort's own MEASURED max fmt_tok width
-                # (`layout.tree_lines_width`), not a hardcoded guess — a
-                # fixed-width numeric field keeps the cluster's total width
-                # (and the activity gap after it) deterministic across rows,
-                # same reasoning as tok_field's rjust(6) above, but sized to
-                # what this cohort's read/changed counts actually need instead
-                # of always reserving fmt_tok's full 6-char ceiling. Falls
-                # back to 6 (fmt_tok's guaranteed max width) for callers that
-                # don't supply a cohort measurement, so alignment never
-                # silently breaks.
-                lines_w = tree_lines_w if tree_lines_w is not None else 6
-                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc, width=lines_w)
-                lines_field = f'{GLYPH_LINES_READ} {read_s} {GLYPH_LINES_CHANGED} {changed_s}'
+                # `tree_lines_w`: the cohort's own MEASURED max fmt_tok_fixed
+                # width (`layout.tree_lines_width`), not a hardcoded guess —
+                # sized to what this cohort's read/changed counts actually
+                # need. Falls back to 5 (fmt_tok_fixed's guaranteed max width)
+                # for callers that don't supply a cohort measurement.
+                lines_w = tree_lines_w if tree_lines_w is not None else 5
+                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc, width=lines_w, fixed=True)
             else:
-                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc)
-                lines_field = f'{GLYPH_LINES_READ} {read_s} {GLYPH_LINES_CHANGED} {changed_s}'
-            if lines is None or (read_lc == 0 and changed_lc == 0):
-                lines_field = ' ' * _visible_width(lines_field)
+                lines_w = 0
+                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc, fixed=True)
+            read_blank_w    = _visible_width(GLYPH_LINES_READ) + 1 + _visible_width(read_s)
+            changed_blank_w = _visible_width(GLYPH_LINES_CHANGED) + 1 + _visible_width(changed_s)
+            read_part    = f'{GLYPH_LINES_READ} {read_s}' if (lines is not None and read_lc) else ' ' * read_blank_w
+            changed_part = f'{GLYPH_LINES_CHANGED} {changed_s}' if (lines is not None and changed_lc) else ' ' * changed_blank_w
+            lines_field  = f'{read_part} {changed_part}'
             if tree_single:
-                # A fixed-width share field keeps the cluster's total width
-                # deterministic across rows (needed so the constant activity
-                # gap below lands at the same absolute column). Model is
-                # padded to the cohort's widest label (tree_model_w) instead of
-                # a fixed 6-char rjust, per the design mock's plain 'haiku'.
-                if share_str:
-                    share_str = share_str.rjust(6)
+                # Model is padded to the cohort's widest label (tree_model_w)
+                # instead of a fixed 6-char rjust, per the design mock's plain
+                # 'haiku'.
                 model_str = short_model.ljust(tree_model_w) if tree_model_w else short_model
             else:
                 model_str = short_model.rjust(6)
@@ -923,26 +931,29 @@ class Renderer:
             else:
                 front_c = f'{marker}{self.CTX}{dur_s}{self.R} {self.SKILLS}{type_text}{self.R}'
 
+            # Cluster order (redesigned): '· lines · tok (share%) · model'. A
+            # dot-separated field precedes every field after the first (rather
+            # than the old double-space-no-dot run between lines/share/tok),
+            # and share now lives inside the tok field's own parens instead of
+            # a standalone segment — see `render.metrics.subagent_cluster_field_offsets`,
+            # the single source of truth this mirrors for the header-label anchors.
+            dot = f'{MIDDLE_DOT} '
+
             def build_cluster(show_lines: bool, show_share: bool, show_tok: bool) -> str:
-                if is_done:
-                    d   = self.CTX_DIM
-                    seg = f'{d}{MIDDLE_DOT}{self.R} '
-                    if show_lines:
-                        seg += f'{d}{lines_field}{self.R}  '
-                    if show_share and share is not None:
-                        seg += f'{d}{share_str}{self.R}  '
-                    if show_tok:
-                        seg += f'{d}{tok_field}{self.R} {d}{MIDDLE_DOT}{self.R} '
-                    return seg + f'{d}{model_str}{self.R}'
-                share_clr = self.gradient.gradient_color(share) if share is not None else ''
-                seg = f'{self.LABEL}{MIDDLE_DOT}{self.R} '
+                d = self.CTX_DIM if is_done else self.LABEL
+                fields: list[str] = []
                 if show_lines:
-                    seg += f'{self.LABEL}{lines_field}{self.R}  '
-                if show_share and share is not None:
-                    seg += f'{share_clr}{share_str}{self.R}  '
+                    fields.append(f'{d if is_done else self.LABEL}{lines_field}{self.R}')
                 if show_tok:
-                    seg += f'{ctx_clr}{tok_field}{self.R} {self.LABEL}{MIDDLE_DOT}{self.R} '
-                return seg + f'{model_clr}{model_str}{self.R}'
+                    tok_part = tok_field
+                    if show_share and share is not None:
+                        tok_part = f'{tok_field} ({share_str})'
+                    tok_clr = d if is_done else ctx_clr
+                    fields.append(f'{tok_clr}{tok_part}{self.R}')
+                model_clr_use = d if is_done else model_clr
+                fields.append(f'{model_clr_use}{model_str}{self.R}')
+                sep = f' {d}{dot}{self.R}'
+                return f'{d}{dot}{self.R}' + sep.join(fields)
 
             # Decide whether the stats cluster anchors at a fixed content
             # column (wide layouts) or right-aligns to the content edge. The
@@ -1041,12 +1052,17 @@ class Renderer:
                 # aligned down the cohort. The activity (tool glyph + verb, no
                 # `└` continuation marker) truncates with the usual ellipsis
                 # when tight. Dimmed like the old line 2.
-                gap      = SUBAGENT_STATS_ACTIVITY_GAP
-                act_w    = max(0, target_w - _visible_width(line1) - gap)
+                # The gap now carries a '·' separator (' · ' plus trailing pad
+                # to the constant width) rather than bare spaces, matching the
+                # design mock's 'sonnet ·   <activity>'.
+                gap       = SUBAGENT_STATS_ACTIVITY_GAP
+                dot_clr   = self.CTX_DIM if is_done else self.LABEL
+                gap_str   = f' {dot_clr}{MIDDLE_DOT}{self.R} ' + ' ' * max(0, gap - 3)
+                act_w     = max(0, target_w - _visible_width(line1) - gap)
                 activity = self.subagent_activity(sub.last_activity, cap=max(0, act_w - 3))
                 if _visible_width(activity) > act_w:
                     activity = activity[:max(0, act_w - 1)] + ELLIPSIS
-                line1 = f'{line1}{" " * gap}{self.CTX_DIM}{activity}{self.R}'
+                line1 = f'{line1}{gap_str}{self.CTX_DIM}{activity}{self.R}'
                 line1 += ' ' * max(0, target_w - _visible_width(line1))
                 if prefix_w:
                     return f'{self.CTX_DIM}{tree_prefix}{self.R}{line1}'

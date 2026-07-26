@@ -22,7 +22,7 @@ from yas.constants import (
 from yas.info import SessionView
 from yas.info.subagents import RunningSubagent
 from yas.render.gradient import model_display
-from yas.render.text import _visible_width, fmt_tok
+from yas.render.text import _visible_width, fmt_tok, fmt_tok_fixed
 from yas.tokens import TickRecord, TokenLog
 from helper import strip_ansi
 
@@ -117,16 +117,19 @@ def test_two_line_no_run_state_marker() -> None:
 
 
 def test_two_line_cluster_share_tok_model_order() -> None:
+    # Redesigned cluster order: lines · tok (share%) · model — share now
+    # lives as a parenthetical suffix on the tok field instead of its own
+    # segment, so 'tok' precedes '%' and both precede the model name.
     sub = _make_sub(total_input=12345, output=678, model='claude-sonnet-4-6')
     si  = (sub.total_input + sub.output) * 2  # ~50% share
     line1, _ = _two(sub, 136, session_inout=si)
     plain = strip_ansi(line1)
-    tok = fmt_tok(sub.total_input)
+    tok = fmt_tok_fixed(sub.total_input)
     assert '%' in plain
     assert tok in plain
     assert 'sonnet' in plain
-    # cluster order: share% then tok then model
-    assert plain.index('%') < plain.index(tok) < plain.index('sonnet')
+    # cluster order: tok, then its share% suffix, then model
+    assert plain.index(tok) < plain.index('%') < plain.index('sonnet')
 
 
 @pytest.mark.parametrize('model, word', [
@@ -1020,9 +1023,9 @@ def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     # across the cohort, so the shortest names/prefixes get padded up to it;
     # stats_col caps at the SUBAGENT_DESC_MIN_WIDTH guarantee (never grows
     # past it just because the box is wide) and activity_col follows at
-    # least a 16-col gap, but also anchors to ~50% of the box width so wide
-    # terminals leave the full stats cluster (share%/tok/model) room instead
-    # of collapsing to the model-only fallback.
+    # least a 16-col gap, but also anchors to ~60% of the box width so wide
+    # terminals leave the full stats cluster (lines/tok(share%)/model) room
+    # instead of collapsing to a leaner tier.
     root = _make_tree_sub('agent-a', agent_type='spec-author')     # prefix '', long type
     kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api')  # prefix '├ ', short type
     cells = [(root, ''), (kid, '├ ')]
@@ -1034,7 +1037,7 @@ def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     assert activity_col <= 140
     stats_guarantee = desc_col + 3 + SUBAGENT_DESC_MIN_WIDTH
     assert stats_col == stats_guarantee
-    assert activity_col == max(stats_col + 16, round(140 * 0.50))
+    assert activity_col == max(stats_col + 16, round(140 * 0.60))
 
 
 def test_tree_single_description_aligned_across_depths_and_names() -> None:
@@ -1117,7 +1120,7 @@ def test_tree_columns_caps_desc_but_not_activity_at_very_wide_width() -> None:
     # And the anchor is exactly the capped guarantee, not a width-scaled value.
     stats_guarantee = desc_col_300 + 3 + SUBAGENT_DESC_MIN_WIDTH
     assert stats_col_300 == stats_guarantee
-    assert activity_col_300 == max(stats_col_300 + 16, round(300 * 0.50))
+    assert activity_col_300 == max(stats_col_300 + 16, round(300 * 0.60))
 
 
 def test_tree_row_stats_cluster_aligns_across_long_and_short_duration_rows() -> None:
@@ -1276,13 +1279,14 @@ def test_cascade_clear_walks_multiple_ancestor_levels() -> None:
 # K. Per-subagent lines read/changed field (Decision 10) -----------------------
 
 def test_lines_field_shows_humanised_values() -> None:
-    # 1234 -> '1.2K', 567 -> '567' via fmt_tok; both glyphs present.
+    # 1234 -> '1.23K', 567 -> '567' via fmt_tok_fixed (subagent-row-only,
+    # 3-significant-figure formatting); both glyphs present.
     sub = _make_sub(total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     line1, _ = _two(sub, 136, session_inout=si, lines=(1234, 567))
     plain = strip_ansi(line1)
-    assert fmt_tok(1234) in plain
-    assert fmt_tok(567) in plain
+    assert fmt_tok_fixed(1234) in plain
+    assert fmt_tok_fixed(567) in plain
     assert GLYPH_LINES_READ in plain
     assert GLYPH_LINES_CHANGED in plain
 
@@ -1339,6 +1343,82 @@ def test_shed_order_lines_then_share_then_tok() -> None:
     assert (True, True, True) in seen
     assert (False, True, True) in seen
     assert (False, False, True) in seen
+
+
+def test_share_percent_right_aligned_and_after_tok() -> None:
+    # Change 1: share% moves into a parenthetical suffix on the tok field
+    # ('7.52M (10.5%)') and, in tree_single mode, right-aligns to the
+    # cohort's measured max share width (tree_share_w) so the trailing '%'
+    # lands on the same column across rows of differing share magnitude.
+    big   = _make_sub(agent_type='big', total_input=750_000, output=0, model='sonnet')
+    small = _make_sub(agent_type='small', total_input=350_000, output=0, model='haiku')
+    si    = 1_500_000  # ~50%/~23% share
+    cells = [(big, ''), (small, '')]
+    share_w = layout.tree_share_width(cells, si)
+    line_big   = _r.subagent_row(big, 160, twoline=True, session_inout=si, tree_single=True,
+                                  tree_desc_col=30, tree_share_w=share_w)
+    line_small = _r.subagent_row(small, 160, twoline=True, session_inout=si, tree_single=True,
+                                  tree_desc_col=30, tree_share_w=share_w)
+    plain_big   = strip_ansi(line_big)
+    plain_small = strip_ansi(line_small)
+    pct_big   = plain_big[plain_big.index('('):plain_big.index(')') + 1]
+    pct_small = plain_small[plain_small.index('('):plain_small.index(')') + 1]
+    assert _visible_width(pct_big) == _visible_width(pct_small)
+    # tok precedes the '(' of the share suffix on both rows.
+    assert plain_big.index(fmt_tok_fixed(big.total_input)) < plain_big.index('(')
+    assert plain_small.index(fmt_tok_fixed(small.total_input)) < plain_small.index('(')
+
+
+def test_fmt_tok_fixed_three_sig_figs() -> None:
+    # Change 2: fmt_tok_fixed always renders 3 significant figures, so a
+    # single-digit mantissa gets 2 decimals ('7.52M') and a 2-digit mantissa
+    # gets 1 ('56.8K') — both 5 chars wide once the unit suffix lands.
+    assert fmt_tok_fixed(7_520_000) == '7.52M'
+    assert fmt_tok_fixed(3_500_000) == '3.50M'
+    assert fmt_tok_fixed(56_800) == '56.8K'
+    assert fmt_tok_fixed(121) == '121'
+    assert _visible_width(fmt_tok_fixed(7_520_000)) == _visible_width(fmt_tok_fixed(3_500_000))
+
+
+def test_fmt_tok_fixed_not_used_by_session_level_row() -> None:
+    # The session-level input/cache/output row and day totals keep `fmt_tok`'s
+    # original 1-decimal behaviour — `fmt_tok_fixed` is subagent-row-only.
+    assert fmt_tok(7_520_000) == '7.5M'
+    assert fmt_tok(7_520_000) != fmt_tok_fixed(7_520_000)
+
+
+def test_lines_field_sheds_read_and_changed_independently() -> None:
+    # Change 3: a subagent that only wrote (read == 0) blanks just the read
+    # side, not the whole field — and vice versa for a read-only subagent.
+    sub = _make_sub(total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    line_read_only, _    = _two(sub, 136, session_inout=si, lines=(1234, 0))
+    line_changed_only, _ = _two(sub, 136, session_inout=si, lines=(0, 567))
+    plain_read    = strip_ansi(line_read_only)
+    plain_changed = strip_ansi(line_changed_only)
+    assert GLYPH_LINES_READ in plain_read and GLYPH_LINES_CHANGED not in plain_read
+    assert GLYPH_LINES_CHANGED in plain_changed and GLYPH_LINES_READ not in plain_changed
+    # Blanking one side must not shift the row's total width.
+    line_both, _ = _two(sub, 136, session_inout=si, lines=(1234, 567))
+    assert _visible_width(line_read_only) == _visible_width(line_changed_only) == _visible_width(line_both)
+
+
+def test_header_labels_anchor_over_measured_columns() -> None:
+    # Change 5: the SUBAGENTS section header's 'name'/'loc read / written'/
+    # 'model'/'current activity' labels are derived from the SAME anchors
+    # (desc_col/stats_col/activity_col + subagent_cluster_field_offsets) the
+    # data rows use — never a hardcoded guess.
+    from yas.render.metrics import subagent_cluster_field_offsets
+    root = _make_tree_sub('agent-a', agent_type='spec-implementer')
+    cells = [(root, '')]
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, 200)
+    model_w  = layout.tree_model_width(cells)
+    lines_w  = layout.tree_lines_width(cells, {})
+    share_w  = layout.tree_share_width(cells, 0)
+    lines_off, _tok_off, model_off = subagent_cluster_field_offsets(lines_w, model_w, share_w)
+    # The label anchors layout.py computes must land inside the row's own
+    # measured columns, not past the activity column.
+    assert 3 + desc_col < 3 + stats_col + lines_off < 3 + stats_col + model_off < 3 + activity_col
 
 
 def test_tree_lines_width_measures_cohort_max() -> None:

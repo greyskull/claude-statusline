@@ -266,6 +266,37 @@ def fmt_tok(n: int) -> str:
     return str(n)
 
 
+def fmt_tok_fixed(n: int) -> str:
+    """3-significant-figure `fmt_tok` variant for constant-width subagent-row columns.
+
+    `fmt_tok` always uses 1 decimal ('.1f'), so a single-digit mantissa ('7.5M')
+    and a double-digit one ('56.8K') land at different visible widths once the
+    unit suffix is added. Subagent-row columns (the tok/share cluster and the
+    lines-read/-written pair) stack many rows in a cohort and need every value
+    at the SAME width so the trailing '%'/unit glyphs line up — this variant
+    fixes that by using 2 decimals when the mantissa has 1 digit and 0 when it
+    has 3, so every value renders at 3 significant figures.
+
+    Deliberately NOT used by the session-level input/cache/output row or day
+    totals (`fmt_tok` unchanged there) — only per-subagent columns need
+    cross-row alignment; a single session/day row has nothing to align against.
+    """
+    if n >= 999_950_000:
+        div, suf = 1_000_000_000, 'B'
+    elif n >= 999_950:
+        div, suf = 1_000_000, 'M'
+    elif n >= 1000:
+        div, suf = 1_000, 'K'
+    else:
+        return str(n)
+    val = n / div
+    for decimals in (2, 1, 0):
+        s = f'{val:.{decimals}f}'
+        if len(s.split('.')[0]) == 3 - decimals:
+            return f'{s}{suf}'
+    return f'{val:.0f}{suf}'  # defensive fallback; every n above should hit the loop
+
+
 def fmt_dur(seconds: float) -> str:
     s = int(seconds)
     if s < 0:

@@ -427,11 +427,18 @@ SUBAGENT_RETENTION_SECONDS = 120
 # see .scratch/session-analysis.md). Below this the description still
 # ellipsis-truncates; narrow terminals degrade gracefully instead of honouring
 # the guarantee (see layout.tree_columns).
-SUBAGENT_DESC_MIN_WIDTH        = 45
+#
+# Widened from 45 -> 70 as part of the column rebalance (title/description
+# column gains room, the current-activity column absorbs the loss — both
+# anchor off `stats_col`, so growing the description guarantee pushes
+# `activity_col` right by the same amount without touching its own formula).
+SUBAGENT_DESC_MIN_WIDTH        = 70
 # Constant gap (visible cols) between the stats/model cluster and the
 # activity snippet in tree-single rows, once the model label is padded to the
-# cohort's widest model width (see renderer.Renderer.subagent_row).
-SUBAGENT_STATS_ACTIVITY_GAP    = 2
+# cohort's widest model width (see renderer.Renderer.subagent_row). Widened
+# from 2 -> 4 to make room for the '·' separator now rendered in the gap
+# (' · ' plus one col of padding) instead of bare spaces.
+SUBAGENT_STATS_ACTIVITY_GAP    = 4
 
 # Four-state subagent lifecycle: 'running' (live), 'completed' (normal finish),
 # 'killed'/'stopped' (ended early by intent — same glyph, see
