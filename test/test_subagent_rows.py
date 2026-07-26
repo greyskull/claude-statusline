@@ -15,7 +15,7 @@ from yas.constants import (
     GLYPH_LINES_READ,
     GLYPH_REPLYING,
     STRIKE,
-    SUBAGENT_DESC_MIN_WIDTH,
+    SUBAGENT_DESC_FLOOR,
     SUBAGENT_STATS_ACTIVITY_GAP,
     UNSTRIKE,
 )
@@ -1020,24 +1020,41 @@ def test_tree_single_activity_column_aligned_across_prefix_depths() -> None:
 
 def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     # layout.tree_columns: desc_col is the widest (prefix + duration + type)
-    # across the cohort, so the shortest names/prefixes get padded up to it;
-    # stats_col caps at the SUBAGENT_DESC_MIN_WIDTH guarantee (never grows
-    # past it just because the box is wide) and activity_col follows at
-    # least a 16-col gap, but also anchors to ~60% of the box width so wide
-    # terminals leave the full stats cluster (lines/tok(share%)/model) room
-    # instead of collapsing to a leaner tier.
-    root = _make_tree_sub('agent-a', agent_type='spec-author')     # prefix '', long type
-    kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api')  # prefix '├ ', short type
+    # across the cohort, so the shortest names/prefixes get padded up to it.
+    # stats_col grows with the cohort's actual (measured) description content
+    # — the shed priority is now inverted from the description-cap design:
+    # description is the elastic side, the stats cluster is protected — so
+    # stats_col == desc_col + 3 + the cohort's longest description, as long
+    # as that leaves room for the (here: zero-width, no cluster reserved)
+    # cluster plus the activity floor.
+    root = _make_tree_sub('agent-a', agent_type='spec-author', description='d' * 10)     # prefix '', long type
+    kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api', description='d' * 3)  # prefix '├ ', short type
     cells = [(root, ''), (kid, '├ ')]
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 140)
     # desc_col matches the widest row: '' + 5 + 1 + len('spec-author') + marker(2) + 1
     assert desc_col == 0 + 5 + 1 + len('spec-author') + 2 + 1
-    assert stats_col >= desc_col + 8
     assert activity_col >= stats_col + 16
     assert activity_col <= 140
-    stats_guarantee = desc_col + 3 + SUBAGENT_DESC_MIN_WIDTH
-    assert stats_col == stats_guarantee
-    assert activity_col == max(stats_col + 16, round(140 * 0.60))
+    # Longest description in the cohort is 10 chars, well past the floor and
+    # well under the available room, so stats_col reflects it exactly.
+    assert stats_col == desc_col + 3 + 10
+
+
+def test_tree_columns_protects_cluster_before_shedding_description() -> None:
+    # Inverted priority: when the cohort's cluster needs real room
+    # (cluster_full_w > 0), stats_col reserves that room FIRST — the
+    # description is squeezed toward its floor rather than the cluster
+    # shedding fields. At a width where the naive "give description whatever
+    # it wants" placement would leave no room for the cluster, stats_col must
+    # still clear desc_col + 3 + SUBAGENT_DESC_FLOOR (never less).
+    root  = _make_tree_sub('agent-a', agent_type='spec-author', description='x' * 200)
+    cells = [(root, '')]
+    cluster_w = 40
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, 90, cluster_full_w=cluster_w)
+    assert stats_col >= desc_col + 3 + SUBAGENT_DESC_FLOOR
+    # The 200-char description is nowhere close to fitting — confirms the
+    # cluster's reserved room took priority over the description's appetite.
+    assert stats_col < desc_col + 3 + 200
 
 
 def test_tree_single_description_aligned_across_depths_and_names() -> None:
@@ -1076,51 +1093,105 @@ def test_tree_single_model_left_aligned_no_padding() -> None:
     assert 'haiku ' + ' ' * 5 not in line  # no leftover rjust-style padding run
 
 
-def test_tree_columns_guarantees_desc_min_width_at_wide_width() -> None:
-    # TASK A: at a wide enough terminal, stats_col clears desc_col by at least
-    # SUBAGENT_DESC_MIN_WIDTH + 3 (the ' · ' separator), so subagent_row's
-    # desc_max = stats_col - desc_col - 3 guarantees a >=45-char description
-    # column (p90 of mined real subagent titles).
-    root = _make_tree_sub('agent-a', agent_type='spec-implementer')
+def test_tree_columns_desc_grows_to_content_at_wide_width_no_hard_cap() -> None:
+    # Inverted design: there is no fixed description-column cap any more. At
+    # a wide enough terminal with room to spare, stats_col grows to fit the
+    # cohort's ACTUAL longest description in full — even well past the old
+    # SUBAGENT_DESC_MIN_WIDTH=70 cap — so a long title is never left
+    # ellipsis-truncated just because the terminal is wide.
+    long_desc = 'x' * 120
+    root = _make_tree_sub('agent-a', agent_type='spec-implementer', description=long_desc)
     cells = [(root, '')]
-    desc_col, stats_col, activity_col = layout.tree_columns(cells, 200)
-    desc_max = stats_col - desc_col - 3
-    assert desc_max >= SUBAGENT_DESC_MIN_WIDTH
-    assert activity_col <= 200
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, 260, cluster_full_w=40)
+    assert stats_col == desc_col + 3 + len(long_desc)
+    assert activity_col <= 260
 
 
 def test_tree_columns_degrades_gracefully_at_narrow_width() -> None:
-    # TASK A: at a narrow width the guarantee must not push activity_col past
-    # the target width or produce negative/nonsensical column offsets — the
-    # description guarantee is skipped and the old percentage anchor is used.
+    # At a narrow terminal the description is squeezed toward (and, in an
+    # extreme squeeze, even below) its floor rather than the cluster
+    # shedding — but the row must still produce sane, positive, in-bounds,
+    # non-overlapping column offsets: the activity-gap invariant always
+    # holds, even if that means pulling stats_col back below the floor.
     root = _make_tree_sub('agent-a', agent_type='spec-implementer')
     cells = [(root, '')]
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 50)
-    assert stats_col >= desc_col + 8
     assert activity_col >= stats_col + 16
     assert activity_col <= 50
-    assert stats_col > 0 and activity_col > 0
+    assert stats_col > desc_col and activity_col > 0
 
 
-def test_tree_columns_caps_desc_but_not_activity_at_very_wide_width() -> None:
-    # Standalone cohort at a very wide terminal (e.g. 300 cols): stats_col
-    # must NOT scale up with width once the SUBAGENT_DESC_MIN_WIDTH guarantee
-    # is satisfied (the description column stays ~45 chars, not 30% of a
-    # 300-col box). activity_col DOES scale with width past that point, so
-    # the stats cluster (share%/tok/model) has room to render in full instead
-    # of collapsing to its model-only fallback -- see the
-    # subagent-tree-plan demo scenario.
-    root = _make_tree_sub('agent-a', agent_type='spec-implementer')
+def test_tree_columns_short_description_leaves_no_dead_gutter_at_wide_width() -> None:
+    # Problem 2 regression: a cohort whose longest description is short must
+    # NOT have its description column padded out toward some large
+    # width-scaled figure just because the terminal is wide — stats_col
+    # (and, downstream, activity_col) should track the cohort's actual
+    # content width and stay put as the terminal widens, handing the freed
+    # space to the activity column instead of leaving it as a gap.
+    root = _make_tree_sub('agent-a', agent_type='spec-implementer', description='short')
     cells = [(root, '')]
-    desc_col_140, stats_col_140, activity_col_140 = layout.tree_columns(cells, 140)
-    desc_col_300, stats_col_300, activity_col_300 = layout.tree_columns(cells, 300)
+    desc_col_140, stats_col_140, activity_col_140 = layout.tree_columns(cells, 140, cluster_full_w=40)
+    desc_col_300, stats_col_300, activity_col_300 = layout.tree_columns(cells, 300, cluster_full_w=40)
     assert desc_col_140 == desc_col_300
-    assert stats_col_140 == stats_col_300
-    assert activity_col_300 > activity_col_140
-    # And the anchor is exactly the capped guarantee, not a width-scaled value.
-    stats_guarantee = desc_col_300 + 3 + SUBAGENT_DESC_MIN_WIDTH
-    assert stats_col_300 == stats_guarantee
-    assert activity_col_300 == max(stats_col_300 + 16, round(300 * 0.60))
+    assert stats_col_140 == stats_col_300 == desc_col_140 + 3 + len('short')
+    assert activity_col_140 == activity_col_300  # no width-scaled growth either
+
+
+def test_tree_single_description_truncates_before_cluster_sheds() -> None:
+    # End-to-end regression for the inverted shed priority: as the row
+    # narrows, the description truncates (down to its floor) WHILE the
+    # lines/share%/tok cluster stays fully populated — the cluster is never
+    # allowed to drop a field while the description still has room above its
+    # floor to give up.
+    from yas.render.metrics import subagent_cluster_width
+
+    sub = _make_tree_sub('agent-a', agent_type='spec-implementer',
+                         description='x' * 80, last_activity=('tool_use', 'Bash', {'command': 'x'}))
+    cells = [(sub, '')]
+    model_w = layout.tree_model_width(cells)
+    lines_w = layout.tree_lines_width(cells, {})
+    si = 1000
+    share_w = layout.tree_share_width(cells, si)
+    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+
+    saw_truncated_desc_with_full_cluster = False
+    for width in range(70, 140):
+        desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w)
+        line1 = _r.subagent_row(
+            sub, width, twoline=True, session_inout=si, stats_col=stats_col,
+            tree_single=True, tree_desc_col=desc_col, tree_activity_col=activity_col,
+            tree_model_w=model_w, tree_lines_w=lines_w, tree_share_w=share_w, lines=(5, 3),
+        ).split('\n')[0]
+        plain = strip_ansi(line1)
+        desc_truncated = '…' in plain
+        cluster_full = GLYPH_LINES_READ in plain and '%' in plain
+        # Never the inverse: a shed cluster while the description is intact.
+        if desc_truncated and cluster_full:
+            saw_truncated_desc_with_full_cluster = True
+        assert not (cluster_full is False and not desc_truncated), (
+            f'width={width}: cluster shed before description gave up any room'
+        )
+    assert saw_truncated_desc_with_full_cluster, 'never observed the truncate-before-shed rung'
+
+
+def test_tree_columns_label_anchors_follow_elastic_desc_growth() -> None:
+    # The SUBAGENTS header labels ('name', 'loc read / written', 'model',
+    # 'current activity') are placed from desc_col/stats_col/activity_col —
+    # verify those anchors still nest correctly (each label strictly to the
+    # left of the next) at a narrow, medium, and very wide box now that
+    # stats_col is content-elastic rather than a fixed guarantee.
+    from yas.render.metrics import subagent_cluster_field_offsets, subagent_cluster_width
+
+    root = _make_tree_sub('agent-a', agent_type='spec-implementer', description='Fetch things for the task')
+    cells = [(root, '')]
+    model_w = layout.tree_model_width(cells)
+    lines_w = layout.tree_lines_width(cells, {})
+    share_w = layout.tree_share_width(cells, 0)
+    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+    for width in (80, 140, 260):
+        desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w)
+        lines_off, _tok_off, model_off = subagent_cluster_field_offsets(lines_w, model_w, share_w)
+        assert 3 + desc_col < 3 + stats_col + lines_off < 3 + stats_col + model_off < 3 + activity_col
 
 
 def test_tree_row_stats_cluster_aligns_across_long_and_short_duration_rows() -> None:
@@ -1131,18 +1202,24 @@ def test_tree_row_stats_cluster_aligns_across_long_and_short_duration_rows() -> 
     # the whole stats cluster (eye/pencil line-counts, share%, tok, model)
     # drifted left by one column on the prefixed row. Assert both rows agree
     # on the absolute start column of the cluster, not a brittle full string.
+    from yas.render.metrics import subagent_cluster_width
+
     parent = _make_tree_sub('agent-a', agent_type='spec-implementer', ts_off=-2360)  # ~40m23s elapsed
     child  = _make_tree_sub('agent-b', parent_id='a', agent_type='ui', ts_off=0)      # ~1m40s elapsed
     cells  = [(parent, ''), (child, '└ ')]
     width  = 290
-    desc_col, stats_col, activity_col = layout.tree_columns(cells, width)
-    model_w = layout.tree_model_width(cells)
+    model_w   = layout.tree_model_width(cells)
+    lines_w   = layout.tree_lines_width(cells, {})
+    share_w   = layout.tree_share_width(cells, 200_000)
+    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w)
 
     def cluster_start_col(sub: RunningSubagent, prefix: str) -> int:
         line1 = _r.subagent_row(
             sub, width, twoline=True, session_inout=200_000, stats_col=stats_col,
             tree_prefix=prefix, tree_single=True, tree_desc_col=desc_col,
-            tree_activity_col=activity_col, tree_model_w=model_w, lines=(5, 3),
+            tree_activity_col=activity_col, tree_model_w=model_w,
+            tree_lines_w=lines_w, tree_share_w=share_w, lines=(5, 3),
         ).split('\n')[0]
         stripped = strip_ansi(line1)
         idx = stripped.find(GLYPH_LINES_READ)
@@ -1408,13 +1485,14 @@ def test_header_labels_anchor_over_measured_columns() -> None:
     # 'model'/'current activity' labels are derived from the SAME anchors
     # (desc_col/stats_col/activity_col + subagent_cluster_field_offsets) the
     # data rows use — never a hardcoded guess.
-    from yas.render.metrics import subagent_cluster_field_offsets
+    from yas.render.metrics import subagent_cluster_field_offsets, subagent_cluster_width
     root = _make_tree_sub('agent-a', agent_type='spec-implementer')
     cells = [(root, '')]
-    desc_col, stats_col, activity_col = layout.tree_columns(cells, 200)
     model_w  = layout.tree_model_width(cells)
     lines_w  = layout.tree_lines_width(cells, {})
     share_w  = layout.tree_share_width(cells, 0)
+    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, 200, cluster_full_w=cluster_w)
     lines_off, _tok_off, model_off = subagent_cluster_field_offsets(lines_w, model_w, share_w)
     # The label anchors layout.py computes must land inside the row's own
     # measured columns, not past the activity column.

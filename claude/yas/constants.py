@@ -422,17 +422,23 @@ SUBAGENT_DISPLAY_CAP      = 6
 # layout.select_visible_cohort).
 SUBAGENT_RETENTION_SECONDS = 120
 
-# Tree-single rows: the minimum visible description-column width to guarantee
-# where terminal width allows (p90 of mined real subagent titles is 45 chars —
-# see .scratch/session-analysis.md). Below this the description still
-# ellipsis-truncates; narrow terminals degrade gracefully instead of honouring
-# the guarantee (see layout.tree_columns).
+# Tree-single rows: the description/activity text columns are now the
+# ELASTIC side of the layout — they truncate first as the terminal narrows,
+# and the lines/share%/tok stats cluster is protected (it sheds only once the
+# description is already at its floor; see layout.tree_columns and
+# Renderer.subagent_row's "anchored" branch). SUBAGENT_DESC_FLOOR is that
+# floor: just enough for a recognisable truncated prefix plus the ellipsis
+# glyph, not a guarantee to pad every row up to. The column otherwise grows
+# to `min(cohort's longest actual description, available width)` — measured
+# per cohort by `layout.tree_desc_content_width` — so a wide terminal never
+# leaves a description artificially truncated OR padded out with a dead
+# gutter before the stats cluster.
 #
-# Widened from 45 -> 70 as part of the column rebalance (title/description
-# column gains room, the current-activity column absorbs the loss — both
-# anchor off `stats_col`, so growing the description guarantee pushes
-# `activity_col` right by the same amount without touching its own formula).
-SUBAGENT_DESC_MIN_WIDTH        = 70
+# Replaces the old SUBAGENT_DESC_MIN_WIDTH (a hard 70-col guarantee, raised
+# from 45 as part of an earlier rebalance) now that the shed priority is
+# inverted: a large hard minimum doesn't make sense once description is the
+# first thing to give ground under width pressure rather than the last.
+SUBAGENT_DESC_FLOOR            = 16
 # Constant gap (visible cols) between the stats/model cluster and the
 # activity snippet in tree-single rows, once the model label is padded to the
 # cohort's widest model width (see renderer.Renderer.subagent_row). Widened

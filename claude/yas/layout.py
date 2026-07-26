@@ -17,9 +17,10 @@ from yas.constants import (
     GLYPH_WF_DIVIDER,
     LINES_LABEL,
     RESET,
-    SUBAGENT_DESC_MIN_WIDTH,
+    SUBAGENT_DESC_FLOOR,
     SUBAGENT_DISPLAY_CAP,
     SUBAGENT_RETENTION_SECONDS,
+    SUBAGENT_STATS_ACTIVITY_GAP,
     subagent_is_terminal,
     subagent_status,
     SUBAGENT_TREE_PLAN_WIDTH,
@@ -33,7 +34,12 @@ from yas.constants import (
 from yas.info import SessionView, _fmt_elapsed_clock
 from yas.info.subagents import RunningSubagent, cap_tree_groups, read_last_prompt_ts, tree_order
 from yas.render.gradient import model_display
-from yas.render.metrics import subagent_cluster_field_offsets, subagent_dur_str, subagent_share
+from yas.render.metrics import (
+    subagent_cluster_field_offsets,
+    subagent_cluster_width,
+    subagent_dur_str,
+    subagent_share,
+)
 from yas.render.pill import Pill
 from yas.renderer import Renderer
 from yas.render.text import _visible_width, _token_offsets, fmt_tok_fixed
@@ -257,19 +263,54 @@ def subagent_cells(
     return cells
 
 
-def tree_columns(cells: list[tuple[RunningSubagent, str]], width: int) -> tuple[int, int, int]:
+def tree_desc_content_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+    """Widest `sub.description` string across a tree cohort's visible rows.
+
+    Used by `tree_columns` to size the description column to what the cohort
+    actually needs (content-measured) rather than a fixed guarantee/fraction
+    of the terminal width — the same "measure, don't assume" pattern as
+    `tree_model_width`/`tree_lines_width`/`tree_share_width`. A subagent's
+    `description` is set once at spawn and doesn't change frame-to-frame
+    (unlike `last_activity`, which does), so measuring it here carries none
+    of the jitter risk that measuring the activity snippet would.
+    """
+    return max((_visible_width(sub.description or '') for sub, _ in cells), default=0)
+
+
+def tree_columns(
+    cells: list[tuple[RunningSubagent, str]],
+    width: int,
+    *,
+    cluster_full_w: int = 0,
+) -> tuple[int, int, int]:
     """Compute the (desc_col, stats_col, activity_col) anchors for tree-single rows.
 
     ``desc_col`` is the widest (prefix + duration + type) front-field across the
     cohort, plus the leading gap before ' · description' — so every row's
     description starts at the same absolute column regardless of its own prefix
     depth or type-name length (the renderer pads the shorter rows' type field to
-    match). ``stats_col``/``activity_col`` target roughly 30%/50% of the row
-    width per the design mock, clamped so a very wide front field (long prefix +
-    type name) can never push them left of where the preceding field ends.
+    match).
+
+    Priority (inverted from the earlier design): the description/activity text
+    is the ELASTIC side of the row and truncates first as the terminal
+    narrows; the lines/share%/tok stats cluster is protected and sheds only
+    once the description is already at its floor (`SUBAGENT_DESC_FLOOR`). So
+    ``stats_col`` — where the cluster's leading '·' lands — is placed at
+    ``desc_col + 3 + min(cohort's longest actual description, available room)``:
+    it grows with the description's real content (never truncating on a wide
+    terminal just because of a fixed cap) but never pads the column out past
+    what the longest description needs (no dead gutter on a wide terminal
+    with short descriptions either). ``cluster_full_w`` (the fully-populated
+    cluster's measured width — see `render.metrics.subagent_cluster_width`)
+    is what "available room" is computed against: room is only handed to the
+    description once the full cluster plus a minimal activity gap are
+    accounted for; past that, the description is held at its floor and the
+    cluster starts shedding fields instead (see the "anchored" branch of
+    `Renderer.subagent_row`).
     """
     now      = time.time()
     desc_col = 0
+    desc_content_w = tree_desc_content_width(cells)
     for sub, prefix in cells:
         prefix_w = _visible_width(prefix)
         # dur_s is NOT fixed-width (fmt_dur grows an extra digit past 9
@@ -284,39 +325,38 @@ def tree_columns(cells: list[tuple[RunningSubagent, str]], width: int) -> tuple[
         front_w  = dur_w + 1 + _visible_width(sub.agent_type or '?') + 2  # dur + ' ' + type + marker(2)
         desc_col = max(desc_col, prefix_w + front_w + 1)  # +1: leading space of ' · '
 
-    # `subagent_row`'s anchored path computes desc_max = stats_col - desc_col - 3
-    # (front_w == desc_col - 1 once padded, plus the ' · ' separator), so
-    # stats_col must clear desc_col + 3 + SUBAGENT_DESC_MIN_WIDTH to guarantee a
-    # SUBAGENT_DESC_MIN_WIDTH-char description column (p90 of mined real titles
-    # — see .scratch/session-analysis.md). Unlike the old design, the guarantee
-    # is now a CAP rather than a floor: the description column never grows
-    # past SUBAGENT_DESC_MIN_WIDTH just because the terminal is wide, so a
-    # 300-col box still gets a ~45-char description, not one riding 30% of the
-    # box. The 30%-of-width anchor only kicks in when the guarantee itself
-    # can't fit (very narrow terminals), as a graceful floor.
-    stats_pct       = max(desc_col + 8, round(width * 0.30))
-    stats_guarantee = desc_col + 3 + SUBAGENT_DESC_MIN_WIDTH
-    if stats_guarantee + 16 + 10 <= width:  # +16: activity_col floor, +10: min snippet
-        stats_col = stats_guarantee
-    else:
-        stats_col = stats_pct
+    # Everything after `desc_col + 3` (the ' · ' before the description) is up
+    # for grabs between the description, the cluster, and the activity gap.
+    # Reserve the full cluster plus a minimal activity gap (room for at least
+    # the model-only fallback) first; whatever's left is what the description
+    # is allowed to grow into, capped by what it actually needs so a short
+    # cohort of descriptions never gets padded out into a gutter.
+    activity_floor = 16  # model-only fallback + a breath of activity text
+    room_after_desc_col = max(0, width - desc_col - 3)
+    room_for_desc        = max(0, room_after_desc_col - cluster_full_w - activity_floor)
+    desc_w = min(desc_content_w, max(SUBAGENT_DESC_FLOOR, room_for_desc))
+    # Never grow past the row's own width (degenerate very-narrow case).
+    desc_w = max(0, min(desc_w, room_after_desc_col))
+    stats_col = desc_col + 3 + desc_w
 
-    # The activity column follows the stats/model cluster with at least a
-    # 16-col gap (room for the model-only fallback), but also anchors to
-    # ~60% of the box width so wider terminals leave the full lines/tok(share%)/
-    # model cluster room to render instead of collapsing to a leaner tier —
-    # a fixed +16 gap is only enough for 'stats_col + model', not the richer
-    # cluster, and starves the plan/task-list side-by-side layout of its stats
-    # column on wide boxes.
-    #
-    # Raised from 0.50 -> 0.60 as part of the column rebalance (title/
-    # description column gains room via SUBAGENT_DESC_MIN_WIDTH; the
-    # current-activity column gives back the room it takes: pushing this
-    # anchor further right grows the stats-cluster's available slack
-    # (`stats_w - stats_col`, capped by `activity_col`) by the same amount
-    # `activity_col`'s own trailing text region shrinks by).
-    activity_col = max(stats_col + 16, round(width * 0.60))
+    # The activity column starts after the cluster's full width plus the
+    # constant stats/activity gap, so wider terminals — where the description
+    # didn't need all its "room for full cluster" allotment — hand the extra
+    # space straight to the activity column instead of leaving it as a dead
+    # gutter between the description and the cluster. Floored at
+    # `stats_col + activity_floor` (room for the model-only fallback) and
+    # capped at the row's own width.
+    activity_col = max(stats_col + activity_floor, stats_col + cluster_full_w + SUBAGENT_STATS_ACTIVITY_GAP)
     activity_col = min(activity_col, width)  # never past the row's target width
+    # Degenerate very-narrow case: clamping activity_col down to `width` can
+    # leave less than the activity-floor gap between it and stats_col (the
+    # description was already squeezed to its floor and there still isn't
+    # room). Pull stats_col back in step so the gap invariant callers rely on
+    # (`activity_col >= stats_col + 16`) always holds — the description
+    # degrades below its floor rather than the whole row producing
+    # nonsensical overlapping columns.
+    if activity_col < stats_col + activity_floor:
+        stats_col = max(desc_col + 3, activity_col - activity_floor)
     return desc_col, stats_col, activity_col
 
 
@@ -1141,10 +1181,13 @@ def build_wide(
             right_desc_col = right_stats_col = right_activity_col = None
             right_model_w = right_lines_w = right_share_w = None
             if view.cfg.subagent_tree:
-                right_desc_col, right_stats_col, right_activity_col = tree_columns(right_cells, right_w)
                 right_model_w = tree_model_width(right_cells)
                 right_lines_w = tree_lines_width(right_cells, view.tool_counts.per_agent)
                 right_share_w = tree_share_width(right_cells, session_inout)
+                right_cluster_w = subagent_cluster_width(right_lines_w, right_model_w, right_share_w)
+                right_desc_col, right_stats_col, right_activity_col = tree_columns(
+                    right_cells, right_w, cluster_full_w=right_cluster_w,
+                )
             right_lines: list[str] = []
             for sub, prefix in right_cells:
                 right_lines.extend(
@@ -1213,10 +1256,13 @@ def build_wide(
                 desc_col = stats_col_v = activity_col = None
                 model_w = lines_w = share_w = None
                 if view.cfg.subagent_tree:
-                    desc_col, stats_col_v, activity_col = tree_columns(sub_cells, inner)
                     model_w = tree_model_width(sub_cells)
                     lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)
                     share_w = tree_share_width(sub_cells, session_inout)
+                    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+                    desc_col, stats_col_v, activity_col = tree_columns(
+                        sub_cells, inner, cluster_full_w=cluster_w,
+                    )
                     # Overlay column labels on the section header (the
                     # `separator_dim` row just appended above): 'name' over the
                     # desc column, 'loc read / written' over the lines column,

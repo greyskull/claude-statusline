@@ -112,6 +112,28 @@ def subagent_cluster_field_offsets(
     return lines_off, tok_off, model_off
 
 
+def subagent_cluster_width(lines_w: int, model_w: int, share_w: int, *, tok_w: int = 5) -> int:
+    """Visible width of the FULLY-populated tree-single stats cluster
+    (``· lines · tok (share%) · model``), given the cohort's measured field
+    widths.
+
+    Single source of truth for "how much room does the cluster need if
+    nothing in it is shed", used by `layout.tree_columns` to decide how much
+    of the row's width can go to the (now elastic) description column before
+    it would have to start shedding cluster fields — the description
+    truncates first under width pressure, the cluster only once the
+    description is already at its floor. Mirrors
+    `Renderer.subagent_row.build_cluster(True, True, True)`'s plain-text
+    width exactly (dot + lines_field + sep + tok(+share) + sep + model); see
+    `subagent_cluster_field_offsets` for the matching per-field offsets.
+    """
+    dot          = 2  # '· '
+    sep          = 3  # ' · '
+    lines_full_w = 2 * (1 + 1 + lines_w) + 1  # glyph + space + value, twice, +1 gap
+    tok_full_w   = tok_w + (3 + share_w if share_w else 0)  # ' (' + share + ')'
+    return dot + lines_full_w + sep + tok_full_w + sep + model_w
+
+
 def subagent_share(sub_inout: int, session_inout: int) -> float | None:
     if session_inout <= 0:
         return None
