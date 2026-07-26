@@ -107,14 +107,14 @@ from yas.render.gradient import (
 )
 from yas.context_state import context_state
 from yas.info.git import GitInfo
-from yas.render.metrics import burndown_delta, subagent_share
+from yas.render.metrics import burndown_delta, subagent_dur_str, subagent_share
 from yas.render.pill import Pill
 from yas.render.tasks_view import fmt_duration, select_window, total_elapsed
 from yas.session import ContextWindow, RateBucket, RateLimits
 from yas.info.subagents import RunningSubagent
 from yas.info.workflows import RunningWorkflow
 from yas.info.tasks import TaskList
-from yas.render.text import _middle_ellipsis, _visible_width, fmt_dur, fmt_tok
+from yas.render.text import _middle_ellipsis, _visible_width, fmt_tok
 from yas.tokens import TokenRate
 
 if TYPE_CHECKING:
@@ -789,11 +789,7 @@ class Renderer:
         is_done     = subagent_is_terminal(status)
         run_count   = getattr(sub, 'run_count', 0)
         is_resumed  = (not is_done) and (getattr(sub, 'resumed', False) or run_count >= 1)
-        if is_done:
-            dur = max(0.0, sub.end_ts - sub.first_timestamp)
-        else:
-            dur = max(0.0, now - sub.first_timestamp) if sub.first_timestamp > 0 else 0.0
-        dur_s   = fmt_dur(dur).rjust(5)
+        dur_s   = subagent_dur_str(sub, now)
 
         # Display form keeps any bracketed context-size suffix (e.g. 'sonnet[1m]')
         # from agent frontmatter; colour lookup still keys off the bare family.
@@ -829,7 +825,11 @@ class Renderer:
             # description column as its indented children.
             tree_mode = tree_desc_col is not None
             marker_w  = 2 if tree_mode else 0  # reserved for '✓ ' / '  '
-            front_w  = 5 + 1 + _visible_width(type_text) + marker_w  # dur(5) + ' ' + type
+            # dur_s is NOT fixed-width: fmt_dur grows an extra digit past 9
+            # minutes/hours ('3m36s' is 5 chars, '40m23s' is 6), so measure
+            # the actual string rather than assuming 5 — see subagent_dur_str.
+            dur_w    = _visible_width(dur_s)
+            front_w  = dur_w + 1 + _visible_width(type_text) + marker_w  # dur + ' ' + type
 
             # Tree view: pad the type field so the front (prefix + duration +
             # type) reaches a caller-supplied common width across the whole
@@ -837,7 +837,7 @@ class Renderer:
             # absolute column regardless of prefix depth or type-name length.
             if tree_desc_col is not None:
                 front_w = max(front_w, tree_desc_col - 1)  # -1: leading space of ' · '
-                type_text = type_text.ljust(max(0, front_w - 6 - marker_w))
+                type_text = type_text.ljust(max(0, front_w - dur_w - 1 - marker_w))
 
             # Tree single-line: the current-activity continuation moves onto
             # line 1 as a right-hand column. The stats/model cluster right-

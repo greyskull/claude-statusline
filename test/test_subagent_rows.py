@@ -1120,6 +1120,37 @@ def test_tree_columns_caps_desc_but_not_activity_at_very_wide_width() -> None:
     assert activity_col_300 == max(stats_col_300 + 16, round(300 * 0.50))
 
 
+def test_tree_row_stats_cluster_aligns_across_long_and_short_duration_rows() -> None:
+    # Regression: fmt_dur is NOT fixed-width -- '3m36s' is 5 chars but
+    # '40m23s' (double-digit minutes) is 6. A long-running parent row and a
+    # freshly-spawned prefixed child row used to disagree on the front-field
+    # width because the layout math assumed a constant 5-char duration, so
+    # the whole stats cluster (eye/pencil line-counts, share%, tok, model)
+    # drifted left by one column on the prefixed row. Assert both rows agree
+    # on the absolute start column of the cluster, not a brittle full string.
+    parent = _make_tree_sub('agent-a', agent_type='spec-implementer', ts_off=-2360)  # ~40m23s elapsed
+    child  = _make_tree_sub('agent-b', parent_id='a', agent_type='ui', ts_off=0)      # ~1m40s elapsed
+    cells  = [(parent, ''), (child, '└ ')]
+    width  = 290
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, width)
+    model_w = layout.tree_model_width(cells)
+
+    def cluster_start_col(sub: RunningSubagent, prefix: str) -> int:
+        line1 = _r.subagent_row(
+            sub, width, twoline=True, session_inout=200_000, stats_col=stats_col,
+            tree_prefix=prefix, tree_single=True, tree_desc_col=desc_col,
+            tree_activity_col=activity_col, tree_model_w=model_w, lines=(5, 3),
+        ).split('\n')[0]
+        stripped = strip_ansi(line1)
+        idx = stripped.find(GLYPH_LINES_READ)
+        assert idx != -1
+        return idx
+
+    parent_col = cluster_start_col(parent, '')
+    child_col  = cluster_start_col(child, '└ ')
+    assert parent_col == child_col
+
+
 def test_tree_single_constant_gap_with_model_padded_to_cohort_width() -> None:
     # TASK B: pad every row's model label to the cohort's widest model width
     # (tree_model_w), then a CONSTANT SUBAGENT_STATS_ACTIVITY_GAP-col gap

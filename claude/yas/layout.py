@@ -33,6 +33,7 @@ from yas.constants import (
 from yas.info import SessionView, _fmt_elapsed_clock
 from yas.info.subagents import RunningSubagent, cap_tree_groups, read_last_prompt_ts, tree_order
 from yas.render.gradient import model_display
+from yas.render.metrics import subagent_dur_str
 from yas.render.pill import Pill
 from yas.renderer import Renderer
 from yas.render.text import _visible_width, _token_offsets
@@ -267,13 +268,20 @@ def tree_columns(cells: list[tuple[RunningSubagent, str]], width: int) -> tuple[
     width per the design mock, clamped so a very wide front field (long prefix +
     type name) can never push them left of where the preceding field ends.
     """
+    now      = time.time()
     desc_col = 0
     for sub, prefix in cells:
         prefix_w = _visible_width(prefix)
+        # dur_s is NOT fixed-width (fmt_dur grows an extra digit past 9
+        # minutes/hours: '3m36s' is 5 chars, '40m23s' is 6) — measure the
+        # actual string `subagent_row` will render, or a long-running parent
+        # row silently claims one column less than it needs and every
+        # shorter-duration child row drifts left of it. See subagent_dur_str.
         # +2: reserved marker column ('✓ ' when finished, '  ' otherwise) that
         # `subagent_row` inserts between the prefix and the duration in tree
         # mode — keep in lockstep with its own front_w formula.
-        front_w  = 5 + 1 + _visible_width(sub.agent_type or '?') + 2  # dur(5) + ' ' + type + marker(2)
+        dur_w    = _visible_width(subagent_dur_str(sub, now))
+        front_w  = dur_w + 1 + _visible_width(sub.agent_type or '?') + 2  # dur + ' ' + type + marker(2)
         desc_col = max(desc_col, prefix_w + front_w + 1)  # +1: leading space of ' · '
 
     # `subagent_row`'s anchored path computes desc_max = stats_col - desc_col - 3
