@@ -44,7 +44,9 @@ TWO_COL_SUBAGENT_WIDTH = 120
 # of a wide box instead of being starved by an even split. Still clamped to
 # the 45%-of-inner ceiling on narrow terminals so it degrades to the old
 # behavior when the box is too small to justify a fixed-width left column.
-SUBAGENT_TREE_PLAN_WIDTH = 78
+# 68 (down from an earlier 78) hands the subagent side ~10 more columns on
+# typical wide boxes while still leaving the plan column readable.
+SUBAGENT_TREE_PLAN_WIDTH = 68
 # Floor for the wide layout's three-segment tokens │ cost │ rate row. Below this
 # the row cannot hold both columns at full size plus the rate/spark leader, so
 # build_wide drops it for the compact context line instead of overflowing the
@@ -226,6 +228,16 @@ ELLIPSIS        = '\u2026'  # U+2026 horizontal ellipsis (text truncation)
 GLYPH_IN        = '\u2208'  # U+2208 element-of (path/branch separator)
 GLYPH_UNLIMITED = '\u221e'  # U+221E infinity (unlimited rate limit)
 SPARK_RAMP      = '\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588'  # U+2581..U+2588 sparkline density ramp
+
+# Section-header column labels (render/borders.py `_overlay_labels`) that have
+# a shorter, still-readable form for when their anchor's border run is too
+# short for the full word. Tried before falling back to a whole-word-boundary
+# ellipsis shrink of the original text, and well before a label is dropped.
+LABEL_ABBREVIATIONS: dict[str, str] = {
+    'loc read / written': 'loc r/w',
+    'output sess/day':    'out sess/day',
+    'input sess/day':     'in sess/day',
+}
 
 # ASCII fallbacks for the non-ASCII glyphs above. Used by ascii render mode
 # (Config.ascii_mode / YAS_ASCII_MODE) to keep the statusline legible in

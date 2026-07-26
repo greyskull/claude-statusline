@@ -575,6 +575,14 @@ def test_side_by_side_plan_column_capped_in_tree_mode(monkeypatch: pytest.Monkey
     assert left_w == SUBAGENT_TREE_PLAN_WIDTH, f'left_w={left_w}, expected {SUBAGENT_TREE_PLAN_WIDTH}'
 
 
+def test_subagent_tree_plan_width_cap_value() -> None:
+    """The tree-mode plan-column cap is a modest ~13% reduction from its
+    previous 78-col value (78 -> 68), so the subagent side gets more room
+    without truncating the plan column into uselessness."""
+    from yas.constants import SUBAGENT_TREE_PLAN_WIDTH
+    assert SUBAGENT_TREE_PLAN_WIDTH == 68
+
+
 def test_side_by_side_plan_split_unchanged_when_tree_mode_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tree mode off: identical to the pre-existing 45%-of-inner split at the
     same wide width — byte-identical output either way."""
@@ -600,14 +608,14 @@ def test_side_by_side_plan_split_unchanged_when_tree_mode_off(monkeypatch: pytes
 
 
 def test_side_by_side_plan_column_degrades_at_narrow_width(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tree mode on, but the box is too narrow for a fixed 78-col plan column
-    to leave >=40 cols for the tree: falls back to the old 45%-of-inner cap
-    (still side-by-side, just not pinned at SUBAGENT_TREE_PLAN_WIDTH)."""
+    """Tree mode on, but the box is too narrow for a fixed SUBAGENT_TREE_PLAN_WIDTH-col
+    plan column to leave >=40 cols for the tree: falls back to the old
+    45%-of-inner cap (still side-by-side, just not pinned at the fixed width)."""
     from helper import strip_ansi
     from yas.constants import SUBAGENT_TREE_PLAN_WIDTH
     _both_sections(monkeypatch, long_subject=True)
 
-    width = 140  # inner=136, 45%-cap=61 < SUBAGENT_TREE_PLAN_WIDTH=78
+    width = 140  # inner=136, 45%-cap=61 < SUBAGENT_TREE_PLAN_WIDTH=68
     inner = width - 4
     assert inner * 45 // 100 < SUBAGENT_TREE_PLAN_WIDTH, 'precondition: 45% cap must undercut the fixed width here'
 

@@ -4,7 +4,7 @@ import pytest
 import yas.render.borders as borders
 import yas.render.gradient as gradient
 import yas.renderer as renderer_mod
-from yas.constants import PILL_LEFT, PILL_RIGHT, PILL_TL, PILL_TR, PILL_BL, PILL_BR
+from yas.constants import ELLIPSIS, LABEL_ABBREVIATIONS, PILL_LEFT, PILL_RIGHT, PILL_TL, PILL_TR, PILL_BL, PILL_BR
 from yas.render.pill import Pill
 from yas.render.text import _visible_width, superscript
 from helper import strip_ansi
@@ -194,17 +194,79 @@ def test_label_differs_only_at_overlaid_columns(r: borders.BorderRenderer, metho
             assert labc == barec, col
 
 
-def test_label_truncates_before_elbow(r: borders.BorderRenderer) -> None:
-    # 'session' (7 glyphs) anchored at col 20 with an elbow at col 24 → only
-    # cols 20..23 are fill; the label truncates and the elbow survives.
+def test_label_shifts_left_to_fit_before_elbow(r: borders.BorderRenderer) -> None:
+    # 'session' (7 glyphs) anchored at col 20, with an elbow at col 24 as the
+    # only thing bounding it on the right (nothing bounds it on the left
+    # short of the border's own start) — the anchor-to-elbow gap (cols
+    # 20..23, 4 columns) is too short for the full word, but the *whole*
+    # contiguous fill run the anchor sits in (cols 2..23, 22 columns) easily
+    # holds it. Rather than clipping or shrinking, the label shifts left just
+    # far enough to end right before the elbow, landing in full.
     out = r.border_separator(width=60, downs=(24,), labels=(('session', 20),))
     stripped = strip_ansi(out)
     assert stripped[23] == '┬'  # elbow (col 24) intact
     sup = superscript('session')
-    assert stripped[19:23] == sup[:4]  # first 4 glyphs written
-    # the 5th glyph would have landed on the elbow column — it must not appear
-    assert sup[4] != '┬'
+    assert stripped[16:23] == sup  # shifted left 3 cols, written in full
     assert _visible_width(out) == 60
+
+
+@pytest.mark.parametrize('anchor,elbow', [(20, 24), (10, 13), (30, 34), (25, 27)])
+def test_label_never_shifts_past_its_own_anchor_column(r: borders.BorderRenderer, anchor: int, elbow: int) -> None:
+    # A label must still cover the column it names -- it can shift left to
+    # make room to fit, but never so far that the anchor column itself falls
+    # outside the written span.
+    out = r.border_separator(width=60, downs=(elbow,), labels=(('session', anchor),))
+    bare = r.border_separator(width=60, downs=(elbow,))
+    stripped = strip_ansi(out)
+    bare_stripped = strip_ansi(bare)
+    diffs = [i for i in range(len(stripped)) if stripped[i] != bare_stripped[i]]
+    assert diffs, 'expected the label to render something'
+    assert (anchor - 1) in range(diffs[0], diffs[-1] + 1)
+
+
+def test_label_uses_caller_abbreviation_when_full_text_cannot_shift_to_fit(r: borders.BorderRenderer) -> None:
+    # 'loc read / written' doesn't fit even the full run between two nearby
+    # elbows, but its registered abbreviation ('loc r/w') does -- and that's
+    # preferred over an ellipsis shrink of the full phrase.
+    out = r.border_separator(width=60, downs=(9, 24), labels=(('loc read / written', 12),))
+    stripped = strip_ansi(out)
+    assert stripped[8] == '┬' and stripped[23] == '┬'  # both elbows intact
+    run = stripped[9:23]  # the whole fill run between the two elbows
+    assert superscript('loc r/w') in run
+    assert ELLIPSIS not in run  # abbreviation fits outright, no shrink needed
+
+
+def test_label_word_boundary_shrink_never_cuts_a_word(r: borders.BorderRenderer) -> None:
+    # A run of exactly 3 columns can't hold 'ab cd ef' (8 chars) or even its
+    # first two tokens ('ab cd', 5 chars), but it can hold the first whole
+    # token plus a trailing ellipsis ('ab…', 3 chars) -- never a fragment of
+    # a token itself (never 'a…' cutting "ab" in half).
+    out = r.border_separator(width=60, downs=(16, 20), labels=(('ab cd ef', 17),))
+    stripped = strip_ansi(out)
+    assert stripped[15] == '┬' and stripped[19] == '┬'
+    assert stripped[16:19] == superscript('ab') + ELLIPSIS
+
+
+def test_label_dropped_when_no_readable_form_fits(r: borders.BorderRenderer) -> None:
+    # A single-token label ('xxxxxxxxxx', no spaces) in a 1-column run: not
+    # even one token plus an ellipsis can fit, and there's no shorter word
+    # boundary to fall back to -- the label is dropped entirely rather than
+    # printing a lone unreadable glyph.
+    bare = r.border_separator(width=60, downs=(19, 21))
+    lab = r.border_separator(width=60, downs=(19, 21), labels=(('xxxxxxxxxx', 20),))
+    assert bare == lab
+
+
+def test_label_dropped_when_anchor_run_too_short_and_unsplittable(r: borders.BorderRenderer) -> None:
+    # Same as above but confirms the elbows on both sides stay untouched and
+    # the single fill column between them is unaffected too.
+    bare = r.border_separator(width=60, downs=(19, 21))
+    lab = r.border_separator(width=60, downs=(19, 21), labels=(('xxxxxxxxxx', 20),))
+    stripped_bare = strip_ansi(bare)
+    stripped_lab = strip_ansi(lab)
+    assert stripped_bare[18] == stripped_lab[18] == '┬'
+    assert stripped_bare[20] == stripped_lab[20] == '┬'
+    assert stripped_bare[19] == stripped_lab[19]
 
 
 def test_label_dropped_when_anchor_is_elbow(r: borders.BorderRenderer) -> None:
@@ -266,3 +328,66 @@ def test_pill_columns_protected_from_label_dim(r: borders.BorderRenderer) -> Non
     assert bare_s[20:30] == lab_s[20:30]
     assert bare_s[20] == PILL_BL
     assert _visible_width(lab) == 40
+
+
+def _is_valid_rendered_label(written: str, text: str) -> bool:
+    """True if `written` is a legitimate rendering of `text`: the full label,
+    its registered abbreviation in full, or a whole-token prefix of either
+    plus a trailing ELLIPSIS. False for anything else (in particular, any
+    mid-word fragment)."""
+    if written == superscript(text):
+        return True
+    sources = [text]
+    abbrev = LABEL_ABBREVIATIONS.get(text)
+    if abbrev:
+        sources.append(abbrev)
+        if written == superscript(abbrev):
+            return True
+    for src in sources:
+        tokens = src.split(' ')
+        for i in range(len(tokens), 0, -1):
+            if written == superscript(' '.join(tokens[:i])) + ELLIPSIS:
+                return True
+    return False
+
+
+@pytest.mark.parametrize('method', ['border_top', 'border_separator', 'border_separator_dim'])
+@pytest.mark.parametrize('width', [40, 55, 60, 80, 100, 120, 160])
+def test_label_sweep_never_clips_mid_word_or_hits_elbow(r: borders.BorderRenderer, method: str, width: int) -> None:
+    # Sweep a range of widths (crossing the narrow/medium/wide thresholds),
+    # run lengths, and label texts (including the exact phrases from the bug
+    # report, one of which has a registered abbreviation and one that
+    # doesn't). Each run is bounded by two elbows close together so the fit
+    # logic (shift / abbreviate / word-boundary shrink / drop) actually gets
+    # exercised instead of always having room to shift into. At every
+    # combination: the label is either untouched-from-bare (dropped) or a
+    # legitimate rendering per `_is_valid_rendered_label`; either way neither
+    # elbow is ever disturbed and the two elbows' own columns never move.
+    labels = ['input', 'output', 'cost', 'loc read / written', 'output sess/day']
+    for text in labels:
+        for run_len in range(1, 12):
+            left_elbow = 5
+            right_elbow = left_elbow + run_len + 1
+            anchor = left_elbow + 1 + (run_len // 2)  # anchor somewhere inside the run
+            if right_elbow >= width - 1:
+                continue
+            kwargs: dict = {'width': width, 'downs': (left_elbow, right_elbow),
+                             'labels': ((text, anchor),)}
+            out = getattr(r, method)(**kwargs)
+            bare = getattr(r, method)(**{k: v for k, v in kwargs.items() if k != 'labels'})
+            stripped = strip_ansi(out)
+            bare_stripped = strip_ansi(bare)
+            assert _visible_width(out) == width
+            # Both elbows survive untouched, always.
+            assert stripped[left_elbow - 1] == '┬'
+            assert stripped[right_elbow - 1] == '┬'
+            assert stripped == bare_stripped[:left_elbow] + stripped[left_elbow:right_elbow - 1] + bare_stripped[right_elbow - 1:]
+            window = stripped[left_elbow:right_elbow - 1]
+            bare_window = bare_stripped[left_elbow:right_elbow - 1]
+            if window == bare_window:
+                continue  # dropped -- run untouched, already covered by the elbow asserts above
+            # Find the contiguous written span within the window and validate it.
+            diffs = [i for i in range(len(window)) if window[i] != bare_window[i]]
+            assert diffs, 'window differs from bare but no differing index found'
+            span = window[diffs[0]:diffs[-1] + 1]
+            assert _is_valid_rendered_label(span, text), f'{span!r} is not a legitimate rendering of {text!r}'
