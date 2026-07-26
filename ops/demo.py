@@ -191,7 +191,7 @@ def write_subagents(
     age_seconds:  float = 0.0,
     mtime_age:    float = 0.0,
 ) -> None:
-    """Each subagent entry: (agentType, description, billed_in, output_tokens[, action[, done_seconds_ago[, parent[, notifications]]]]).
+    """Each subagent entry: (agentType, description, billed_in, output_tokens[, action[, done_seconds_ago[, parent[, notifications[, lines[, start_age]]]]]]).
 
     parent (7th element, int > 0) is the 1-based index of this agent's spawner
     within `subagents`; it writes parentAgentId/spawnDepth into the meta.json so
@@ -223,6 +223,22 @@ def write_subagents(
     last notification) sets ``resumed``/``run_count`` accordingly. When the
     latest status is terminal, the file mtime is pinned to that pair's
     timestamp (frozen/idle); otherwise mtime is left fresh (still active).
+
+    lines (9th element, a ``(lines_read, lines_changed)`` int pair) drives
+    ``ToolCounts.per_agent`` for this agent: synthesises a Read tool_use +
+    matching cat-n-shaped tool_result (``lines_read`` newlines) and an Edit
+    tool_use whose ``old_string`` carries exactly ``lines_changed`` newlines
+    (``new_string`` carries none, so ``max(nl(old), nl(new))`` lands exactly
+    on the target). Written as its own message.id, independent of the
+    displayed `action` above, so a scenario can set line counts without
+    changing what the row's activity column shows. Omit/``None`` for an
+    agent that should render the field blank (no lines data).
+
+    start_age (10th element, float seconds) overrides this agent's start
+    timestamp directly (``now - start_age``) instead of the default
+    ``age_seconds - i`` stagger, letting one cohort mix widely different
+    elapsed durations (e.g. straddling the 10-minute ``fmt_dur`` width
+    jump) without needing giant `age_seconds`/index gaps.
     """
     # Match Claude Code's projects/ dir convention (cross-platform).
     # See statusline_command.py:RunningSubagents.from_session for full notes.
@@ -238,8 +254,17 @@ def write_subagents(
     for i, row in enumerate(subagents, 1):
         # Stagger start timestamps 1s apart so first_timestamp ordering (and
         # therefore sibling order in the tree view) follows entry order rather
-        # than filesystem glob order on ties.
-        ts = (datetime.now() - timedelta(seconds=max(0.0, age_seconds - i))).astimezone().isoformat()
+        # than filesystem glob order on ties. `start_age` (10th element), when
+        # given, overrides this stagger entirely so a scenario can pin a
+        # specific elapsed duration per-agent (independent of list position) —
+        # needed to straddle the 10-minute fmt_dur width boundary within one
+        # cohort (see the `lines` field below for why this exists).
+        start_age_raw = row[9] if len(row) > 9 else None
+        if isinstance(start_age_raw, (int, float)):
+            start_age = float(start_age_raw)
+        else:
+            start_age = max(0.0, age_seconds - i)
+        ts = (datetime.now() - timedelta(seconds=start_age)).astimezone().isoformat()
         agent_type_raw, description_raw, billed_in_raw, output_tokens_raw = row[:4]
         action_raw    = row[4] if len(row) > 4 else None
         done_secs_raw = row[5] if len(row) > 5 else None
@@ -247,6 +272,12 @@ def write_subagents(
         parent_raw    = row[6] if len(row) > 6 else None
         parent_idx    = int(parent_raw) if isinstance(parent_raw, (int, float)) and parent_raw > 0 else None
         notifications = row[7] if len(row) > 7 else None
+        lines_raw     = row[8] if len(row) > 8 else None
+        lines_spec    = (
+            (int(lines_raw[0]), int(lines_raw[1]))
+            if isinstance(lines_raw, tuple) and len(lines_raw) == 2
+            else None
+        )
         agent_type    = str(agent_type_raw)
         description   = str(description_raw)
         billed_in     = int(billed_in_raw) if isinstance(billed_in_raw, (int, float)) else 0
@@ -260,6 +291,69 @@ def write_subagents(
             meta_obj['spawnDepth']    = depths[i]
         (subagents_dir / f'{name}.meta.json').write_text(json.dumps(meta_obj))
         jsonl = subagents_dir / f'{name}.jsonl'
+        file_lines: list[str] = []
+        if lines_spec is not None:
+            # Synthesise a Read+tool_result pair and an Edit whose old/new
+            # newline counts drive ToolCounts.per_agent, independent of the
+            # display `action` above. Written as their own message.id so they
+            # don't collide with the activity message's last-write-wins dedup
+            # (count_transcript.md: LAST occurrence per message.id). The Read
+            # tool_use line MUST precede its tool_result line in the file
+            # (count_transcript pairs by tool_use_id seen-so-far).
+            read_n, changed_n = lines_spec
+            lines_blocks: list[dict[str, object]] = []
+            read_tool_use_id = f'tool_demo_lines_read_{i}'
+            if read_n > 0:
+                lines_blocks.append({
+                    'type':  'tool_use',
+                    'id':    read_tool_use_id,
+                    'name':  'Read',
+                    'input': {'file_path': f'demo/lines-coverage-{i}.py'},
+                })
+            if changed_n > 0:
+                lines_blocks.append({
+                    'type':  'tool_use',
+                    'name':  'Edit',
+                    'input': {
+                        'file_path':  f'demo/lines-coverage-{i}.py',
+                        # 'x\n' repeated changed_n times carries exactly
+                        # changed_n newlines; new_string carries none, so
+                        # max(nl(old), nl(new)) == changed_n exactly.
+                        'old_string': 'x\n' * changed_n,
+                        'new_string': 'y',
+                    },
+                })
+            if lines_blocks:
+                lines_entry: dict[str, object] = {
+                    'type':      'assistant',
+                    'timestamp': ts,
+                    'message': {
+                        'id':      f'msg_demo_lines_{i}',
+                        'role':    'assistant',
+                        'model':   model,
+                        'usage': {
+                            'input_tokens': 0, 'cache_creation_input_tokens': 0,
+                            'cache_read_input_tokens': 0, 'output_tokens': 0,
+                        },
+                        'content': lines_blocks,
+                    },
+                }
+                file_lines.append(json.dumps(lines_entry))
+            if read_n > 0:
+                # cat -n shaped tool_result: read_n numbered lines, read_n
+                # trailing newlines total (count_transcript's lines_read sniff).
+                content = '\n'.join(f'{n}\tline{n}' for n in range(1, read_n + 1)) + '\n'
+                result_entry: dict[str, object] = {
+                    'type':      'user',
+                    'timestamp': ts,
+                    'message': {
+                        'role': 'user',
+                        'content': [
+                            {'type': 'tool_result', 'tool_use_id': read_tool_use_id, 'content': content},
+                        ],
+                    },
+                }
+                file_lines.append(json.dumps(result_entry))
         if billed_in or output_tokens or action_raw:
             # cache_creation carries the bulk; input_tokens gets the remainder
             cache_creation = int(billed_in * 0.7)
@@ -289,7 +383,9 @@ def write_subagents(
                 'timestamp': ts,
                 'message':   msg,
             }
-            jsonl.write_text(json.dumps(entry) + '\n')
+            file_lines.append(json.dumps(entry))
+        if file_lines:
+            jsonl.write_text('\n'.join(file_lines) + '\n')
         else:
             jsonl.write_text('')
         if done_secs is not None:
@@ -1249,6 +1345,49 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 30.0,
         seven_day_pct = 20.0,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-lines',
+        context_pct = 0.40,
+        # Closes the per-subagent lines-read/changed coverage gap (no other
+        # demo scenario carries non-zero `ToolCounts.per_agent` values, so the
+        # tree-row `lines_field` never rendered a number and couldn't have
+        # caught the alignment regressions fixed in 7d39f2d/1a2273d). One
+        # unprefixed running root + two nested children:
+        #   - child 1: 2-digit-width lines (fmt_tok "42"/"15") and a
+        #     sub-10-minute duration (3m36s = 5 chars, subagent_dur_str).
+        #   - child 2: 4-char-width lines (fmt_tok "8.6K"/"1.2K") and a
+        #     post-10-minute duration (40m23s = 6 chars) — the exact
+        #     dur_w mismatch class that was the 7d39f2d bug.
+        # tree_lines_width/tree_columns must measure both cohort maxima (not
+        # assume a fixed width) for the '⇩ read ⇧ changed' columns and the
+        # duration-first identity column to land on the same absolute
+        # position across both rows despite the digit/duration-width jump.
+        subagents   = [
+            ('explore', 'Coordinate cross-file gradient border fix', 45_000, 1_200,
+             ('Bash', {'command': 'echo coordinating'}), None, None, None, None, 310),
+            ('ops', 'Patch elbow math off-by-one in renderer.py', 62_000, 2_100,
+             ('Edit', {'file_path': 'claude/yas/renderer.py', 'old_string': 'a', 'new_string': 'b'}),
+             None, 1, None, (42, 15), 216),
+            ('api', 'Backfill lines-read/changed regression coverage', 91_000, 3_600,
+             ('Read', {'file_path': 'test/test_subagent_rows.py'}),
+             None, 1, None, (8_600, 1_200), 2423),
+        ],
+        five_hour_pct = 30.0,
+        seven_day_pct = 20.0,
+        # max_width=400: tree-single rows reserve their stats cluster's slack
+        # as `min(target_w, tree_activity_col - 2) - stats_col`, and
+        # tree_activity_col is capped at `stats_col + 16` until the box is
+        # wide enough for `round(width * 0.50)` to win instead (renderer.py's
+        # Decision 10 shed ladder drops `lines` first, before share%/tok, so a
+        # narrow box always sheds to the model-only fallback regardless of
+        # this scenario's data). A wide box gives the cluster the ~45+ cols
+        # `lines` needs to survive the shed — this scenario needs an actually
+        # wide terminal (or a real tty) to visually confirm the numbers;
+        # narrower terminals will still compute correct `per_agent` data but
+        # the row will (correctly, per existing shed-ladder behaviour) fall
+        # back to model-only.
+        yas_toml    = '[layout]\nsubagent_tree = true\nmax_width = 400\n',
     ),
 ]
 
