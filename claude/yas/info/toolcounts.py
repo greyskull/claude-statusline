@@ -100,6 +100,9 @@ def count_transcript(
     per_id_changed: dict[str, int] = {}
     # tool_use id -> True for each Read seen; used to match tool_result.
     read_ids: set[str] = set()
+    # tool_use_id -> True once its tool_result has contributed to lines_read,
+    # so a retransmitted/duplicate tool_result can't double-count.
+    counted_read_ids: set[str] = set()
     lines_read = 0
     lines_changed = 0
 
@@ -126,16 +129,47 @@ def count_transcript(
                 try:
                     d = json.loads(raw)
                     msg = d.get('message') or {}
-                    mid = msg.get('id')
-                    if not mid:
-                        continue
 
                     # Clear_epoch guard: the single window for both tool counts
-                    # and line counts (Decision 4).
+                    # and line counts (Decision 4). Applied to every record,
+                    # tool_use and tool_result alike, before either walk below.
                     if clear_epoch is not None:
                         ts = d.get('timestamp', '') or ''
                         if _parse_iso_to_epoch(ts) < clear_epoch:
                             continue
+
+                    # Walk tool_result blocks to extract lines_read (Decision 6).
+                    # This runs unconditionally, independent of message.id: a
+                    # tool_result always lives on a user-role message, which in
+                    # real transcripts never carries a message.id at all — gating
+                    # this walk on `mid` (as tool_use accounting does) would skip
+                    # every tool_result, unconditionally. Keyed only on
+                    # tool_use_id membership in read_ids, which the tool_use walk
+                    # below populates from assistant-role lines that always
+                    # precede the matching tool_result in the file (Decision 7).
+                    for block in msg.get('content') or []:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get('type') != 'tool_result':
+                            continue
+                        tool_use_id = block.get('tool_use_id')
+                        if tool_use_id not in read_ids or tool_use_id in counted_read_ids:
+                            continue
+                        content = block.get('content')
+                        # Only count if content is a string starting with '1\t'
+                        # (the cat -n shape, Decision 2).
+                        if isinstance(content, str) and content.startswith('1\t'):
+                            lines_read += content.count('\n')
+                        counted_read_ids.add(tool_use_id)
+
+                    # The mid guard below only protects the tool_use-side
+                    # accounting (`counts`, `lines_changed` via per_id /
+                    # per_id_changed last-write-wins dedup) — tool_result
+                    # records legitimately have no message.id and must not be
+                    # gated by this check.
+                    mid = msg.get('id')
+                    if not mid:
+                        continue
 
                     names: list[str] = []
                     id_changed = 0
@@ -172,24 +206,6 @@ def count_transcript(
                                 content = inp.get('content')
                                 id_changed += _nl(content)
                             # Note: NotebookEdit is not counted (Decision 1).
-
-                    # Walk tool_result blocks to extract lines_read (Decision 6).
-                    # Note: tool_result always appears on a LATER line than its
-                    # tool_use, so accumulating read_ids forward is sufficient —
-                    # no second pass, no lookahead (Decision 7).
-                    for block in msg.get('content') or []:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get('type') != 'tool_result':
-                            continue
-                        tool_use_id = block.get('tool_use_id')
-                        if tool_use_id not in read_ids:
-                            continue
-                        content = block.get('content')
-                        # Only count if content is a string starting with '1\t'
-                        # (the cat -n shape, Decision 2).
-                        if isinstance(content, str) and content.startswith('1\t'):
-                            lines_read += content.count('\n')
 
                     # Last-write-wins dedup: replace per message.id and sum
                     # at the end (Decision 8).
