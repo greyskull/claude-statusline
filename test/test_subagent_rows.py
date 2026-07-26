@@ -1341,6 +1341,70 @@ def test_shed_order_lines_then_share_then_tok() -> None:
     assert (False, False, True) in seen
 
 
+def test_tree_lines_width_measures_cohort_max() -> None:
+    # layout.tree_lines_width returns the widest fmt_tok string any cohort
+    # row's read/changed count actually needs, not a hardcoded ceiling — a
+    # cohort of small counts should measure narrow.
+    a = _make_tree_sub('agent-a')
+    a.jsonl_path = 'a.jsonl'
+    b = _make_tree_sub('agent-b', parent_id='a')
+    b.jsonl_path = 'b.jsonl'
+    cells = [(a, ''), (b, '')]
+    per_agent = {a.jsonl_path: (50, 194), b.jsonl_path: (3, 0)}
+    assert layout.tree_lines_width(cells, per_agent) == len(fmt_tok(194))  # '194' -> 3
+    # A cohort with no lines data at all falls back to 1 (matches the blank
+    # field's own minimum), not 0 or an error.
+    assert layout.tree_lines_width(cells, {}) == 1
+
+
+def test_tree_lines_w_tightens_gap_vs_hardcoded_six() -> None:
+    # Passing the cohort's measured width (narrower than fmt_tok's 6-char
+    # ceiling) shrinks the glyph->number gap; the default (no tree_lines_w)
+    # still falls back to the safe 6-char reservation.
+    sub = _make_tree_sub('agent-a')
+    sub.jsonl_path = 'a.jsonl'
+    si  = (sub.total_input + sub.output) * 2
+    line_default = strip_ansi(_r.subagent_row(
+        sub, 140, twoline=True, session_inout=si, tree_single=True, lines=(50, 194),
+    ).split('\n')[0])
+    measured_w = layout.tree_lines_width([(sub, '')], {sub.jsonl_path: (50, 194)})
+    line_measured = strip_ansi(_r.subagent_row(
+        sub, 140, twoline=True, session_inout=si, tree_single=True, lines=(50, 194),
+        tree_lines_w=measured_w,
+    ).split('\n')[0])
+    gap_default  = line_default.index('50') - (line_default.index(GLYPH_LINES_READ) + 1)
+    gap_measured = line_measured.index('50') - (line_measured.index(GLYPH_LINES_READ) + 1)
+    assert gap_measured < gap_default
+    # measured_w is 3 (the wider of '50' and '194'), so '50' gets exactly one
+    # extra rjust pad column on top of the literal space before it — nowhere
+    # near the 6-char reservation the un-measured default falls back to.
+    assert gap_measured == 2
+
+
+def test_tree_lines_w_alignment_holds_across_mixed_digit_widths() -> None:
+    # The whole point of measuring the cohort width instead of hardcoding it:
+    # a row with a 1-digit count and a row with a 3-digit count still start
+    # their numbers at the SAME absolute column when given the same
+    # cohort-measured tree_lines_w.
+    short = _make_tree_sub('agent-a')
+    short.jsonl_path = 'short.jsonl'
+    long  = _make_tree_sub('agent-b', parent_id='a')
+    long.jsonl_path = 'long.jsonl'
+    cells = [(short, ''), (long, '')]
+    per_agent = {short.jsonl_path: (5, 0), long.jsonl_path: (500, 12)}
+    w = layout.tree_lines_width(cells, per_agent)
+    si = 1_000_000
+
+    def read_col(sub: RunningSubagent, lines: tuple) -> int:
+        line1 = strip_ansi(_r.subagent_row(
+            sub, 140, twoline=True, session_inout=si, tree_single=True,
+            lines=lines, tree_lines_w=w,
+        ).split('\n')[0])
+        return line1.index(GLYPH_LINES_READ)
+
+    assert read_col(short, (5, 0)) == read_col(long, (500, 12))
+
+
 def test_narrow_width_no_lines_matches_pre_change_output() -> None:
     # A narrow width that already sheds fields today renders byte-identically
     # to the pre-change output for callers that don't pass `lines` (zero

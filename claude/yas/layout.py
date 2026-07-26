@@ -36,7 +36,7 @@ from yas.render.gradient import model_display
 from yas.render.metrics import subagent_dur_str
 from yas.render.pill import Pill
 from yas.renderer import Renderer
-from yas.render.text import _visible_width, _token_offsets
+from yas.render.text import _visible_width, _token_offsets, fmt_tok
 from yas.tokens import TickRecord
 
 # Characters that can start a dirty-status block in the plain-text path string.
@@ -322,6 +322,28 @@ def tree_model_width(cells: list[tuple[RunningSubagent, str]]) -> int:
     the activity snippet without a variable fill-to-column pad.
     """
     return max((_visible_width(model_display(sub.model)) for sub, _ in cells), default=0)
+
+
+def tree_lines_width(cells: list[tuple[RunningSubagent, str]], per_agent: dict[str, tuple[int, int]]) -> int:
+    """Widest `fmt_tok` string any cohort row's read/changed count needs.
+
+    Passed to `Renderer.subagent_row` as `tree_lines_w` so the Lines Read/
+    Changed field reserves only as much column width as this cohort's actual
+    counts require, instead of always assuming `fmt_tok`'s full 6-char ceiling
+    (`'999.9B'`) — the same "measure, don't assume" fix already applied to the
+    duration field (`subagent_dur_str`), since `fmt_tok`'s output is equally
+    NOT fixed-width. Falls back to 1 for an all-idle cohort (no lines data at
+    all), so a idle row's blank-field width still matches a populated one.
+    """
+    widths = []
+    for sub, _ in cells:
+        pair = per_agent.get(sub.jsonl_path)
+        if pair is None:
+            continue
+        read, changed = pair
+        widths.append(len(fmt_tok(read)))
+        widths.append(len(fmt_tok(changed)))
+    return max(widths, default=1)
 
 
 def workflow_divider_col(width: int) -> int:
@@ -1091,10 +1113,11 @@ def build_wide(
             divider_col  = 3 + left_w + 1  # 1-indexed visual column of the │
             left_lines   = r.task_row(tasks, left_w)
             right_cells  = subagent_cells(visible_subs, view.cfg.subagent_tree)
-            right_desc_col = right_stats_col = right_activity_col = right_model_w = None
+            right_desc_col = right_stats_col = right_activity_col = right_model_w = right_lines_w = None
             if view.cfg.subagent_tree:
                 right_desc_col, right_stats_col, right_activity_col = tree_columns(right_cells, right_w)
                 right_model_w = tree_model_width(right_cells)
+                right_lines_w = tree_lines_width(right_cells, view.tool_counts.per_agent)
             right_lines: list[str] = []
             for sub, prefix in right_cells:
                 right_lines.extend(
@@ -1102,6 +1125,7 @@ def build_wide(
                                    stats_col=right_stats_col, tree_prefix=prefix,
                                    tree_single=view.cfg.subagent_tree, tree_desc_col=right_desc_col,
                                    tree_activity_col=right_activity_col, tree_model_w=right_model_w,
+                                   tree_lines_w=right_lines_w,
                                    lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n')
                 )
             div_color = r.grad_at(divider_col - 1, width, fill=fill)
@@ -1159,10 +1183,11 @@ def build_wide(
                         rows.append(RowSpec('content', content=f'{left_lines[j]}{divider}{right_lines[j]}'))
             else:
                 inner = width - 4
-                desc_col = stats_col_v = activity_col = model_w = None
+                desc_col = stats_col_v = activity_col = model_w = lines_w = None
                 if view.cfg.subagent_tree:
                     desc_col, stats_col_v, activity_col = tree_columns(sub_cells, inner)
                     model_w = tree_model_width(sub_cells)
+                    lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)
                 else:
                     stats_col_v = 100 if width >= 125 else None
                 for sub, prefix in sub_cells:
@@ -1170,7 +1195,7 @@ def build_wide(
                                                stats_col=stats_col_v,
                                                tree_prefix=prefix, tree_single=view.cfg.subagent_tree,
                                                tree_desc_col=desc_col, tree_activity_col=activity_col,
-                                               tree_model_w=model_w,
+                                               tree_model_w=model_w, tree_lines_w=lines_w,
                                                lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n'):
                         rows.append(RowSpec('content', content=line))
             pending_ups = ()

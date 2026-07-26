@@ -5,7 +5,32 @@ from __future__ import annotations
 import time
 
 from yas.constants import subagent_is_terminal, subagent_status
-from yas.render.text import fmt_dur
+from yas.render.text import fmt_dur, fmt_tok
+
+
+def fmt_lines_pair(read: int, changed: int, *, width: int = 0) -> tuple[str, str]:
+    """Format the Lines Read / Lines Changed numeric pair.
+
+    Shared by the wide tokens/cost row's session-level segment (`width=0` —
+    a single, non-cohort row where each value renders at its own natural
+    width, no cross-row alignment needed) and the per-subagent tree-row
+    cluster (`width=` the cohort's measured max — see `layout.tree_lines_width`
+    — so every row's digits land on the same column regardless of how many
+    digits any one row's count happens to have).
+
+    `width` must be the cohort's *measured* max `fmt_tok` width, never a
+    hardcoded guess: `fmt_tok`'s own output width varies from 1 char ('0') to
+    6 ('999.9B'), the same "not fixed-width" hazard `fmt_dur`/`subagent_dur_str`
+    already carry — assuming a width narrower than what the cohort actually
+    needs reintroduces exactly the off-by-one drift that hardcoding `fmt_dur`'s
+    width once caused for the duration field.
+    """
+    read_s    = fmt_tok(read)
+    changed_s = fmt_tok(changed)
+    if width:
+        read_s    = read_s.rjust(width)
+        changed_s = changed_s.rjust(width)
+    return read_s, changed_s
 
 
 def subagent_dur_str(sub: object, now: float) -> str:

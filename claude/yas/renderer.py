@@ -107,7 +107,7 @@ from yas.render.gradient import (
 )
 from yas.context_state import context_state
 from yas.info.git import GitInfo
-from yas.render.metrics import burndown_delta, subagent_dur_str, subagent_share
+from yas.render.metrics import burndown_delta, fmt_lines_pair, subagent_dur_str, subagent_share
 from yas.render.pill import Pill
 from yas.render.tasks_view import fmt_duration, select_window, total_elapsed
 from yas.session import ContextWindow, RateBucket, RateLimits
@@ -766,6 +766,7 @@ class Renderer:
         tree_desc_col: int | None = None,
         tree_activity_col: int | None = None,
         tree_model_w: int | None = None,
+        tree_lines_w: int | None = None,
         lines: tuple[int, int] | None = None,
     ) -> str:
         # Tree view: a plain branch prefix ('├ ', '└ ', indented deeper) eats
@@ -874,15 +875,22 @@ class Renderer:
             # this subagent has lines data.
             read_lc, changed_lc = lines if lines is not None else (0, 0)
             if tree_single:
-                # rjust(6): same reasoning as tok_field's rjust(6) above — a
+                # `tree_lines_w`: the cohort's own MEASURED max fmt_tok width
+                # (`layout.tree_lines_width`), not a hardcoded guess — a
                 # fixed-width numeric field keeps the cluster's total width
-                # (and the activity gap after it) deterministic across rows.
-                lines_field = (
-                    f'{GLYPH_LINES_READ} {fmt_tok(read_lc).rjust(6)} '
-                    f'{GLYPH_LINES_CHANGED} {fmt_tok(changed_lc).rjust(6)}'
-                )
+                # (and the activity gap after it) deterministic across rows,
+                # same reasoning as tok_field's rjust(6) above, but sized to
+                # what this cohort's read/changed counts actually need instead
+                # of always reserving fmt_tok's full 6-char ceiling. Falls
+                # back to 6 (fmt_tok's guaranteed max width) for callers that
+                # don't supply a cohort measurement, so alignment never
+                # silently breaks.
+                lines_w = tree_lines_w if tree_lines_w is not None else 6
+                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc, width=lines_w)
+                lines_field = f'{GLYPH_LINES_READ} {read_s} {GLYPH_LINES_CHANGED} {changed_s}'
             else:
-                lines_field = f'{GLYPH_LINES_READ} {fmt_tok(read_lc)} {GLYPH_LINES_CHANGED} {fmt_tok(changed_lc)}'
+                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc)
+                lines_field = f'{GLYPH_LINES_READ} {read_s} {GLYPH_LINES_CHANGED} {changed_s}'
             if lines is None or (read_lc == 0 and changed_lc == 0):
                 lines_field = ' ' * _visible_width(lines_field)
             if tree_single:
@@ -1438,8 +1446,12 @@ class Renderer:
             # so the tuple-unpack below type-checks honestly.
             assert lines is not None
             read, changed = lines
-            return (f'{self.LABEL}{GLYPH_LINES_READ}  {self.R}{self.TOK}{fmt_tok(read)}{self.R}'
-                    f'{self.LABEL}  {GLYPH_LINES_CHANGED}  {self.R}{self.TOK}{fmt_tok(changed)}{self.R}')
+            # width=0: this is a single, non-cohort row (no cross-row
+            # alignment needed) — see fmt_lines_pair for why the subagent
+            # tree row can't reuse this width policy wholesale.
+            read_s, changed_s = fmt_lines_pair(read, changed)
+            return (f'{self.LABEL}{GLYPH_LINES_READ}  {self.R}{self.TOK}{read_s}{self.R}'
+                    f'{self.LABEL}  {GLYPH_LINES_CHANGED}  {self.R}{self.TOK}{changed_s}{self.R}')
 
         vsep_w        = 4
         vsep_leader_w = 4
