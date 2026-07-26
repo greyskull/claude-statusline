@@ -15,6 +15,7 @@ from yas.constants import (
     GLYPH_HOURGLASS,
     GLYPH_RENAMED,
     GLYPH_WF_DIVIDER,
+    LINES_LABEL,
     RESET,
     SUBAGENT_DESC_MIN_WIDTH,
     SUBAGENT_DISPLAY_CAP,
@@ -599,12 +600,18 @@ def build_wide(
         session.effort.level if session.thinking.enabled else '',
         fast_mode=session.fast_mode,
     )
+    # Reading `view.tool_counts` here forces its transcript scan on every wide
+    # render (previously only when `cfg.show_tool_uses` was on, for the
+    # per-tool row further down) — needed to feed the session-total lines
+    # read/changed segment into `tokens_cost` below. Accepted +2.9ms cost per
+    # design.md Decision 6.
     line_tokens, vsep_cols, _mark_col, tokens_min_w = r.tokens_cost(
         usage.billed_in, usage.cache_read, usage.out,
         token_log.day_in, token_log.day_cache_read, token_log.day_out,
         sess_cost, day_cost, tok_rate,
         session.session_id, width, fill, view.cfg.show_day_stats,
         view.cfg.justify,
+        lines=(view.tool_counts.lines_read, view.tool_counts.lines_changed),
     )
     # The three-segment tokens │ cost │ rate row is fixed-content-width: at the
     # bottom of the wide band (box ~80-84) it cannot hold both columns plus the
@@ -992,13 +999,21 @@ def build_wide(
                 tok_labels.append((_cache_lbl, _cache_anchor))
             if _out_i != -1:
                 tok_labels.append((f'output{_suf}', 3 + _out_i))
-            # Centre `cost` within its cell (between the two vseps) instead of
+            # Centre `cost` within its cell (between the last two vseps) instead of
             # left-anchoring at the cell's start. The cost cell is its own section
             # (bounded by vseps), so this never conflicts with the token labels.
+            # Index from the end: vsep_cols is a 2-tuple when the lines segment is
+            # shed and a 3-tuple when it's included (design.md Decision 8), and the
+            # cost cell is always the pair immediately preceding the sparkline.
             _cost_lbl = f'cost{_suf}'
-            _cost_mid = (vsep_cols[0] + vsep_cols[1]) // 2
-            tok_labels.append((_cost_lbl, max(vsep_cols[0] + 1, _cost_mid - len(_cost_lbl) // 2)))
-            tok_labels.append(('tokens over time', vsep_cols[1] + 2))
+            _cost_mid = (vsep_cols[-2] + vsep_cols[-1]) // 2
+            tok_labels.append((_cost_lbl, max(vsep_cols[-2] + 1, _cost_mid - len(_cost_lbl) // 2)))
+            tok_labels.append(('tokens over time', vsep_cols[-1] + 2))
+            # `lines read/changed` caption, centred between the first two vseps —
+            # only present when the segment itself is (len == 3; Decision 8).
+            if len(vsep_cols) == 3:
+                _lines_mid = (vsep_cols[0] + vsep_cols[1]) // 2
+                tok_labels.append((LINES_LABEL, max(vsep_cols[0] + 1, _lines_mid - len(LINES_LABEL) // 2)))
         rows.append(RowSpec('separator_dim', downs=vsep_cols, labels=tok_labels))
         for lt in line_tokens:
             rows.append(RowSpec('content', content=lt))
@@ -1078,7 +1093,8 @@ def build_wide(
                     r.subagent_row(sub, right_w, twoline=True, session_inout=session_inout,
                                    stats_col=right_stats_col, tree_prefix=prefix,
                                    tree_single=view.cfg.subagent_tree, tree_desc_col=right_desc_col,
-                                   tree_activity_col=right_activity_col, tree_model_w=right_model_w).split('\n')
+                                   tree_activity_col=right_activity_col, tree_model_w=right_model_w,
+                                   lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n')
                 )
             div_color = r.grad_at(divider_col - 1, width, fill=fill)
             divider   = f'{div_color}{BOX_V}{RESET}'
@@ -1120,7 +1136,8 @@ def build_wide(
                 def cell_lines(cell: tuple[RunningSubagent, str]) -> list[str]:
                     sub, prefix = cell
                     raw = r.subagent_row(sub, half_w, twoline=True, session_inout=session_inout,
-                                         tree_prefix=prefix)
+                                         tree_prefix=prefix,
+                                         lines=view.tool_counts.per_agent.get(sub.jsonl_path))
                     lines = raw.split('\n')
                     return [f'{ln}{" " * max(0, half_w - _visible_width(ln))}' for ln in lines]
 
@@ -1145,7 +1162,8 @@ def build_wide(
                                                stats_col=stats_col_v,
                                                tree_prefix=prefix, tree_single=view.cfg.subagent_tree,
                                                tree_desc_col=desc_col, tree_activity_col=activity_col,
-                                               tree_model_w=model_w).split('\n'):
+                                               tree_model_w=model_w,
+                                               lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n'):
                         rows.append(RowSpec('content', content=line))
             pending_ups = ()
 

@@ -11,6 +11,8 @@ import yas.info.subagents as subagents_mod
 from yas.config import Config
 
 from yas.constants import (
+    GLYPH_LINES_CHANGED,
+    GLYPH_LINES_READ,
     GLYPH_REPLYING,
     STRIKE,
     SUBAGENT_DESC_MIN_WIDTH,
@@ -1238,6 +1240,109 @@ def test_cascade_clear_walks_multiple_ancestor_levels() -> None:
     for sub in out:
         if sub.agent_id in ('p', 'c'):
             assert sub.status == 'killed'
+
+
+# K. Per-subagent lines read/changed field (Decision 10) -----------------------
+
+def test_lines_field_shows_humanised_values() -> None:
+    # 1234 -> '1.2K', 567 -> '567' via fmt_tok; both glyphs present.
+    sub = _make_sub(total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    line1, _ = _two(sub, 136, session_inout=si, lines=(1234, 567))
+    plain = strip_ansi(line1)
+    assert fmt_tok(1234) in plain
+    assert fmt_tok(567) in plain
+    assert GLYPH_LINES_READ in plain
+    assert GLYPH_LINES_CHANGED in plain
+
+
+def test_lines_field_blank_when_both_zero() -> None:
+    # Both zero blanks the whole field (spaces) — neither glyph nor a literal
+    # '0' shows up, so the cluster carries no noise for idle subagents.
+    sub = _make_sub(total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    line1, _ = _two(sub, 136, session_inout=si, lines=(0, 0))
+    plain = strip_ansi(line1)
+    assert GLYPH_LINES_READ not in plain
+    assert GLYPH_LINES_CHANGED not in plain
+
+
+def test_lines_field_blank_when_none() -> None:
+    # lines=None (idle/default) also renders blank, same as (0, 0).
+    sub = _make_sub(total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    line1_none, _ = _two(sub, 136, session_inout=si, lines=None)
+    line1_zero, _ = _two(sub, 136, session_inout=si, lines=(0, 0))
+    assert strip_ansi(line1_none) == strip_ansi(line1_zero)
+
+
+def test_lines_field_cluster_width_identical_idle_vs_populated() -> None:
+    # The cluster's fixed-width blank keeps total rendered width identical
+    # between an idle row (lines=None) and a populated one (lines=(1234, 567))
+    # at the same box width.
+    sub = _make_sub(total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    line1_idle, _ = _two(sub, 136, session_inout=si, lines=None)
+    line1_full, _ = _two(sub, 136, session_inout=si, lines=(1234, 567))
+    assert _visible_width(line1_idle) == _visible_width(line1_full) == 136
+
+
+def test_shed_order_lines_then_share_then_tok() -> None:
+    # Shed ladder under decreasing width: lines is dropped first, then share%,
+    # then tok — never lines kept while share% or tok is shed.
+    sub = _make_sub(agent_type='general-purpose', description='x' * 80,
+                    total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    tok = fmt_tok(sub.total_input)
+    valid = {
+        (True, True, True), (False, True, True), (False, False, True), (False, False, False),
+    }
+    seen = set()
+    for w in range(30, 90):
+        line1, _ = _two(sub, w, session_inout=si, lines=(1234, 567))
+        plain = strip_ansi(line1)
+        state = (GLYPH_LINES_READ in plain, '%' in plain, tok in plain)
+        assert state in valid, f'width={w}: out-of-order shed {state}'
+        seen.add(state)
+    # every rung of the ladder is reachable across this width sweep
+    assert (True, True, True) in seen
+    assert (False, True, True) in seen
+    assert (False, False, True) in seen
+
+
+def test_narrow_width_no_lines_matches_pre_change_output() -> None:
+    # A narrow width that already sheds fields today renders byte-identically
+    # to the pre-change output for callers that don't pass `lines` (zero
+    # regression for existing callers).
+    sub = _make_sub(agent_type='general-purpose', description='x' * 80,
+                    total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    for w in (30, 45, 60):
+        line1_default, _ = _two(sub, w, session_inout=si)
+        line1_explicit_none, _ = _two(sub, w, session_inout=si, lines=None)
+        assert line1_default == line1_explicit_none
+
+
+# L. Self-scoping: no rollup across the tree ----------------------------------
+
+def test_self_scoped_lines_no_rollup_between_parent_and_child() -> None:
+    # Parent and child rows each render their OWN (read, changed) figures —
+    # subagent_row never sums across the tree.
+    parent = _make_sub(agent_type='parent-agent', total_input=12345, output=678)
+    child  = _make_sub(agent_type='child-agent', total_input=12345, output=678)
+    si     = (parent.total_input + parent.output) * 2
+    parent_line, _ = _two(parent, 136, session_inout=si, lines=(100, 20))
+    child_line, _  = _two(child, 136, session_inout=si, lines=(500, 300))
+    p_plain = strip_ansi(parent_line)
+    c_plain = strip_ansi(child_line)
+    assert fmt_tok(100) in p_plain and fmt_tok(20) in p_plain
+    assert fmt_tok(500) in c_plain and fmt_tok(300) in c_plain
+    # parent's row must not carry the child's figures (no accidental rollup)
+    assert fmt_tok(500) not in p_plain
+    assert fmt_tok(300) not in p_plain
+    # ...and vice versa
+    assert fmt_tok(100) not in c_plain
+    assert fmt_tok(20) not in c_plain
 
 
 def test_eviction_drops_oldest_completion_first_across_states() -> None:

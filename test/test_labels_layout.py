@@ -174,8 +174,14 @@ def _short_labels_view() -> SessionView:
 def test_cost_label_centered_in_its_cell():
     lines = _render_view(_short_labels_view())
     sep, cont = _tok_sep_and_content(lines)
-    bars = [i for i, ch in enumerate(cont) if ch == '│']   # border + 2 vseps
-    cell_center = (bars[1] + bars[2]) / 2                   # cost cell between vseps
+    # border + 2 interior vseps normally, but at this width (200) the lines
+    # read/changed segment is also included (box_width >= LINES_SEGMENT_MIN_WIDTH),
+    # adding a 3rd interior vsep ahead of the cost cell. `bars` always ends with
+    # the row's right border (not a cost-cell vsep), so the cost cell is the pair
+    # immediately preceding it — i.e. the last two INTERIOR vseps — regardless of
+    # how many segments precede them.
+    bars = [i for i, ch in enumerate(cont) if ch == '│']
+    cell_center = (bars[-3] + bars[-2]) / 2                 # cost cell between vseps
     assert abs(_label_center(sep, 'cost') - cell_center) <= 1
 
 

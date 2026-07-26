@@ -96,7 +96,11 @@ def test_tokens_row_session_only_single_line(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_tokens_row_dividers_align_with_separators(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every interior │ in the single tokens line has a matching ┬ on the
-    separator above and ┴ on the separator below at the same visual column."""
+    separator above and ┴ on the separator below at the same visual column.
+
+    At width=160 (>= LINES_SEGMENT_MIN_WIDTH=103) the lines read/changed
+    segment (design.md Decision 8) is included, so there are 3 interior │
+    (lines | cost | rate) instead of the pre-Decision-8 2."""
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
     # A dynamic section below ensures the row below tokens is a (seam) separator,
@@ -109,7 +113,7 @@ def test_tokens_row_dividers_align_with_separators(monkeypatch: pytest.MonkeyPat
 
     last = len(lines[t_idx]) - 1
     interior_bars = [i for i, ch in enumerate(lines[t_idx]) if ch == '│' and 0 < i < last]
-    assert len(interior_bars) == 2, f'expected 2 interior │, got {interior_bars}'
+    assert len(interior_bars) == 3, f'expected 3 interior │, got {interior_bars}'
 
     above, below = lines[t_idx - 1], lines[t_idx + 1]
     for col in interior_bars:
@@ -986,6 +990,61 @@ def test_clear_timer_sheds_entire_cell_on_path_protection(
     lines = layout.render_layout(spec, _r)
     for ln in lines:
         assert GLYPH_CLEAR not in ln, 'elapsed cell should be fully shed'
+
+
+# ---------------------------------------------------------------------------
+# Task 7.8 — lines read/changed segment elbow count and TOKENS_COST_MIN_WIDTH
+# gating (design.md Decision 8)
+# ---------------------------------------------------------------------------
+
+def test_tokens_row_three_elbows_at_wide_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At width=140 (>= LINES_SEGMENT_MIN_WIDTH=103) the lines read/changed
+    segment is included, so the tokens/cost separator row threads 3 elbows
+    (3-tuple downs/ups) instead of the pre-change 2."""
+    from helper import strip_ansi
+    _silence_dynamic(monkeypatch)
+    spec = layout.build_wide(_view(), _tick(), 140, _r)
+    # The tokens/cost separator is the separator_dim row immediately above the
+    # first tokens content row (the one carrying the 't/m' rate label).
+    t_idx = _tokens_row_indices(spec)[0]
+    tokens_sep = spec.rows[t_idx - 1]
+    assert tokens_sep.kind == 'separator_dim'
+    assert len(tokens_sep.downs) == 3, f'expected 3 downs at width=140, got {tokens_sep.downs}'
+
+    # And the render itself shows three interior │/┬/┴ triples aligned.
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+    content_line = lines[t_idx]
+    above, below = lines[t_idx - 1], lines[t_idx + 1]
+    last = len(content_line) - 1
+    interior_bars = [i for i, ch in enumerate(content_line) if ch == '│' and 0 < i < last]
+    assert len(interior_bars) == 3, f'expected 3 interior │ at width=140, got {interior_bars}'
+    for col in interior_bars:
+        assert above[col] in ('┬', '┼'), f'no ┬ above at col {col}: {above[col]!r}'
+        assert below[col] in ('┴', '┼'), f'no ┴ below at col {col}: {below[col]!r}'
+
+
+def test_tokens_row_two_elbows_in_85_102_band(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At width=95 (85 <= width < 103) the lines segment is shed: the
+    tokens/cost separator row threads only 2 elbows, identical to before this
+    change."""
+    _silence_dynamic(monkeypatch)
+    spec = layout.build_wide(_view(), _tick(), 95, _r)
+    t_idx = _tokens_row_indices(spec)[0]
+    tokens_sep = spec.rows[t_idx - 1]
+    assert tokens_sep.kind == 'separator_dim'
+    assert len(tokens_sep.downs) == 2, f'expected 2 downs at width=95, got {tokens_sep.downs}'
+
+
+@pytest.mark.parametrize('width', [85, 90, 100, 103, 140])
+def test_tokens_row_present_across_lines_segment_threshold(
+    monkeypatch: pytest.MonkeyPatch, width: int,
+) -> None:
+    """TOKENS_COST_MIN_WIDTH=85 gating is unaffected by the new lines segment:
+    the tokens/cost content row (and hence the full, not compact, context line)
+    is present at every width from 85 up through and past the 103 threshold."""
+    _silence_dynamic(monkeypatch)
+    spec = layout.build_wide(_view(), _tick(), width, _r)
+    assert _tokens_row_indices(spec), f'tokens/cost row missing at width={width}'
 
 
 def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -121,7 +121,12 @@ class SessionView:
 
     @cached_property
     def tool_counts(self) -> ToolCounts:
-        """Per-tool (main, sub) tool_use counts since the last /clear.
+        """Per-tool (main, sub) tool_use counts, plus session and per-agent line totals.
+
+        In a single pass through the main and all subagent transcripts, computes:
+        - per-tool (main, sub) tool_use counts since the last /clear;
+        - session totals for lines_read and lines_changed (sum of main + all subagents);
+        - per_agent breakdown of lines_read and lines_changed for each subagent.
 
         Reopens the main transcript and each subagent transcript — no I/O beyond
         the files already scanned this render. Lazy: a narrow/medium render that

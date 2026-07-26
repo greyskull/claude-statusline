@@ -56,6 +56,9 @@ from yas.constants import (
     GLYPH_CLEAR,
     GLYPH_HOURGLASS,
     GLYPH_IN,
+    GLYPH_LINES_READ,
+    GLYPH_LINES_CHANGED,
+    LINES_SEGMENT_MIN_WIDTH,
     GLYPH_MODEL_LIGHT,
     GLYPH_PLUGINS,
     GLYPH_RENAMED,
@@ -763,6 +766,7 @@ class Renderer:
         tree_desc_col: int | None = None,
         tree_activity_col: int | None = None,
         tree_model_w: int | None = None,
+        lines: tuple[int, int] | None = None,
     ) -> str:
         # Tree view: a plain branch prefix ('├ ', '└ ', indented deeper) eats
         # visible columns off the front of every line, so the row renders into
@@ -861,6 +865,26 @@ class Renderer:
             # 1-column drift that propagated into the model field and the
             # constant activity gap after it (see SUBAGENT_STATS_ACTIVITY_GAP).
             tok_field = fmt_tok(sub.total_input).rjust(6)
+            # Self-scoped lines read/changed (Decision 10): renders blank
+            # (not '0') when there's no lines data, so subagents that neither
+            # read nor wrote don't add noise. The blank uses the SAME fixed
+            # width the populated field would have, so the cluster's total
+            # width — and therefore the constant activity gap after it in
+            # tree_single mode — stays deterministic regardless of whether
+            # this subagent has lines data.
+            read_lc, changed_lc = lines if lines is not None else (0, 0)
+            if tree_single:
+                # rjust(6): same reasoning as tok_field's rjust(6) above — a
+                # fixed-width numeric field keeps the cluster's total width
+                # (and the activity gap after it) deterministic across rows.
+                lines_field = (
+                    f'{GLYPH_LINES_READ} {fmt_tok(read_lc).rjust(6)} '
+                    f'{GLYPH_LINES_CHANGED} {fmt_tok(changed_lc).rjust(6)}'
+                )
+            else:
+                lines_field = f'{GLYPH_LINES_READ} {fmt_tok(read_lc)} {GLYPH_LINES_CHANGED} {fmt_tok(changed_lc)}'
+            if lines is None or (read_lc == 0 and changed_lc == 0):
+                lines_field = ' ' * _visible_width(lines_field)
             if tree_single:
                 # A fixed-width share field keeps the cluster's total width
                 # deterministic across rows (needed so the constant activity
@@ -891,10 +915,12 @@ class Renderer:
             else:
                 front_c = f'{marker}{self.CTX}{dur_s}{self.R} {self.SKILLS}{type_text}{self.R}'
 
-            def build_cluster(show_share: bool, show_tok: bool) -> str:
+            def build_cluster(show_lines: bool, show_share: bool, show_tok: bool) -> str:
                 if is_done:
                     d   = self.CTX_DIM
                     seg = f'{d}{MIDDLE_DOT}{self.R} '
+                    if show_lines:
+                        seg += f'{d}{lines_field}{self.R}  '
                     if show_share and share is not None:
                         seg += f'{d}{share_str}{self.R}  '
                     if show_tok:
@@ -902,6 +928,8 @@ class Renderer:
                     return seg + f'{d}{model_str}{self.R}'
                 share_clr = self.gradient.gradient_color(share) if share is not None else ''
                 seg = f'{self.LABEL}{MIDDLE_DOT}{self.R} '
+                if show_lines:
+                    seg += f'{self.LABEL}{lines_field}{self.R}  '
                 if show_share and share is not None:
                     seg += f'{share_clr}{share_str}{self.R}  '
                 if show_tok:
@@ -913,16 +941,19 @@ class Renderer:
             # anchor only applies when even the model-only fallback fits within
             # the slack to the right of `stats_col`; otherwise we fall through
             # to the right-aligned path so very narrow widths stay sane.
-            model_only_w = _visible_width(build_cluster(False, False))
+            model_only_w = _visible_width(build_cluster(False, False, False))
             anchored     = stats_col is not None and (stats_w - stats_col) >= model_only_w
 
             if anchored:
                 assert stats_col is not None  # narrowed by `anchored`
                 avail = stats_w - stats_col  # slack to the right of the anchor
                 # Pick the richest cluster that fits within the anchored slack.
-                cluster = build_cluster(False, False)  # model-only fallback
-                for show_share, show_tok in ((True, True), (False, True)):
-                    cand = build_cluster(show_share, show_tok)
+                # Shed ladder (Decision 10): lines is the FIRST field dropped
+                # under width pressure, then share%, then tok — model and
+                # duration are never shed.
+                cluster = build_cluster(False, False, False)  # model-only fallback
+                for show_lines, show_share, show_tok in ((True, True, True), (False, True, True), (False, False, True)):
+                    cand = build_cluster(show_lines, show_share, show_tok)
                     if _visible_width(cand) <= avail:
                         cluster = cand
                         break
@@ -957,9 +988,11 @@ class Renderer:
                 line1 += ' ' * max(0, stats_w - _visible_width(line1))
             else:
                 # Pick the richest cluster that fits alongside the front + a 1-col gap.
-                cluster = build_cluster(False, False)  # model-only fallback
-                for show_share, show_tok in ((True, True), (False, True)):
-                    cand = build_cluster(show_share, show_tok)
+                # Same shed ladder as the anchored branch above: lines first,
+                # then share%, then tok.
+                cluster = build_cluster(False, False, False)  # model-only fallback
+                for show_lines, show_share, show_tok in ((True, True, True), (False, True, True), (False, False, True)):
+                    cand = build_cluster(show_lines, show_share, show_tok)
                     if front_w + 1 + _visible_width(cand) <= stats_w:
                         cluster = cand
                         break
@@ -1313,8 +1346,8 @@ class Renderer:
     # after every cap is met still feeds the rate/sparkline leader (as before).
     JUSTIFY_PAD_CAP = 4
 
-    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, tok_rate: int, session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False) -> tuple[list[str], tuple[int, int], int, int]:
-        """One content line: tokens │ cost │ rate-and-sparkline.
+    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, tok_rate: int, session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False, lines: tuple[int, int] | None = None) -> tuple[list[str], tuple[int, ...], int, int]:
+        """One content line: tokens │ [lines │] cost │ rate-and-sparkline.
 
         With ``show_day_stats`` (default), session and day figures merge per
         field as ``session/day`` with a paired cache parenthetical. When off,
@@ -1330,11 +1363,24 @@ class Renderer:
         The tokens and cost columns are sized to the *measured* content (floored
         at a realistic-widest budget), so the two ``│`` dividers always land on
         the rendered content's divider column — they never detach from the
-        ┬/┴ elbows above/below. Returns ``([line], (col1, col2), 0, min_width)``:
-        the divider columns for the builder's elbow threading, the dead mark_col
-        (the old 60s tick marker is gone, =0), and ``min_width`` — the smallest
-        box width at which this row fits without overflow, so the builder can
-        fall back to a compact form below it.
+        ┬/┴ elbows above/below.
+
+        ``lines``, when given, is a ``(read, changed)`` session-total pair
+        rendered as a third segment between tokens and cost — but only when
+        the box is wide enough (``box_width >= max(min_width_with_lines,
+        LINES_SEGMENT_MIN_WIDTH)``); otherwise the segment and its ``│``
+        divider are shed entirely and this method returns exactly today's
+        shape. ``TOKENS_COST_MIN_WIDTH`` (the row's own existence gate,
+        checked by the caller) is unaffected by this shed rule — it is
+        computed from the without-segment ``min_width`` only.
+
+        Returns ``([line], vsep_cols, 0, min_width)``: ``vsep_cols`` is
+        ``(col1, col2)`` when the lines segment is shed, or ``(col1, col2,
+        col3)`` when it is included — the divider columns for the builder's
+        elbow threading — the dead mark_col (the old 60s tick marker is gone,
+        =0), and ``min_width`` — the smallest box width at which this row fits
+        without overflow (always the without-segment floor, so the builder's
+        ``tokens_fits`` gate never depends on whether ``lines`` is present).
         """
         day_clr = self.day_cost_colour(day_cost)
         in_active, out_active = TokenRate.recently_active(session_id)
@@ -1380,8 +1426,24 @@ class Renderer:
                           f'{self.BOLDY}{out_icon}{self.R}{self.TOK}{sess_out_s}{self.R}')
             cost_col = f'{self.safe}{ICON_COST}{self.R}  {self.COST}${sess_cost:,.2f}{self.R}'
 
+        def build_lines() -> str:
+            # Mirrors the tokens column's own glyph-pair convention (icon,
+            # bold value, a plain double-space gap before the next glyph
+            # pair) rather than the cost column's " / " separator, since
+            # read/changed are two independent counters (like in/out), not
+            # a session/day pair of the same counter.
+            # ``build_lines`` is only ever invoked where ``lines is not None``
+            # (guarded by the caller), but mypy can't narrow a captured
+            # outer-scope variable across a closure boundary — assert it here
+            # so the tuple-unpack below type-checks honestly.
+            assert lines is not None
+            read, changed = lines
+            return (f'{self.LABEL}{GLYPH_LINES_READ}  {self.R}{self.TOK}{fmt_tok(read)}{self.R}'
+                    f'{self.LABEL}  {GLYPH_LINES_CHANGED}  {self.R}{self.TOK}{fmt_tok(changed)}{self.R}')
+
         vsep_w        = 4
         vsep_leader_w = 4
+        vsep_lines_w  = 4
         label_w       = 15
 
         content_w = box_width - 3
@@ -1415,6 +1477,17 @@ class Renderer:
         # width. The builder only emits this row when ``box_width >= min_width``.
         min_width = tokens_w + cost_w + vsep_w + vsep_leader_w + rate_label_w + 3
 
+        # The lines segment's own measured width and the with-segment floor.
+        # Included only when the box clears both this floor and the fixed
+        # LINES_SEGMENT_MIN_WIDTH — never at a width where it would overflow,
+        # so ``tokens_fits`` in build_wide (gated on the WITHOUT-segment
+        # min_width, below) is unaffected either way.
+        lines_w = _visible_width(build_lines()) if lines is not None else 0
+        min_width_with_lines = min_width + lines_w + vsep_lines_w
+        include_lines = lines is not None and box_width >= max(min_width_with_lines, LINES_SEGMENT_MIN_WIDTH)
+        if include_lines:
+            inner -= vsep_lines_w  # the lines segment's own vsep, alongside vsep_w/vsep_leader_w above
+
         # Justify breathing room: spend genuine slack as padding *inside* the
         # sections before it flows to the sparkline. ``free`` is the room beyond
         # the tight minimum (min-gap content + min leader); it is exactly the
@@ -1423,6 +1496,12 @@ class Renderer:
         # byte-for-byte the justify-off layout. Slots fill toward their caps via
         # an even round-robin; whatever is consumed shrinks the leader by the
         # same amount, and the remainder still feeds the sparkline.
+        # NOTE: the lines segment (when included) does NOT get a slot here —
+        # it is content-measured only (see w_lines below), same as tokens_col/
+        # cost_col before padding. This is deliberate, not an oversight: giving
+        # it justify breathing room would make its width (and therefore col2/
+        # col3) depend on `justify`, which no other content-measured segment
+        # in this row does.
         cap = self.JUSTIFY_PAD_CAP
         if justify and show_day_stats:
             free = max(0, inner - tokens_w - cost_w - leader_min)
@@ -1474,17 +1553,30 @@ class Renderer:
         w_middle = max(w_middle, tokens_w)
         w_end    = max(w_end, cost_w)
 
+        # The lines segment (when included) is content-measured only, floored
+        # at its own rendered width — same "honest floor" pattern as
+        # w_middle/w_end above, but it never competes for slack: it always
+        # gets exactly its measured width.
+        w_lines = lines_w if include_lines else 0
+
         # Left-justify each column to its (content-floored) width. The trailing pad
         # lands the │ at the divider column col1/col2 regardless of content.
         tokens_col += ' ' * max(0, w_middle - tokens_w)
         cost_col   += ' ' * max(0, w_end   - cost_w)
 
-        leader_w = max(label_w + 1, inner - w_middle - w_end)
+        leader_w = max(label_w + 1, inner - w_middle - w_lines - w_end)
 
-        col1 = w_middle + 5                   # 1-indexed position of vsep │
-        col2 = w_middle + vsep_w + w_end + 5  # 1-indexed position of vsep_leader │
+        col1 = w_middle + 5                                          # 1-indexed position of the tokens│ vsep
+        if include_lines:
+            col2 = col1 + vsep_w + w_lines                           # 1-indexed position of the lines│ vsep
+            col3 = col2 + vsep_lines_w + w_end                       # 1-indexed position of the vsep_leader │
+        else:
+            col2 = w_middle + vsep_w + w_end + 5                     # 1-indexed position of the vsep_leader │ (today's shape)
         vsep        = self.vsep_block(col1, box_width, fill=fill, leader=True)
-        vsep_leader = self.vsep_block(col2, box_width, fill=fill, leader=True)
+        vsep_leader = self.vsep_block(col3 if include_lines else col2, box_width, fill=fill, leader=True)
+        if include_lines:
+            lines_col   = build_lines()
+            vsep_lines  = self.vsep_block(col2, box_width, fill=fill, leader=True)
 
         # The justify leader pad sits between the vsep_leader │ and the rate
         # label; it eats from the leader budget so the sparkline shrinks by the
@@ -1506,7 +1598,15 @@ class Renderer:
                 spark = ' ' * bar_w
             leader = f'{leader_lpad}{rate_label}{spark}'
 
-        return [f'{tokens_col}{vsep}{cost_col}{vsep_leader}{leader}'], (col1, col2), 0, min_width
+        vsep_cols: tuple[int, ...]
+        if include_lines:
+            line = f'{tokens_col}{vsep}{lines_col}{vsep_lines}{cost_col}{vsep_leader}{leader}'
+            vsep_cols = (col1, col2, col3)
+        else:
+            line = f'{tokens_col}{vsep}{cost_col}{vsep_leader}{leader}'
+            vsep_cols = (col1, col2)
+
+        return [line], vsep_cols, 0, min_width
 
     def context_bar(self, fill_ratio: float) -> str:
         ratio = min(max(fill_ratio, 0.0), 1.0)

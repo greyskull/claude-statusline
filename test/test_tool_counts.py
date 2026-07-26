@@ -34,7 +34,8 @@ def test_per_tool_counting(tmp_path: Path) -> None:
         _line('m2', ['Read', 'Read']),
         _line('m3', ['Edit']),
     ])
-    assert count_transcript(path, None) == {'Bash': 1, 'Read': 2, 'Edit': 1}
+    result = count_transcript(path, None, skip_sidechain=True)
+    assert result.counts == {'Bash': 1, 'Read': 2, 'Edit': 1}
 
 
 def test_dedup_keeps_last_write(tmp_path: Path) -> None:
@@ -43,7 +44,8 @@ def test_dedup_keeps_last_write(tmp_path: Path) -> None:
         _line('m1', ['Bash']),            # early partial: 1 block
         _line('m1', ['Bash', 'Read']),    # final write: 2 blocks
     ])
-    assert count_transcript(path, None) == {'Bash': 1, 'Read': 1}
+    result = count_transcript(path, None, skip_sidechain=True)
+    assert result.counts == {'Bash': 1, 'Read': 1}
 
 
 def test_repeated_identical_final_write_not_double_counted(tmp_path: Path) -> None:
@@ -51,7 +53,8 @@ def test_repeated_identical_final_write_not_double_counted(tmp_path: Path) -> No
         _line('m1', ['Bash', 'Read']),
         _line('m1', ['Bash', 'Read']),
     ])
-    assert count_transcript(path, None) == {'Bash': 1, 'Read': 1}
+    result = count_transcript(path, None, skip_sidechain=True)
+    assert result.counts == {'Bash': 1, 'Read': 1}
 
 
 def test_clear_epoch_excludes_before_and_none_counts_all(tmp_path: Path) -> None:
@@ -60,10 +63,10 @@ def test_clear_epoch_excludes_before_and_none_counts_all(tmp_path: Path) -> None
         _line('m2', ['Read'], ts=TS_LATE),
     ])
     # None counts the whole transcript.
-    assert count_transcript(path, None) == {'Bash': 1, 'Read': 1}
+    assert count_transcript(path, None, skip_sidechain=True).counts == {'Bash': 1, 'Read': 1}
     # A clear epoch between the two excludes the early Bash line.
     boundary = (_parse_iso_to_epoch(TS_EARLY) + _parse_iso_to_epoch(TS_LATE)) / 2
-    assert count_transcript(path, boundary) == {'Read': 1}
+    assert count_transcript(path, boundary, skip_sidechain=True).counts == {'Read': 1}
 
 
 def test_meta_excluded_task_kept(tmp_path: Path) -> None:
@@ -74,7 +77,7 @@ def test_meta_excluded_task_kept(tmp_path: Path) -> None:
         _line('m4', ['Task']),
         _line('m5', ['Bash', 'TodoWrite']),
     ])
-    counts = count_transcript(path, None)
+    counts = count_transcript(path, None, skip_sidechain=True).counts
     assert 'TodoWrite' not in counts
     assert 'ExitPlanMode' not in counts
     assert 'AskUserQuestion' not in counts
@@ -87,7 +90,8 @@ def test_mcp_name_normalized_to_last_segment(tmp_path: Path) -> None:
         _line('m1', ['mcp__github__create_issue']),
         _line('m2', ['mcp__github__create_issue']),
     ])
-    assert count_transcript(path, None) == {'create_issue': 2}
+    result = count_transcript(path, None, skip_sidechain=True)
+    assert result.counts == {'create_issue': 2}
 
 
 def test_missing_message_id_skipped(tmp_path: Path) -> None:
@@ -97,12 +101,13 @@ def test_missing_message_id_skipped(tmp_path: Path) -> None:
         'message':   {'content': [{'type': 'tool_use', 'name': 'Bash', 'input': {}}]},
     })
     path = _write(tmp_path, 'main.jsonl', [line, _line('m1', ['Read'])])
-    assert count_transcript(path, None) == {'Read': 1}
+    result = count_transcript(path, None, skip_sidechain=True)
+    assert result.counts == {'Read': 1}
 
 
 def test_unreadable_path_returns_empty() -> None:
-    assert count_transcript('', None) == {}
-    assert count_transcript('/no/such/file.jsonl', None) == {}
+    assert count_transcript('', None, skip_sidechain=True).counts == {}
+    assert count_transcript('/no/such/file.jsonl', None, skip_sidechain=True).counts == {}
 
 
 def _sub(jsonl_path: str) -> RunningSubagent:

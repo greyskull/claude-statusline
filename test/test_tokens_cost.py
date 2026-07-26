@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 
 import yas.renderer as renderer
-from yas.constants import ICON_COST, ICON_TOK_RATE
+from yas.constants import GLYPH_LINES_CHANGED, GLYPH_LINES_READ, ICON_COST, ICON_TOK_RATE
 from yas.render.text import _visible_width
 from helper import strip_ansi
 
@@ -53,6 +53,17 @@ def test_tokens_cost_divider_cols_match_rendered_bars() -> None:
     stripped = strip_ansi(lines[0])
     assert stripped[col1 - 3] == '│'
     assert stripped[col2 - 3] == '│'
+
+
+def test_tokens_cost_divider_cols_match_rendered_bars_with_lines_segment() -> None:
+    # Sibling of the 2-tuple case above: with the lines segment included (box
+    # wide enough to clear LINES_SEGMENT_MIN_WIDTH), vsep_cols is a 3-tuple and
+    # every reported column must still land on its rendered │.
+    lines, cols, _mark, _min = _call(box_width=110, lines=(1234, 567))
+    assert len(cols) == 3
+    stripped = strip_ansi(lines[0])
+    for col in cols:
+        assert stripped[col - 3] == '│'
 
 
 def test_tokens_cost_dividers_track_content() -> None:
@@ -196,6 +207,51 @@ def test_tokens_cost_dividers_match_rendered_at_narrow_boxes(box: int) -> None:
     assert stripped[col2 - 3] == '│'
 
 
+@pytest.mark.parametrize('box', [103, 110, 130, 160])
+def test_tokens_cost_dividers_match_rendered_at_wide_boxes_with_lines(box: int) -> None:
+    # Sibling of the narrow-box divider check above, for the 3-tuple shape:
+    # every reported divider column (2 or 3, box-dependent) lands on the
+    # rendered │ once the lines segment is in play.
+    lines, cols, _mark, _min = _call(box_width=box, lines=(1234, 567), **_NARROW)
+    stripped = strip_ansi(lines[0])
+    for col in cols:
+        assert stripped[col - 3] == '│'
+
+
+# Lines segment shed / present, straddling LINES_SEGMENT_MIN_WIDTH (103)
+
+def test_tokens_cost_lines_segment_shed_below_103_is_byte_identical() -> None:
+    # Below 103 cols the segment sheds even though `lines=` was passed, and the
+    # rendered row + min_width are byte-identical to a call with no `lines=` at
+    # all — proving zero regression in the 85-102 band (Decision 8).
+    with_lines = _call(box_width=95, lines=(1234, 567))
+    without_lines = _call(box_width=95)
+    assert with_lines == without_lines
+    assert len(with_lines[1]) == 2
+
+
+def test_tokens_cost_lines_segment_present_at_or_above_103() -> None:
+    # At a box wide enough to clear LINES_SEGMENT_MIN_WIDTH, the segment
+    # renders: vsep_cols grows to a 3-tuple and the glyphs/values appear.
+    lines, cols, _mark, _min = _call(box_width=110, lines=(1234, 567))
+    assert len(cols) == 3
+    s = strip_ansi(lines[0])
+    assert GLYPH_LINES_READ in s
+    assert GLYPH_LINES_CHANGED in s
+    assert '1.2K' in s or '1,234' in s  # fmt_tok humanises 1234
+    assert '567' in s
+
+
+def test_tokens_cost_min_width_unchanged_when_lines_shed() -> None:
+    # When the segment is shed (box_width below the with-segment floor and/or
+    # below 103), the returned min_width must never rise above the pre-change
+    # (no-lines) value.
+    for box in (60, 95, 102):
+        min_without = _call(box_width=box)[3]
+        min_with = _call(box_width=box, lines=(1234, 567))[3]
+        assert min_with == min_without
+
+
 def test_tokens_cost_sparkline_omitted_below_10_chars() -> None:
     # The sparkline is dropped when fewer than 10 chars remain for the graph
     # (bar_w < 10); the bare rate label survives. At a small box the leader
@@ -223,6 +279,34 @@ def test_tokens_cost_sparkline_omitted_below_10_chars() -> None:
     assert leader_region_w(BOX_WIDTH) > rate_label_w
     # The rate label / icon stays present in both regimes.
     assert ICON_TOK_RATE in strip_ansi(_call(box_width=60)[0][0])
+
+
+def test_tokens_cost_sparkline_omitted_below_10_chars_with_lines_segment() -> None:
+    # The sparkline-degrade behaviour above holds unchanged when the lines
+    # segment is present: bar_w < 10 still collapses the leader to the bare
+    # rate label, and the 3rd divider (lines segment) is still reported and
+    # matches its rendered │.
+    r = Renderer()
+    rate_label_w = _visible_width(
+        f'{r.TOK_ICON}{ICON_TOK_RATE}  {r.TOK}{"74.6K"}{r.R}{r.LABEL} t/m{r.R}'
+    )
+
+    def leader_region_w(box: int) -> int:
+        lines, cols, _m, _s = _call(box_width=box, lines=(1234, 567), **_NARROW)
+        col2 = cols[-1]
+        s = strip_ansi(lines[0])
+        return _visible_width(s[col2 - 3 + 2:])
+
+    # Narrow-but-lines-included box: bar_w < 10 -> bare label, same width as
+    # a rate label built from tok_rate=74_600 (matches _NARROW's tok_rate).
+    lines_narrow, cols_narrow, _m, _s = _call(box_width=103, lines=(1234, 567), **_NARROW)
+    assert len(cols_narrow) == 3
+    assert leader_region_w(103) == rate_label_w
+    stripped_narrow = strip_ansi(lines_narrow[0])
+    for col in cols_narrow:
+        assert stripped_narrow[col - 3] == '│'
+    # Wide box: bar_w >= 10, graph space present -> leader region is wider.
+    assert leader_region_w(160) > rate_label_w
 
 
 # Justify breathing room (day stats on). Slack that would all feed the sparkline

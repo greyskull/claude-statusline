@@ -53,6 +53,11 @@ SUBAGENT_TREE_PLAN_WIDTH = 78
 # realistic-widest floor (the wide layout owns box >= MEDIUM_WIDTH=80, and the
 # row first fits around box 84-85 for typical 6-7 digit token magnitudes).
 TOKENS_COST_MIN_WIDTH = 85
+# Floor for the wide layout's four-segment tokens │ lines │ cost │ rate row.
+# This constant gates ONLY the lines segment; TOKENS_COST_MIN_WIDTH must stay
+# at 85 because bumping it would regress every 85–103-column terminal into the
+# compact context line (losing the cost/rate row entirely, not just the lines).
+LINES_SEGMENT_MIN_WIDTH = 103
 
 # Minimum gap between the narrow tasks-header's left cluster (glyph + done/total)
 # and its right-anchored active-task timer. The timer is flush to the content
@@ -107,6 +112,7 @@ META_EXCLUDE_TOOLS = frozenset({'TodoWrite', 'ExitPlanMode', 'AskUserQuestion'})
 # Plain-ASCII caption for the tool-counts separator. The label overlay applies
 # superscript() at render time, so no raw superscript glyphs live in source.
 TOOL_COUNTS_LABEL = 'tools main/sub'
+LINES_LABEL = 'lines read/changed'
 
 CLR_GREY_DIM   = '\033[38;5;244m'
 CLR_GREY_DARK  = '\033[38;5;238m'
@@ -150,6 +156,8 @@ GLYPH_HELPER        = '\uf4cd' # nf-mdi-star_circle (5h rate-limit helper)
 ICON_TOK_RATE       = '\U000f18a7'  # nf-md gauge         (t/m rate label)
 GLYPH_MODEL         = '\U000f08b9' # nf-md-monitor-dashboard
 GLYPH_THINKING      = '\U000f1a53' # nf-md-brain
+GLYPH_LINES_READ    = '\U000f0208' # nf-md-eye
+GLYPH_LINES_CHANGED = '\uf040'  # nf-fa-pencil
 GLYPH_TASKS         = '\U000f08a8'  # nf-md-clipboard-check-outline (Task Row marker)
 GLYPH_TASK_PENDING  = '\ue640'      # nf-fa-circle_o          (pending task)
 GLYPH_TASK_ACTIVE   = '\U000f0117'  # nf-md-arrow_right_thick (in_progress task)
@@ -242,6 +250,8 @@ ASCII_GLYPHS: dict[str, str] = {
     GLYPH_SKILLS:       '&',
     GLYPH_PLUGINS:      '%',
     GLYPH_HELPER:       '*',
+    GLYPH_LINES_READ:   'R',
+    GLYPH_LINES_CHANGED: 'W',
     GLYPH_TRASH:        '-',
     GLYPH_RENAMED:      '>',
     GLYPH_REPLYING:     ':',
@@ -337,6 +347,8 @@ UNICODE_PUA: dict[str, str] = {
     GLYPH_SKILLS:       '◆',  # skills
     GLYPH_PLUGINS:      '⌁',  # plug
     GLYPH_HELPER:       '★',  # star-circle
+    GLYPH_LINES_READ:   '⌖',  # eye (read marker)
+    GLYPH_LINES_CHANGED: '✎',  # pencil (changed marker)
     GLYPH_TRASH:        '⌫',  # trash-can
     GLYPH_RENAMED:      '⇄',  # file-move
     GLYPH_REPLYING:     '»',  # message
