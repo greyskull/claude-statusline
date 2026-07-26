@@ -1,6 +1,6 @@
 ---
 name: yas-editor
-description: Safely edits the YAS (Yet Another Statusline) renderer and its tests. Delegate to this agent for any change under claude/statusline/*.py (the statusline package), claude/statusline_command.py (the entry shim), claude/mon.py / claude/mon/*.py (the multi-session observer), or related tests under test/. Handles the layered renderer (GradientEngine / BorderRenderer / Renderer), the LayoutSpec/RowSpec layout pipeline, Nerd Font PUA glyph hazards, border/elbow column math, and the demo-based visual check. Use when the user asks to add/fix a statusline row, section, gradient, border, glyph, theme, width threshold, or token/cost display, or to fix crooked-box / invisible-icon / column-off-by-one bugs.
+description: Safely edits the YAS (Yet Another Statusline) renderer and its tests. Delegate to this agent for any change under claude/yas/**/*.py (the yas package), claude/statusline_command.py (the entry shim), claude/mon.py / claude/mon/*.py (the multi-session observer), or related tests under test/. Handles the layered renderer (GradientEngine / BorderRenderer / Renderer), the LayoutSpec/RowSpec layout pipeline, Nerd Font PUA glyph hazards, border/elbow column math, and the demo-based visual check. Use when the user asks to add/fix a statusline row, section, gradient, border, glyph, theme, width threshold, or token/cost display, or to fix crooked-box / invisible-icon / column-off-by-one bugs.
 tools: Read, Edit, Write, Bash, Grep, Glob, Skill
 ---
 
@@ -20,26 +20,13 @@ sets your operating discipline; the skill carries the details.
 
 ## Non-negotiable gates
 
-Treat these as hard stops, not suggestions:
-
-1. **Run the full pre-edit checklist** from the skill before editing: read
-   `CONTEXT.md`, catalogue PUA glyphs on the lines you'll touch, and capture a
-   baseline `make test` pass count and a baseline `make demo` frame.
-2. **PUA refactor rule.** If a line you need to Edit contains a raw Nerd Font
-   Private Use Area glyph (U+E000–U+F8FF or U+F0000–U+FFFFD), hoist that glyph to
-   a named `\u`/`\U` escape constant in `constants.py` *first*, then Edit. Raw
-   glyphs get dropped through agent round-trips and make `Edit.old_string`
-   matching fail with a misleading "not found" error. No exceptions. If you
-   genuinely can't refactor first, use the Bash + `python3` heredoc fallback from
-   the skill — never paste a raw glyph into an `Edit` call.
-3. **Width math.** Never use `len()` for column math — use `_visible_width` from
-   `text.py`. Never special-case a layout inside `render_layout`; thread it
-   through `RowSpec` instead.
-4. **Run the full post-edit checklist** before reporting done: `make test` green
-   (pass count = baseline + any tests you added), `make demo` eyeballed for
-   elbow/`┬`/`┴`/`│` alignment and continuous pill gradient across the narrow ↔
-   medium ↔ wide thresholds, a test added/updated for any behaviour change, and
-   `CONTEXT.md` updated if any displayed term changed.
+The skill's **pre-edit checklist** and **post-edit checklist** are hard stops,
+not suggestions — run both in full, in order, no skipping steps. Likewise the
+skill's **PUA refactor rule** and **width-math rule** (never `len()` for column
+math, never special-case a layout inside `render_layout`) apply without
+exception. Don't re-derive these from memory — reread the skill's checklists
+each time; they're the single source of truth, this file only says they're
+mandatory.
 
 ## Where changes go (from the skill's map)
 

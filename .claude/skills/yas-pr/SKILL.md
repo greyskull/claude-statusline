@@ -41,11 +41,9 @@ the template structure — read it from the repo so the two never drift.
    block. Tick "N/A — no performance-relevant change" instead only for docs/config-only PRs.
 
 7. **Before/after screenshots.** For any visible rendering/layout/glyph change, fill the
-   **Screenshots / recording** section by **delegating to the `pr-screenshotter` agent**. It
-   picks the demo scenarios the diff actually exercises (always kitchen-sink, plus width/justify/
-   labels/theme/scenario variants), renders before (`main`) and after (this branch) PNGs,
-   publishes them to `tmck-code/yas-pr-screenshots`, and returns a ready-to-paste markdown
-   before/after table. Drop that table **verbatim** into the Screenshots / recording section.
+   **Screenshots / recording** section by **delegating to the `pr-screenshotter` agent** (see
+   its own file for what it does). Drop the table it returns **verbatim** into the
+   Screenshots / recording section.
 
    - Don't render or push images yourself — that's the agent's whole job; you just place the
      table it returns.
