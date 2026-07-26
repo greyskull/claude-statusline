@@ -41,16 +41,12 @@ actually cause.
 
 ## The demo visual gate (renderer/layout/glyph changes only)
 
-```bash
-make demo/img                                   # or DEMO_ONLY=<scenario> make demo/img
-.claude/skills/yas-demo-text/scripts/demo-text.sh
-```
-
-Diff `demo/text/<scenario>.txt` against a stashed-baseline render. Report
-alignment as a **plain-text diff verdict** — elbow / `┬` `┴` `│` columns line up,
-pill gradient continuous across thresholds, default render byte-identical when it
-should be. Never put a screenshot or a full render into your reply; cite the
-specific rows/columns that drifted.
+Use the **`yas-demo-text`** skill to render and diff — it owns the exact
+commands and the before/after `diff -ru` recipe. Report alignment as a
+**plain-text diff verdict**: elbow / `┬` `┴` `│` columns line up, pill gradient
+continuous across thresholds, default render byte-identical when it should be.
+Never put a screenshot or a full render into your reply; cite the specific
+rows/columns that drifted.
 
 ## Reporting contract (hard rule)
 
