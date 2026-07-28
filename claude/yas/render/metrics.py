@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from yas.constants import subagent_is_terminal, subagent_status
-from yas.render.text import fmt_dur, fmt_tok, fmt_tok_fixed
+from yas.render.text import fmt_tok, fmt_tok_fixed
 
 
 def fmt_lines_pair(read: int, changed: int, *, width: int = 0, fixed: bool = False) -> tuple[str, str]:
@@ -41,10 +41,13 @@ def subagent_dur_str(sub: object, now: float) -> str:
     Pulled out as its own function so every caller that needs to reserve
     column width for the duration field (`layout.tree_columns`,
     `Renderer.subagent_row`) measures the SAME string instead of assuming a
-    fixed width. `fmt_dur` is not fixed-width — minutes/hours grow an extra
-    digit past 9 (e.g. '3m36s' is 5 chars, '40m23s' is 6) — so a caller that
-    hardcodes '5' silently drifts by a column once any row crosses that
-    threshold, which is exactly the tree-mode misalignment this guards.
+    fixed width. Formatted as ``M:SS`` (no leading zero on minutes, e.g.
+    ``1:29``), rolling to ``H:MM:SS`` at or above one hour — matches the
+    **Session Timer** clock convention rather than `fmt_dur`'s ``1m29s``
+    style. Not fixed-width — minutes/hours grow an extra digit past 9 (e.g.
+    ``9:05`` is 4 chars, ``59:05`` is 5) — so a caller that hardcodes a width
+    silently drifts by a column once any row crosses that threshold, which is
+    exactly the tree-mode misalignment this guards.
     """
     status = subagent_status(sub)
     if subagent_is_terminal(status):
@@ -52,7 +55,14 @@ def subagent_dur_str(sub: object, now: float) -> str:
     else:
         first_ts = sub.first_timestamp  # type: ignore[attr-defined]
         dur = max(0.0, now - first_ts) if first_ts > 0 else 0.0
-    return fmt_dur(dur).rjust(5)
+    total_s = int(dur)
+    minutes, seconds = divmod(total_s, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        clock = f'{hours}:{minutes:02d}:{seconds:02d}'
+    else:
+        clock = f'{minutes}:{seconds:02d}'
+    return clock.rjust(5)
 
 
 def burndown_delta(
@@ -88,53 +98,52 @@ def subagent_avg_tpm(
 
 
 def subagent_cluster_field_offsets(
-    lines_w: int, model_w: int, share_w: int, *, tok_w: int = 5,
-) -> tuple[int, int, int]:
-    """0-indexed offsets, from a tree-single row's `stats_col`, of the lines
-    field, the tok(+share) field, and the model field in the fully-populated
-    stats cluster (`Renderer.subagent_row`'s ``· lines · tok (share%) · model``).
+    lines_w: int, *, tok_w: int = 5,
+) -> tuple[int, int]:
+    """0-indexed offsets, from a tree-single row's `stats_col`, of the tok
+    field and the lines field in the fully-populated stats cluster
+    (`Renderer.subagent_row`'s ``· tok · lines``).
+
+    The model field no longer lives in this cluster — it's embedded in the
+    row's front field (`<time> <elbow> <name> <model>`, see
+    `layout.tree_columns`'s `model_w` parameter) — so this only covers the
+    two fields that remain here.
 
     Single source of truth for that layout so the SUBAGENTS header's
-    'name'/'loc read / written'/'model'/'current activity' labels (built in
-    `layout.py`) can anchor over the SAME columns the data rows use, instead
-    of a hardcoded guess that drifts the moment `lines_w`/`share_w`/`model_w`
-    change per cohort. ``tok_w=5`` is `fmt_tok_fixed`'s own guaranteed max
-    width (3 significant figures + 1-char unit suffix, e.g. '7.52M'; below
-    1000 it's an unsuffixed int of at most 3 digits) — the same "measure the
-    ceiling, not a guess" reasoning `fmt_tok`'s `rjust(6)` already relies on.
+    'loc read / written'/'current activity' labels (built in `layout.py`)
+    can anchor over the SAME columns the data rows use, instead of a
+    hardcoded guess that drifts the moment `lines_w` changes per cohort.
+    ``tok_w=5`` is `fmt_tok_fixed`'s own guaranteed max width (3 significant
+    figures + 1-char unit suffix, e.g. '7.52M'; below 1000 it's an
+    unsuffixed int of at most 3 digits) — the same "measure the ceiling, not
+    a guess" reasoning `fmt_tok`'s `rjust(6)` already relies on. (The
+    `(N.N%)` session-share suffix that used to widen the tok field has been
+    removed — the field is always exactly `tok_w` wide now.)
     """
     sep          = 3  # ' · ' — space, middle-dot, space
-    lines_off    = sep
-    lines_full_w = 2 * (1 + 1 + lines_w) + 1  # glyph + space + value, twice, +1 gap
-    tok_off      = lines_off + lines_full_w + sep
-    tok_full_w   = tok_w + (3 + share_w if share_w else 0)  # ' (' + share + ')'
-    model_off    = tok_off + tok_full_w + sep
-    return lines_off, tok_off, model_off
+    tok_off      = sep
+    lines_off    = tok_off + tok_w + sep
+    return tok_off, lines_off
 
 
-def subagent_cluster_width(lines_w: int, model_w: int, share_w: int, *, tok_w: int = 5) -> int:
+def subagent_cluster_width(lines_w: int, *, tok_w: int = 5) -> int:
     """Visible width of the FULLY-populated tree-single stats cluster
-    (``· lines · tok (share%) · model``), given the cohort's measured field
-    widths.
+    (``· tok · lines``), given the cohort's measured lines-field width.
 
-    Single source of truth for "how much room does the cluster need if
-    nothing in it is shed", used by `layout.tree_columns` to decide how much
-    of the row's width can go to the (now elastic) description column before
-    it would have to start shedding cluster fields — the description
-    truncates first under width pressure, the cluster only once the
-    description is already at its floor. Mirrors
-    `Renderer.subagent_row.build_cluster(True, True, True)`'s plain-text
-    width exactly (dot + lines_field + sep + tok(+share) + sep + model); see
+    The model field is no longer part of this cluster (it moved into the
+    row's front field — see `layout.tree_columns`'s `model_w` parameter).
+    Single source of truth for "how much room does the (remaining) cluster
+    need if nothing in it is shed", used by `layout.tree_columns` to decide
+    how much of the row's width can go to the (now elastic) description
+    column before it would have to start shedding cluster fields — the
+    description truncates first under width pressure, the cluster only once
+    the description is already at its floor. Mirrors
+    `Renderer.subagent_row.build_cluster(True, True)`'s plain-text width
+    exactly (dot + tok + sep + lines_field); see
     `subagent_cluster_field_offsets` for the matching per-field offsets.
     """
     dot          = 2  # '· '
     sep          = 3  # ' · '
-    lines_full_w = 2 * (1 + 1 + lines_w) + 1  # glyph + space + value, twice, +1 gap
-    tok_full_w   = tok_w + (3 + share_w if share_w else 0)  # ' (' + share + ')'
-    return dot + lines_full_w + sep + tok_full_w + sep + model_w
-
-
-def subagent_share(sub_inout: int, session_inout: int) -> float | None:
-    if session_inout <= 0:
-        return None
-    return sub_inout / session_inout
+    # <read> + ' /' + <changed>, each side `lines_w` wide.
+    lines_full_w = lines_w + 2 + lines_w
+    return dot + tok_w + sep + lines_full_w

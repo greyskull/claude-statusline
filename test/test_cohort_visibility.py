@@ -40,9 +40,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'ops'))
 
 NOW = 1_000_000.0  # arbitrary fixed epoch
 
-LIVENESS  = RunningSubagents.LIVENESS_WINDOW_SECONDS   # 30
-GRACE     = RunningSubagents.COHORT_GRACE_SECONDS       # 20
-JANITOR   = RunningSubagents.JANITOR_HORIZON_SECONDS    # 60
+LIVENESS  = RunningSubagents.LIVENESS_WINDOW_SECONDS     # 30
+GRACE     = RunningSubagents.COHORT_GRACE_SECONDS         # 20
+JANITOR   = RunningSubagents.JANITOR_HORIZON_SECONDS      # 60
+ABANDONED = RunningSubagents.ABANDONED_HORIZON_SECONDS    # 1800
 
 
 def _sub(
@@ -133,13 +134,52 @@ def test_mixed_cohort_not_retired_by_grace() -> None:
     assert running in result
 
 
-def test_janitor_sweep_at_60s() -> None:
-    '''Dirty cohort (still-running agent) is swept when all transcripts silent for 60 s.'''
+def test_running_agent_not_swept_at_60s() -> None:
+    '''Regression: a still-running agent (end_ts == 0) that has simply gone
+    transcript-silent for JANITOR_HORIZON_SECONDS (e.g. mid long tool call or
+    extended thinking) must NOT be swept -- silence alone is not evidence of
+    abandonment when there is no terminal status yet. This was the confirmed
+    false-negative: a genuinely alive subagent vanished from the tree after
+    60-75 s of quiet, then reappeared on its next transcript write.
+    '''
     last_prompt_ts = NOW - 5.0
-    # Agent started this turn so it's a candidate, but hasn't written in 61 s
-    sub = _sub(first_timestamp=NOW - 3.0, mtime=NOW - (JANITOR + 1), end_ts=0.0)
+    # Agent started this turn (first_timestamp >= last_prompt_ts) -- unambiguously
+    # spawned this turn, not a stale candidate -- but silent for 75 s.
+    sub = _sub(first_timestamp=NOW - 3.0, mtime=NOW - 75.0, end_ts=0.0)
+    assert JANITOR < 75.0 < ABANDONED
+    result = _cohort(sub).visible(NOW, last_prompt_ts)
+    assert sub in result
+
+
+def test_running_agent_eventually_swept_when_truly_abandoned() -> None:
+    '''A still-running agent (end_ts == 0) whose transcript has been silent far
+    past any reasonable liveness window (e.g. the session crashed) is still
+    eventually swept -- the janitor cleanup for orphaned agent-*.jsonl entries
+    is not removed, only its threshold for still-running members is widened.
+    '''
+    last_prompt_ts = NOW - 5.0
+    sub = _sub(first_timestamp=NOW - 3.0, mtime=NOW - (ABANDONED + 1), end_ts=0.0)
     result = _cohort(sub).visible(NOW, last_prompt_ts)
     assert result == []
+
+
+def test_dirty_cohort_mixed_horizons() -> None:
+    '''A dirty cohort with one Done-but-not-terminal member silent past
+    JANITOR_HORIZON_SECONDS and one still-running member silent past
+    ABANDONED_HORIZON_SECONDS is swept only once BOTH thresholds are crossed.
+    '''
+    last_prompt_ts = NOW - 5.0
+    done_ish = _sub(
+        first_timestamp=NOW - 4.0, mtime=NOW - (JANITOR + 1), end_ts=NOW - (JANITOR + 1),
+        description='done-ish',
+    )
+    running = _sub(
+        first_timestamp=NOW - 3.0, mtime=NOW - (JANITOR + 5), end_ts=0.0,
+        description='running',
+    )
+    # done_ish is past its own horizon but running is not past ABANDONED yet.
+    result = _cohort(done_ish, running).visible(NOW, last_prompt_ts)
+    assert running in result
 
 
 def test_janitor_not_triggered_if_one_member_wrote_recently() -> None:

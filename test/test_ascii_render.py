@@ -141,6 +141,16 @@ def test_apply_glyph_mode_unicode_removes_pua() -> None:
     assert c.UNICODE_PUA[GLYPH_MODEL] in out
 
 
+def test_apply_glyph_mode_ascii_tree_elbows_become_single_l() -> None:
+    # Subagent Tree View elbows ('├'/'└', built as raw literals in
+    # layout.subagent_cells) collapse to a single 'L' glyph in ascii mode —
+    # no distinction between sibling/last-child, and no generic '+' corner.
+    s = '├ └ spec-author'  # '├ └ spec-author'
+    out = apply_glyph_mode(s, 'ascii')
+    assert out == 'L L spec-author'
+    assert 'L' in out and '+' not in out
+
+
 def test_to_singlewidth_folds_wide_keeps_narrow() -> None:
     s = 'x\U0001F525yz'  # narrow + fire emoji (wide) + narrow + a PUA icon (width-1)
     out = to_singlewidth(s)

@@ -617,6 +617,12 @@ class RunningSubagents:
     # Janitor horizon: total-silence threshold to sweep a dirty cohort (no end_turn);
     # also the recency-window fallback when no prompt-marker is available
     JANITOR_HORIZON_SECONDS = 60
+    # Abandoned horizon: silence threshold applied to a still-running member
+    # (end_ts == 0) before the janitor sweep treats it as orphaned rather than
+    # merely quiet. A genuinely-alive subagent can go transcript-silent for
+    # well over a minute (long tool call, extended thinking); only a much
+    # longer gap is real evidence of a crashed/abandoned agent-*.jsonl.
+    ABANDONED_HORIZON_SECONDS = 1800
     # Liveness window: silence threshold for "still writing" vs "idle/done" (straggler keep)
     LIVENESS_WINDOW_SECONDS = 30
     # Keep the old name as an alias so existing code that references it still works
@@ -773,8 +779,19 @@ class RunningSubagents:
             if now - max(sub.end_ts for sub in candidates) > self.COHORT_GRACE_SECONDS:
                 return []
         else:
-            # Dirty cohort: janitor sweep when all transcripts have gone silent
-            if all(now - sub.mtime > self.JANITOR_HORIZON_SECONDS for sub in candidates):
+            # Dirty cohort: janitor sweep when every member has gone silent
+            # long enough to be real evidence of abandonment. A member with a
+            # terminal status but no clean end_turn still only needs
+            # JANITOR_HORIZON_SECONDS silence; a still-running member
+            # (end_ts == 0) has no terminal signal at all, so silence alone
+            # under an hour is not evidence it is dead -- it may just be mid
+            # long-tool-call or extended thinking. Require the much longer
+            # ABANDONED_HORIZON_SECONDS before sweeping those.
+            def _retired(sub: RunningSubagent) -> bool:
+                horizon = self.JANITOR_HORIZON_SECONDS if sub.end_ts > 0 else self.ABANDONED_HORIZON_SECONDS
+                return now - sub.mtime > horizon
+
+            if all(_retired(sub) for sub in candidates):
                 return []
 
         return candidates

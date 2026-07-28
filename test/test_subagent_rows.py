@@ -11,9 +11,8 @@ import yas.info.subagents as subagents_mod
 from yas.config import Config
 
 from yas.constants import (
-    GLYPH_LINES_CHANGED,
-    GLYPH_LINES_READ,
     GLYPH_REPLYING,
+    ITALIC,
     STRIKE,
     SUBAGENT_DESC_FLOOR,
     SUBAGENT_STATS_ACTIVITY_GAP,
@@ -21,7 +20,6 @@ from yas.constants import (
 )
 from yas.info import SessionView
 from yas.info.subagents import RunningSubagent
-from yas.render.gradient import model_display
 from yas.render.text import _visible_width, fmt_tok, fmt_tok_fixed
 from yas.tokens import TickRecord, TokenLog
 from helper import strip_ansi
@@ -90,15 +88,23 @@ def _one(sub: RunningSubagent, content_width: int = 96, **kw) -> str:
     return _r.subagent_row(sub, content_width, twoline=False, **kw)
 
 
+def _has_lines_field(plain: str) -> bool:
+    """True if the lines-read/written field ('<read>/<written>', no icons) is
+    present in an ANSI-stripped subagent row. The field is the only '/'-joined
+    token the row ever emits, so a bare '/' is an unambiguous marker for it —
+    see the field's composition in `Renderer.subagent_row`."""
+    return '/' in plain
+
+
 # A. Two-line form: duration-first identity + cluster ------------------------
 
 def test_two_line_duration_at_front() -> None:
     sub = _make_sub(first_timestamp=time.time() - 47)
     line1, _ = _two(sub)
     plain = strip_ansi(line1)
-    assert plain.lstrip().startswith('47s')
+    assert plain.lstrip().startswith('0:47')
     # duration precedes the agent type
-    assert plain.index('47s') < plain.index('general-purpose')
+    assert plain.index('0:47') < plain.index('general-purpose')
 
 
 def test_two_line_has_type_then_description() -> None:
@@ -116,20 +122,19 @@ def test_two_line_no_run_state_marker() -> None:
     assert '✓' not in strip_ansi(line2)
 
 
-def test_two_line_cluster_share_tok_model_order() -> None:
-    # Redesigned cluster order: lines · tok (share%) · model — share now
-    # lives as a parenthetical suffix on the tok field instead of its own
-    # segment, so 'tok' precedes '%' and both precede the model name.
+def test_two_line_cluster_tok_model_order() -> None:
+    # Cluster order: lines · tok · model — the `(N.N%)` session-share suffix
+    # has been removed from the tok field entirely.
     sub = _make_sub(total_input=12345, output=678, model='claude-sonnet-4-6')
-    si  = (sub.total_input + sub.output) * 2  # ~50% share
+    si  = (sub.total_input + sub.output) * 2
     line1, _ = _two(sub, 136, session_inout=si)
     plain = strip_ansi(line1)
     tok = fmt_tok_fixed(sub.total_input)
-    assert '%' in plain
+    assert '%' not in plain
     assert tok in plain
     assert 'sonnet' in plain
-    # cluster order: tok, then its share% suffix, then model
-    assert plain.index(tok) < plain.index('%') < plain.index('sonnet')
+    # cluster order: tok, then model
+    assert plain.index(tok) < plain.index('sonnet')
 
 
 @pytest.mark.parametrize('model, word', [
@@ -225,37 +230,32 @@ def test_two_line_long_description_elides() -> None:
     assert _visible_width(line1) == 136
 
 
-# D. Line-1 cluster shedding: share% first, then tok -------------------------
-
-def _cluster_state(line1: str, tok: str) -> tuple[bool, bool]:
-    """(share% present, tok present) on a line-1 cluster."""
-    p = strip_ansi(line1)
-    return ('%' in p, tok in p)
-
+# D. Line-1 cluster shedding: lines first, then tok --------------------------
 
 def test_shed_description_truncates_before_cluster_sheds() -> None:
     # Wide enough for the full cluster but not the full description: the
-    # description elides while share% and tok are both retained.
+    # description elides while lines and tok are both retained.
     sub = _make_sub(description='x' * 120, total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
-    line1, _ = _two(sub, 70, session_inout=si)
+    line1, _ = _two(sub, 70, session_inout=si, lines=(5, 3))
     plain = strip_ansi(line1)
     assert '…' in plain                     # description truncated
-    assert '%' in plain                     # share% kept
+    assert _has_lines_field(plain)          # lines field kept
     assert fmt_tok(sub.total_input) in plain  # tok kept
 
 
-def test_shed_order_share_then_tok() -> None:
+def test_shed_order_lines_then_tok_narrow_range() -> None:
     # Across narrowing widths the kept cluster is one of model-only,
-    # tok+model, or share+tok+model — never tok dropped while share kept.
+    # tok+model, or lines+tok+model — never tok dropped while lines kept.
     sub = _make_sub(agent_type='general-purpose', description='x' * 80,
                     total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     tok = fmt_tok(sub.total_input)
     valid = {(True, True), (False, True), (False, False)}
     for w in range(30, 80):
-        line1, _ = _two(sub, w, session_inout=si)
-        state = _cluster_state(line1, tok)
+        line1, _ = _two(sub, w, session_inout=si, lines=(5, 3))
+        plain = strip_ansi(line1)
+        state = (_has_lines_field(plain), tok in plain)
         assert state in valid, f'width={w}: out-of-order shed {state}'
 
 
@@ -264,11 +264,13 @@ def test_shed_all_levels_reachable() -> None:
                     total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     tok = fmt_tok(sub.total_input)
-    seen = {_cluster_state(_two(sub, w, session_inout=si)[0], tok)
-            for w in range(30, 80)}
+    seen = set()
+    for w in range(30, 80):
+        plain = strip_ansi(_two(sub, w, session_inout=si, lines=(5, 3))[0])
+        seen.add((_has_lines_field(plain), tok in plain))
     assert (True, True) in seen    # nothing shed
-    assert (False, True) in seen   # share% shed, tok kept
-    assert (False, False) in seen  # share% and tok shed
+    assert (False, True) in seen   # lines shed, tok kept
+    assert (False, False) in seen  # lines and tok shed
 
 
 def test_shed_model_and_duration_always_kept() -> None:
@@ -280,7 +282,7 @@ def test_shed_model_and_duration_always_kept() -> None:
         line1, _ = _two(sub, w, session_inout=si)
         plain = strip_ansi(line1)
         assert 'sonnet' in plain, f'width={w} dropped model'
-        assert '47s' in plain, f'width={w} dropped duration'
+        assert '0:47' in plain, f'width={w} dropped duration'
 
 
 # D2. Line-1 stats anchoring (stats_col) -------------------------------------
@@ -335,14 +337,14 @@ def test_stats_col_narrow_falls_back_to_right_align() -> None:
 
 def test_stats_col_richest_cluster_that_fits_at_anchor() -> None:
     # Slack to the right of the anchor governs which cluster is chosen. With
-    # generous slack the full share%+tok+model cluster anchors at stats_col.
+    # generous slack the full tok+model cluster anchors at stats_col.
     sub = _make_sub(total_input=12345, output=678, model='claude-sonnet-4-6')
     si  = (sub.total_input + sub.output) * 2
     line1, _ = _two(sub, 156, session_inout=si, stats_col=100)
     plain = strip_ansi(line1)
     tok   = fmt_tok(sub.total_input)
     assert plain[100] == '·'
-    assert '%' in plain and tok in plain and 'sonnet' in plain
+    assert tok in plain and 'sonnet' in plain
 
 
 # E. Done vs running treatment -----------------------------------------------
@@ -367,9 +369,9 @@ def test_running_two_line_uses_live_styling() -> None:
 
 
 def test_done_two_line_frozen_duration_value() -> None:
-    # end_ts - first_timestamp = 90s -> 1m30s, shown at the front of line 1
+    # end_ts - first_timestamp = 90s -> 1:30, shown at the front of line 1
     line1, _ = _two(_make_done_sub())
-    assert '1m30s' in strip_ansi(line1)
+    assert '1:30' in strip_ansi(line1)
 
 
 def test_done_two_line_duration_does_not_tick() -> None:
@@ -461,7 +463,7 @@ def test_one_line_resumed_elapsed_continues_from_original_spawn() -> None:
     sub = _make_sub(status='running', run_count=1, resumed=True,
                     first_timestamp=time.time() - 90)
     out = strip_ansi(_one(sub))
-    assert '1m30s' in out
+    assert '1:30' in out
 
 
 def test_two_line_resumed_shows_resume_glyph_in_tree_column() -> None:
@@ -494,7 +496,7 @@ def test_one_line_keeps_token_and_duration() -> None:
     sub = _make_sub(first_timestamp=time.time() - 47)
     out = strip_ansi(_one(sub))
     assert fmt_tok(sub.total_input) in out
-    assert '47s' in out
+    assert '0:47' in out
 
 
 def test_one_line_keeps_type_model_verb() -> None:
@@ -537,7 +539,7 @@ def test_one_line_done_uses_checkmark() -> None:
 def test_one_line_done_frozen_duration() -> None:
     sub = _make_done_sub()
     out = strip_ansi(_one(sub))
-    assert '1m30s' in out
+    assert '1:30' in out
 
 
 def test_one_line_done_no_activity_verb() -> None:
@@ -644,16 +646,41 @@ def test_one_line_six_char_token_keeps_model_aligned() -> None:
 # G. Duration formatting ------------------------------------------------------
 
 @pytest.mark.parametrize('elapsed, token', [
-    (4, '4s'), (47, '47s'), (83, '1m23s'), (3700, '1h01m'),
+    (4, '0:04'), (47, '0:47'), (83, '1:23'), (3700, '1:01:40'),
 ])
 def test_one_line_duration_formats(elapsed: int, token: str) -> None:
     out = strip_ansi(_one(_make_sub(first_timestamp=time.time() - elapsed)))
     assert token in out
 
 
+def test_subagent_dur_str_is_mmss_not_fmt_dur_style() -> None:
+    # Change: elapsed time is M:SS (e.g. '1:29'), not fmt_dur's '1m29s' style.
+    from yas.render.metrics import subagent_dur_str
+    sub = _make_sub(first_timestamp=time.time() - 89)
+    assert subagent_dur_str(sub, time.time()).strip() == '1:29'
+
+
+def test_subagent_dur_str_rolls_to_hms() -> None:
+    from yas.render.metrics import subagent_dur_str
+    sub = _make_sub(first_timestamp=time.time() - 3700)  # 1:01:40
+    assert subagent_dur_str(sub, time.time()).strip() == '1:01:40'
+
+
+def test_two_line_duration_mmss_in_every_width_mode() -> None:
+    # The M:SS format applies in the two-line, tree-single, and one-line
+    # collapse forms alike — never the old '1m29s' style.
+    sub = _make_sub(first_timestamp=time.time() - 89)
+    line1_two, _ = _two(sub)
+    line_one     = _one(sub)
+    assert '1:29' in strip_ansi(line1_two)
+    assert '1:29' in strip_ansi(line_one)
+    assert '1m29s' not in strip_ansi(line1_two)
+    assert '1m29s' not in strip_ansi(line_one)
+
+
 def test_one_line_no_timestamp_fallback() -> None:
     out = strip_ansi(_one(_make_sub(first_timestamp=0)))
-    assert '0s' in out
+    assert '0:00' in out
 
 
 # H. subagent_activity formatter (unchanged) ---------------------------------
@@ -945,7 +972,11 @@ def test_tree_prefix_two_line_widths_and_indent() -> None:
     sub = _make_sub()
     line1, line2 = _two(sub, 136, tree_prefix='├ ')
     p1, p2 = strip_ansi(line1), strip_ansi(line2)
-    assert p1.startswith('├ ')
+    # Elbow sits to the RIGHT of the elapsed time, not to its left: 'M:SS
+    # <elbow> <name>', never '<elbow> M:SS <name>'.
+    assert '├ ' in p1
+    assert p1.index('├ ') > p1.index(':')
+    assert not p1.startswith('├ ')
     assert p2.startswith('  ')            # continuation indents under the branch
     assert _visible_width(line1) == 136   # prefix eats content width, not the box
     assert _visible_width(line2) == 136
@@ -962,6 +993,48 @@ def test_tree_prefix_default_noop() -> None:
     sub = _make_sub()
     assert _r.subagent_row(sub, 136, twoline=True) == \
            _r.subagent_row(sub, 136, twoline=True, tree_prefix='')
+
+
+def test_elbow_sits_right_of_elapsed_time_two_line() -> None:
+    # '<time> <elbow> <name>', never '<elbow> <time> <name>' — in every glyph
+    # mode (checked here for the raw unicode elbow the renderer emits;
+    # ascii-mode folding is covered separately in test_ascii_render.py).
+    sub = _make_sub()
+    for elbow in ('├ ', '└ ', '  ├ '):  # sibling, last-child, nested
+        line1, _ = _two(sub, 136, tree_prefix=elbow)
+        p1 = strip_ansi(line1)
+        time_idx  = p1.index(':') - 1  # the MM:SS field starts one col before ':'
+        elbow_idx = p1.index(elbow.strip())
+        assert elbow_idx > time_idx, f'elbow at {elbow_idx} not right of time at {time_idx}: {p1!r}'
+
+
+def test_elbow_sits_right_of_elapsed_time_tree_single() -> None:
+    sub = _make_sub()
+    line = _r.subagent_row(sub, 136, twoline=True, tree_single=True, tree_prefix='├ ')
+    p = strip_ansi(line)
+    assert p.index('├') > p.index(':')
+
+
+def test_elbow_sits_right_of_elapsed_time_ascii_mode() -> None:
+    # After folding through apply_glyph_mode('ascii'), the elbow becomes a
+    # bare 'L' — confirm it still lands after the time field, not before it.
+    from yas.render.text import apply_glyph_mode
+    sub = _make_sub()
+    line1, _ = _two(sub, 136, tree_prefix='├ ')
+    ascii_line = apply_glyph_mode(strip_ansi(line1), 'ascii')
+    time_idx  = ascii_line.index(':') - 1
+    l_idx     = ascii_line.index('L')
+    assert l_idx > time_idx, f'ascii elbow at {l_idx} not right of time at {time_idx}: {ascii_line!r}'
+
+
+def test_root_row_has_no_elbow_but_keeps_time_first() -> None:
+    # The top-level/root row (no tree_prefix) has no elbow at all — just
+    # '<time> <name>' — per the worked example ('1:29 spec-author').
+    sub = _make_sub()
+    line1, _ = _two(sub, 136, tree_prefix='')
+    p1 = strip_ansi(line1)
+    assert '├' not in p1 and '└' not in p1
+    assert p1.lstrip().split(' ', 1)[0].count(':') == 1  # leading token is the MM:SS time
 
 
 def test_tree_single_puts_activity_on_line_one() -> None:
@@ -984,7 +1057,11 @@ def test_tree_single_width_preserved_and_prefixed() -> None:
     assert '\n' not in root and '\n' not in kid
     assert _visible_width(root) == 136
     assert _visible_width(kid) == 136             # prefix eats content, not the box
-    assert strip_ansi(kid).startswith('├ ')
+    # Elbow sits to the right of the elapsed time in tree-single rows too.
+    kid_p = strip_ansi(kid)
+    assert '├ ' in kid_p
+    assert kid_p.index('├ ') > kid_p.index(':')
+    assert not kid_p.startswith('├ ')
 
 
 def test_tree_single_activity_column_aligned_across_rows() -> None:
@@ -1066,14 +1143,18 @@ def test_tree_single_description_aligned_across_depths_and_names() -> None:
     kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api', description='Make tmp dir',
                           last_activity=('tool_use', 'Bash', {'command': 'mkdir -p /tmp'}))
     cells = [(root, ''), (kid, '├ ')]
-    desc_col, stats_col, activity_col = layout.tree_columns(cells, 140)
+    model_w = layout.tree_model_width(cells)
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, 140, model_w=model_w)
     lines = [
         strip_ansi(_r.subagent_row(sub, 140, twoline=True, tree_single=True, tree_prefix=prefix,
                                    stats_col=stats_col, tree_desc_col=desc_col,
-                                   tree_activity_col=activity_col))
+                                   tree_activity_col=activity_col, tree_model_w=model_w))
         for sub, prefix in cells
     ]
-    desc_idx = [ln.index(' · ') for ln in lines]
+    # Locate each row's description text directly (rather than the first
+    # ' · ' substring, which now belongs to the front-embedded model
+    # separator, not the description one).
+    desc_idx = [ln.index(desc) for ln, desc in zip(lines, ('Fetch the artifact', 'Make tmp dir'))]
     act_idx  = [ln.index('Bash[') for ln in lines]
     assert len(set(desc_idx)) == 1, f'description column drifted: {desc_idx}'
     assert len(set(act_idx)) == 1, f'activity column drifted: {act_idx}'
@@ -1137,10 +1218,23 @@ def test_tree_columns_short_description_leaves_no_dead_gutter_at_wide_width() ->
     assert activity_col_140 == activity_col_300  # no width-scaled growth either
 
 
+def test_tree_model_width_measures_cohort_max() -> None:
+    # tree_model_width measures the cohort's actual longest model label
+    # (dynamic, per-cohort) — a cohort with only the short 'haiku' label
+    # reserves exactly 5 columns; a cohort with a longer bracket-suffixed
+    # label reserves exactly that label's width. It no longer pins to a
+    # fixed constant regardless of content.
+    short_only = [(_make_tree_sub('agent-a', model='claude-haiku-4-5-20251001'), '')]
+    long_only  = [(_make_tree_sub('agent-a', model='claude-sonnet-4-6[1m]'), '')]
+    assert layout.tree_model_width(short_only) == len('haiku')
+    assert layout.tree_model_width(long_only) == len('sonnet[1m]')
+    assert layout.tree_model_width([]) == 0
+
+
 def test_tree_single_description_truncates_before_cluster_sheds() -> None:
     # End-to-end regression for the inverted shed priority: as the row
     # narrows, the description truncates (down to its floor) WHILE the
-    # lines/share%/tok cluster stays fully populated — the cluster is never
+    # lines/tok cluster stays fully populated — the cluster is never
     # allowed to drop a field while the description still has room above its
     # floor to give up.
     from yas.render.metrics import subagent_cluster_width
@@ -1151,20 +1245,19 @@ def test_tree_single_description_truncates_before_cluster_sheds() -> None:
     model_w = layout.tree_model_width(cells)
     lines_w = layout.tree_lines_width(cells, {})
     si = 1000
-    share_w = layout.tree_share_width(cells, si)
-    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+    cluster_w = subagent_cluster_width(lines_w)
 
     saw_truncated_desc_with_full_cluster = False
     for width in range(70, 140):
-        desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w)
+        desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w, model_w=model_w)
         line1 = _r.subagent_row(
             sub, width, twoline=True, session_inout=si, stats_col=stats_col,
             tree_single=True, tree_desc_col=desc_col, tree_activity_col=activity_col,
-            tree_model_w=model_w, tree_lines_w=lines_w, tree_share_w=share_w, lines=(5, 3),
+            tree_model_w=model_w, tree_lines_w=lines_w, lines=(5, 3),
         ).split('\n')[0]
         plain = strip_ansi(line1)
         desc_truncated = '…' in plain
-        cluster_full = GLYPH_LINES_READ in plain and '%' in plain
+        cluster_full = _has_lines_field(plain)
         # Never the inverse: a shed cluster while the description is intact.
         if desc_truncated and cluster_full:
             saw_truncated_desc_with_full_cluster = True
@@ -1186,43 +1279,44 @@ def test_tree_columns_label_anchors_follow_elastic_desc_growth() -> None:
     cells = [(root, '')]
     model_w = layout.tree_model_width(cells)
     lines_w = layout.tree_lines_width(cells, {})
-    share_w = layout.tree_share_width(cells, 0)
-    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+    cluster_w = subagent_cluster_width(lines_w)
     for width in (80, 140, 260):
-        desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w)
-        lines_off, _tok_off, model_off = subagent_cluster_field_offsets(lines_w, model_w, share_w)
-        assert 3 + desc_col < 3 + stats_col + lines_off < 3 + stats_col + model_off < 3 + activity_col
+        desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w, model_w=model_w)
+        _tok_off, lines_off = subagent_cluster_field_offsets(lines_w)
+        # Model now anchors inside the front field (ahead of desc_col), not
+        # the cluster — verify the remaining cluster fields (tok, lines) and
+        # the activity column still nest correctly relative to desc_col.
+        assert 3 + stats_col + _tok_off < 3 + stats_col + lines_off < 3 + activity_col
 
 
 def test_tree_row_stats_cluster_aligns_across_long_and_short_duration_rows() -> None:
-    # Regression: fmt_dur is NOT fixed-width -- '3m36s' is 5 chars but
-    # '40m23s' (double-digit minutes) is 6. A long-running parent row and a
+    # Regression: subagent_dur_str is NOT fixed-width -- '9:36' is 4 chars but
+    # '40:23' (double-digit minutes) is 5. A long-running parent row and a
     # freshly-spawned prefixed child row used to disagree on the front-field
-    # width because the layout math assumed a constant 5-char duration, so
-    # the whole stats cluster (eye/pencil line-counts, share%, tok, model)
-    # drifted left by one column on the prefixed row. Assert both rows agree
-    # on the absolute start column of the cluster, not a brittle full string.
+    # width because the layout math assumed a constant duration width, so
+    # the whole stats cluster (read/written line-counts, tok, model) drifted
+    # left by one column on the prefixed row. Assert both rows agree on the
+    # absolute start column of the cluster, not a brittle full string.
     from yas.render.metrics import subagent_cluster_width
 
-    parent = _make_tree_sub('agent-a', agent_type='spec-implementer', ts_off=-2360)  # ~40m23s elapsed
-    child  = _make_tree_sub('agent-b', parent_id='a', agent_type='ui', ts_off=0)      # ~1m40s elapsed
+    parent = _make_tree_sub('agent-a', agent_type='spec-implementer', ts_off=-2360)  # ~40:23 elapsed
+    child  = _make_tree_sub('agent-b', parent_id='a', agent_type='ui', ts_off=0)      # ~1:40 elapsed
     cells  = [(parent, ''), (child, '└ ')]
     width  = 290
     model_w   = layout.tree_model_width(cells)
     lines_w   = layout.tree_lines_width(cells, {})
-    share_w   = layout.tree_share_width(cells, 200_000)
-    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
-    desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w)
+    cluster_w = subagent_cluster_width(lines_w)
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, width, cluster_full_w=cluster_w, model_w=model_w)
 
     def cluster_start_col(sub: RunningSubagent, prefix: str) -> int:
         line1 = _r.subagent_row(
             sub, width, twoline=True, session_inout=200_000, stats_col=stats_col,
             tree_prefix=prefix, tree_single=True, tree_desc_col=desc_col,
             tree_activity_col=activity_col, tree_model_w=model_w,
-            tree_lines_w=lines_w, tree_share_w=share_w, lines=(5, 3),
+            tree_lines_w=lines_w, lines=(5, 3),
         ).split('\n')[0]
         stripped = strip_ansi(line1)
-        idx = stripped.find(GLYPH_LINES_READ)
+        idx = stripped.find('/')
         assert idx != -1
         return idx
 
@@ -1232,17 +1326,19 @@ def test_tree_row_stats_cluster_aligns_across_long_and_short_duration_rows() -> 
 
 
 def test_tree_single_constant_gap_with_model_padded_to_cohort_width() -> None:
-    # TASK B: pad every row's model label to the cohort's widest model width
-    # (tree_model_w), then a CONSTANT SUBAGENT_STATS_ACTIVITY_GAP-col gap
-    # separates the cluster from the activity snippet, regardless of model
-    # label length.
+    # TASK B: pad every row's model label to the cohort's own widest label
+    # (via tree_model_w, now dynamically measured — see
+    # test_tree_model_width_measures_cohort_max), then a CONSTANT
+    # SUBAGENT_STATS_ACTIVITY_GAP-col gap separates the cluster from the
+    # activity snippet, regardless of model label length or which models are
+    # actually present in the cohort.
     short = _make_tree_sub('agent-a', agent_type='api', model='claude-haiku-4-5-20251001',
                            last_activity=('tool_use', 'Bash', {'command': 'x'}))
     long  = _make_tree_sub('agent-b', agent_type='api', model='claude-sonnet-4-6',
                            last_activity=('tool_use', 'Read', {'file_path': 'y.py'}))
     cells = [(short, ''), (long, '')]
     model_w = layout.tree_model_width(cells)
-    assert model_w == max(len(model_display(short.model)), len(model_display(long.model)))
+    assert model_w == len('sonnet')
     l_short = strip_ansi(_r.subagent_row(short, 136, twoline=True, tree_single=True, tree_model_w=model_w))
     l_long  = strip_ansi(_r.subagent_row(long, 136, twoline=True, tree_single=True, tree_model_w=model_w))
     # The gap measured from the END OF THE PADDED MODEL FIELD (not from the
@@ -1357,26 +1453,41 @@ def test_cascade_clear_walks_multiple_ancestor_levels() -> None:
 
 def test_lines_field_shows_humanised_values() -> None:
     # 1234 -> '1.23K', 567 -> '567' via fmt_tok_fixed (subagent-row-only,
-    # 3-significant-figure formatting); both glyphs present.
+    # 3-significant-figure formatting); rendered as '<read> /<written>' (a
+    # space before the slash, none after), no icons.
     sub = _make_sub(total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     line1, _ = _two(sub, 136, session_inout=si, lines=(1234, 567))
     plain = strip_ansi(line1)
     assert fmt_tok_fixed(1234) in plain
     assert fmt_tok_fixed(567) in plain
-    assert GLYPH_LINES_READ in plain
-    assert GLYPH_LINES_CHANGED in plain
+    assert _has_lines_field(plain)
+    assert f'{fmt_tok_fixed(1234)} /{fmt_tok_fixed(567)}' in plain
 
 
 def test_lines_field_blank_when_both_zero() -> None:
-    # Both zero blanks the whole field (spaces) — neither glyph nor a literal
-    # '0' shows up, so the cluster carries no noise for idle subagents.
+    # Non-tree (flat/twoline) rows OMIT the field entirely when there's no
+    # data — the width-reservation behaviour is tree_single-only. `lines`
+    # supplied but both sides zero counts as "no data" here.
     sub = _make_sub(total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     line1, _ = _two(sub, 136, session_inout=si, lines=(0, 0))
     plain = strip_ansi(line1)
-    assert GLYPH_LINES_READ not in plain
-    assert GLYPH_LINES_CHANGED not in plain
+    assert not _has_lines_field(plain)
+
+
+def test_lines_field_blank_when_both_zero_tree_single() -> None:
+    # tree_single DOES reserve the field's width even with no data, so
+    # cohort rows without data stay aligned under sibling rows that do.
+    sub = _make_sub(total_input=12345, output=678)
+    line1 = _r.subagent_row(
+        sub, 136, twoline=True, tree_single=True, lines=(0, 0),
+    ).split('\n')[0]
+    plain = strip_ansi(line1)
+    assert _has_lines_field(plain)
+    # Both sides immediately touching the '/' are blank (space), not '0'.
+    idx = plain.index('/')
+    assert plain[idx - 1] == ' ' and plain[idx + 1] == ' '
 
 
 def test_lines_field_blank_when_none() -> None:
@@ -1386,6 +1497,47 @@ def test_lines_field_blank_when_none() -> None:
     line1_none, _ = _two(sub, 136, session_inout=si, lines=None)
     line1_zero, _ = _two(sub, 136, session_inout=si, lines=(0, 0))
     assert strip_ansi(line1_none) == strip_ansi(line1_zero)
+
+
+def test_lines_field_omitted_not_blank_dot_when_no_data() -> None:
+    # Non-tree (flat/twoline) rows: a caller that never supplies `lines`
+    # (narrow/medium rows, workflow-agent rows) OMITS the field entirely
+    # (and its leading '· ' separator), rather than reserving blank-padded
+    # width — that reservation behaviour is scoped to tree_single only.
+    sub = _make_sub(total_input=12345, output=678)
+    si  = (sub.total_input + sub.output) * 2
+    line1_no_lines,   _ = _two(sub, 136, session_inout=si)             # lines=None
+    line1_with_lines, _ = _two(sub, 136, session_inout=si, lines=(5, 3))
+    plain_no_lines   = strip_ansi(line1_no_lines)
+    plain_with_lines = strip_ansi(line1_with_lines)
+    assert not _has_lines_field(plain_no_lines)
+    assert _has_lines_field(plain_with_lines)
+
+
+def test_lines_field_reserves_width_not_omitted_when_no_data_tree_single() -> None:
+    # tree_single: reserves the field's full column width — blank-padded on
+    # both sides — rather than omitting the field and its leading '· '
+    # separator, so cohort rows without data stay aligned under sibling
+    # rows that do have data. The field (and its dot-separator) is present
+    # in BOTH cases now; only the shed ladder (width pressure) drops it.
+    sub = _make_sub(total_input=12345, output=678)
+    line1_no_lines = _r.subagent_row(
+        sub, 136, twoline=True, tree_single=True,
+    ).split('\n')[0]                                                   # lines=None
+    line1_with_lines = _r.subagent_row(
+        sub, 136, twoline=True, tree_single=True, lines=(5, 3),
+    ).split('\n')[0]
+    plain_no_lines   = strip_ansi(line1_no_lines)
+    plain_with_lines = strip_ansi(line1_with_lines)
+    assert _has_lines_field(plain_no_lines)
+    assert _has_lines_field(plain_with_lines)
+    # Same number of dot-separated cluster segments either way — the field
+    # is blank-padded, not dropped, so the segment count doesn't change.
+    dots_no_lines   = plain_no_lines[plain_no_lines.index('·'):].count('· ')
+    dots_with_lines = plain_with_lines[plain_with_lines.index('·'):].count('· ')
+    assert dots_no_lines == dots_with_lines
+    # And the row's total visible width is identical either way.
+    assert _visible_width(line1_no_lines) == _visible_width(line1_with_lines)
 
 
 def test_lines_field_cluster_width_identical_idle_vs_populated() -> None:
@@ -1399,51 +1551,43 @@ def test_lines_field_cluster_width_identical_idle_vs_populated() -> None:
     assert _visible_width(line1_idle) == _visible_width(line1_full) == 136
 
 
-def test_shed_order_lines_then_share_then_tok() -> None:
-    # Shed ladder under decreasing width: lines is dropped first, then share%,
-    # then tok — never lines kept while share% or tok is shed.
+def test_shed_order_lines_then_tok() -> None:
+    # Shed ladder under decreasing width: lines is dropped first, then tok —
+    # never lines kept while tok is shed.
     sub = _make_sub(agent_type='general-purpose', description='x' * 80,
                     total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     tok = fmt_tok(sub.total_input)
-    valid = {
-        (True, True, True), (False, True, True), (False, False, True), (False, False, False),
-    }
+    valid = {(True, True), (False, True), (False, False)}
     seen = set()
     for w in range(30, 90):
         line1, _ = _two(sub, w, session_inout=si, lines=(1234, 567))
         plain = strip_ansi(line1)
-        state = (GLYPH_LINES_READ in plain, '%' in plain, tok in plain)
+        state = (_has_lines_field(plain), tok in plain)
         assert state in valid, f'width={w}: out-of-order shed {state}'
         seen.add(state)
     # every rung of the ladder is reachable across this width sweep
-    assert (True, True, True) in seen
-    assert (False, True, True) in seen
-    assert (False, False, True) in seen
+    assert (True, True) in seen
+    assert (False, True) in seen
 
 
-def test_share_percent_right_aligned_and_after_tok() -> None:
-    # Change 1: share% moves into a parenthetical suffix on the tok field
-    # ('7.52M (10.5%)') and, in tree_single mode, right-aligns to the
-    # cohort's measured max share width (tree_share_w) so the trailing '%'
-    # lands on the same column across rows of differing share magnitude.
+def test_tok_field_has_no_percent_suffix() -> None:
+    # The `(N.N%)` session-share suffix has been removed from the subagent
+    # row's token field in every rendering mode (Change: "Remove the (N.N%)
+    # percentage-of-session-tokens suffix").
     big   = _make_sub(agent_type='big', total_input=750_000, output=0, model='sonnet')
     small = _make_sub(agent_type='small', total_input=350_000, output=0, model='haiku')
-    si    = 1_500_000  # ~50%/~23% share
-    cells = [(big, ''), (small, '')]
-    share_w = layout.tree_share_width(cells, si)
+    si    = 1_500_000
     line_big   = _r.subagent_row(big, 160, twoline=True, session_inout=si, tree_single=True,
-                                  tree_desc_col=30, tree_share_w=share_w)
+                                  tree_desc_col=30)
     line_small = _r.subagent_row(small, 160, twoline=True, session_inout=si, tree_single=True,
-                                  tree_desc_col=30, tree_share_w=share_w)
+                                  tree_desc_col=30)
     plain_big   = strip_ansi(line_big)
     plain_small = strip_ansi(line_small)
-    pct_big   = plain_big[plain_big.index('('):plain_big.index(')') + 1]
-    pct_small = plain_small[plain_small.index('('):plain_small.index(')') + 1]
-    assert _visible_width(pct_big) == _visible_width(pct_small)
-    # tok precedes the '(' of the share suffix on both rows.
-    assert plain_big.index(fmt_tok_fixed(big.total_input)) < plain_big.index('(')
-    assert plain_small.index(fmt_tok_fixed(small.total_input)) < plain_small.index('(')
+    assert '%' not in plain_big and '(' not in plain_big
+    assert '%' not in plain_small and '(' not in plain_small
+    assert fmt_tok_fixed(big.total_input) in plain_big
+    assert fmt_tok_fixed(small.total_input) in plain_small
 
 
 def test_fmt_tok_fixed_three_sig_figs() -> None:
@@ -1473,8 +1617,8 @@ def test_lines_field_sheds_read_and_changed_independently() -> None:
     line_changed_only, _ = _two(sub, 136, session_inout=si, lines=(0, 567))
     plain_read    = strip_ansi(line_read_only)
     plain_changed = strip_ansi(line_changed_only)
-    assert GLYPH_LINES_READ in plain_read and GLYPH_LINES_CHANGED not in plain_read
-    assert GLYPH_LINES_CHANGED in plain_changed and GLYPH_LINES_READ not in plain_changed
+    assert fmt_tok_fixed(1234) in plain_read and fmt_tok_fixed(567) not in plain_read
+    assert fmt_tok_fixed(567) in plain_changed and fmt_tok_fixed(1234) not in plain_changed
     # Blanking one side must not shift the row's total width.
     line_both, _ = _two(sub, 136, session_inout=si, lines=(1234, 567))
     assert _visible_width(line_read_only) == _visible_width(line_changed_only) == _visible_width(line_both)
@@ -1490,13 +1634,15 @@ def test_header_labels_anchor_over_measured_columns() -> None:
     cells = [(root, '')]
     model_w  = layout.tree_model_width(cells)
     lines_w  = layout.tree_lines_width(cells, {})
-    share_w  = layout.tree_share_width(cells, 0)
-    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
-    desc_col, stats_col, activity_col = layout.tree_columns(cells, 200, cluster_full_w=cluster_w)
-    lines_off, _tok_off, model_off = subagent_cluster_field_offsets(lines_w, model_w, share_w)
+    cluster_w = subagent_cluster_width(lines_w)
+    desc_col, stats_col, activity_col = layout.tree_columns(cells, 200, cluster_full_w=cluster_w, model_w=model_w)
+    _tok_off, lines_off = subagent_cluster_field_offsets(lines_w)
     # The label anchors layout.py computes must land inside the row's own
-    # measured columns, not past the activity column.
-    assert 3 + desc_col < 3 + stats_col + lines_off < 3 + stats_col + model_off < 3 + activity_col
+    # measured columns, not past the activity column. Model now anchors in
+    # the front field (ahead of desc_col), so it's checked separately below.
+    assert 3 + desc_col < 3 + stats_col + _tok_off < 3 + stats_col + lines_off < 3 + activity_col
+    model_col = max(0, desc_col - 1 - model_w) if model_w else desc_col
+    assert 0 <= 3 + model_col < 3 + desc_col
 
 
 def test_tree_lines_width_measures_cohort_max() -> None:
@@ -1515,10 +1661,17 @@ def test_tree_lines_width_measures_cohort_max() -> None:
     assert layout.tree_lines_width(cells, {}) == 1
 
 
-def test_tree_lines_w_tightens_gap_vs_hardcoded_six() -> None:
-    # Passing the cohort's measured width (narrower than fmt_tok's 6-char
-    # ceiling) shrinks the glyph->number gap; the default (no tree_lines_w)
-    # still falls back to the safe 6-char reservation.
+def test_tree_lines_w_tightens_gap_vs_hardcoded_five() -> None:
+    # Passing the cohort's measured width (narrower than fmt_tok_fixed's
+    # 5-char ceiling) shrinks the rjust padding reserved before the read
+    # digits; the default (no tree_lines_w) still falls back to the safe
+    # 5-char reservation. Compare the read segment's own rjust'd text
+    # (immediately before the '/' separator) directly, rather than its
+    # absolute column, since the cluster's overall row position can itself
+    # shift with the cluster's total width (right-alignment fallback) —
+    # not what this test is about.
+    from yas.render.metrics import fmt_lines_pair
+
     sub = _make_tree_sub('agent-a')
     sub.jsonl_path = 'a.jsonl'
     si  = (sub.total_input + sub.output) * 2
@@ -1530,13 +1683,14 @@ def test_tree_lines_w_tightens_gap_vs_hardcoded_six() -> None:
         sub, 140, twoline=True, session_inout=si, tree_single=True, lines=(50, 194),
         tree_lines_w=measured_w,
     ).split('\n')[0])
-    gap_default  = line_default.index('50') - (line_default.index(GLYPH_LINES_READ) + 1)
-    gap_measured = line_measured.index('50') - (line_measured.index(GLYPH_LINES_READ) + 1)
-    assert gap_measured < gap_default
-    # measured_w is 3 (the wider of '50' and '194'), so '50' gets exactly one
-    # extra rjust pad column on top of the literal space before it — nowhere
-    # near the 6-char reservation the un-measured default falls back to.
-    assert gap_measured == 2
+    read_s_default,  _ = fmt_lines_pair(50, 194, width=5, fixed=True)
+    read_s_measured, _ = fmt_lines_pair(50, 194, width=measured_w, fixed=True)
+    assert f'{read_s_default} /' in line_default
+    assert f'{read_s_measured} /' in line_measured
+    # measured_w is 3 (the wider of '50' and '194'), narrower than the
+    # unmeasured default's 5-char fallback reservation.
+    assert len(read_s_measured) < len(read_s_default)
+    assert measured_w == 3
 
 
 def test_tree_lines_w_alignment_holds_across_mixed_digit_widths() -> None:
@@ -1558,7 +1712,10 @@ def test_tree_lines_w_alignment_holds_across_mixed_digit_widths() -> None:
             sub, 140, twoline=True, session_inout=si, tree_single=True,
             lines=lines, tree_lines_w=w,
         ).split('\n')[0])
-        return line1.index(GLYPH_LINES_READ)
+        # The read segment has fixed width `w` (rjust), ending right before
+        # the '/' separator — subtracting `w` from the separator's column
+        # gives the segment's (digit-count-invariant) start column.
+        return line1.index('/') - w
 
     assert read_col(short, (5, 0)) == read_col(long, (500, 12))
 
@@ -1611,3 +1768,28 @@ def test_eviction_drops_oldest_completion_first_across_states() -> None:
     ids = {s.agent_id for s in out}
     assert 'old-fail' not in ids           # oldest completion evicted first
     assert 'run-1' in ids and 'run-2' in ids  # running rows never displaced
+
+
+def test_flat_row_name_and_description_are_italic() -> None:
+    # Flat (non-tree) twoline row: both the agent name (type_text) and the
+    # description are wrapped in ITALIC ... RESET.
+    sub = _make_sub(agent_type='general-purpose', description='Draft claude-light Theme literal')
+    line1, _ = _two(sub, 136)
+    assert f'{ITALIC}general-purpose' in line1
+    assert f'{ITALIC}Draft claude-light Theme literal' in line1
+
+
+def test_tree_single_name_and_description_are_italic() -> None:
+    # tree_single row: same italic wrap on name and description.
+    sub = _make_sub(agent_type='spec-implementer', description='Implement task 4')
+    line1 = _r.subagent_row(sub, 136, twoline=True, tree_single=True).split('\n')[0]
+    assert f'{ITALIC}spec-implementer' in line1
+    assert f'{ITALIC}Implement task 4' in line1
+
+
+def test_one_line_collapse_name_is_italic() -> None:
+    # One-line collapse form: only the name (type_text) is present (no
+    # separate description field), so only it needs the italic wrap.
+    sub = _make_sub(agent_type='general-purpose')
+    line = _one(sub, 96)
+    assert f'{ITALIC}general-purpose' in line

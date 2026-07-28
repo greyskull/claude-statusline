@@ -47,6 +47,11 @@ TWO_COL_SUBAGENT_WIDTH = 120
 # 68 (down from an earlier 78) hands the subagent side ~10 more columns on
 # typical wide boxes while still leaving the plan column readable.
 SUBAGENT_TREE_PLAN_WIDTH = 68
+# Unused. Was a fixed width for the tree-row model field; `layout.tree_model_width`
+# now measures the cohort's actual widest model label per-render instead
+# (dynamic sizing), so nothing reads this constant any more. Kept defined
+# rather than removed in case a caller still imports it.
+SUBAGENT_TREE_MODEL_WIDTH = 9
 # Floor for the wide layout's three-segment tokens │ cost │ rate row. Below this
 # the row cannot hold both columns at full size plus the rate/spark leader, so
 # build_wide drops it for the compact context line instead of overflowing the
@@ -288,8 +293,18 @@ ASCII_GLYPHS: dict[str, str] = {
     BOX_ARC_TR:         '+',
     BOX_ARC_BR:         '+',
     BOX_ARC_BL:         '+',
-    GLYPH_CONTINUATION: '+',
-    GLYPH_WF_SUMMARY:   '+',
+    # GLYPH_CONTINUATION and GLYPH_WF_SUMMARY share the same U+2514 codepoint
+    # ('└') — both draw the same elbow shape (line-2 activity continuation /
+    # workflow-run summary / Subagent Tree View last-child prefix, the latter
+    # a raw literal in `layout.subagent_cells` since it's plain box-drawing,
+    # not a PUA icon). Ascii mode collapses this codepoint to a single 'L'
+    # for all three, and treats the tree's mid-sibling '├' the same way (no
+    # sibling/last-child distinction ascii-side) — rather than the '+' a
+    # generic box-corner would suggest. '├' needs its own entry since it has
+    # no other constant.
+    GLYPH_CONTINUATION: 'L',
+    GLYPH_WF_SUMMARY:   'L',
+    '├':                'L',  # ├ BOX DRAWINGS LIGHT VERTICAL AND RIGHT
     GLYPH_WF_DIVIDER:   ':',
     # Markers / arrows.
     WF_PHASE_DOT:       '.',

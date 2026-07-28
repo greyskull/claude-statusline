@@ -33,14 +33,13 @@ from yas.constants import (
 )
 from yas.info import SessionView, _fmt_elapsed_clock
 from yas.info.subagents import RunningSubagent, cap_tree_groups, read_last_prompt_ts, tree_order
-from yas.render.gradient import model_display
 from yas.render.metrics import (
     subagent_cluster_field_offsets,
     subagent_cluster_width,
     subagent_dur_str,
-    subagent_share,
 )
 from yas.render.pill import Pill
+from yas.render.gradient import model_display
 from yas.renderer import Renderer
 from yas.render.text import _visible_width, _token_offsets, fmt_tok_fixed
 from yas.tokens import TickRecord
@@ -269,7 +268,7 @@ def tree_desc_content_width(cells: list[tuple[RunningSubagent, str]]) -> int:
     Used by `tree_columns` to size the description column to what the cohort
     actually needs (content-measured) rather than a fixed guarantee/fraction
     of the terminal width — the same "measure, don't assume" pattern as
-    `tree_model_width`/`tree_lines_width`/`tree_share_width`. A subagent's
+    `tree_model_width`/`tree_lines_width`. A subagent's
     `description` is set once at spawn and doesn't change frame-to-frame
     (unlike `last_activity`, which does), so measuring it here carries none
     of the jitter risk that measuring the activity snippet would.
@@ -282,14 +281,18 @@ def tree_columns(
     width: int,
     *,
     cluster_full_w: int = 0,
+    model_w: int = 0,
 ) -> tuple[int, int, int]:
     """Compute the (desc_col, stats_col, activity_col) anchors for tree-single rows.
 
-    ``desc_col`` is the widest (prefix + duration + type) front-field across the
-    cohort, plus the leading gap before ' · description' — so every row's
-    description starts at the same absolute column regardless of its own prefix
-    depth or type-name length (the renderer pads the shorter rows' type field to
-    match).
+    ``desc_col`` is the widest (prefix + duration + type + model) front-field
+    across the cohort, plus the leading gap before ' · description' — so
+    every row's description starts at the same absolute column regardless of
+    its own prefix depth, type-name length, or model-label width (the
+    renderer pads the shorter rows' type field to match). ``model_w`` is the
+    cohort's `tree_model_width` — the model field now lives in the front
+    cluster (`<time> <elbow> <name> <model>`), not the stats cluster, so it
+    must be folded into this front-field measurement.
 
     Priority (inverted from the earlier design): the description/activity text
     is the ELASTIC side of the row and truncates first as the terminal
@@ -320,10 +323,14 @@ def tree_columns(
         # shorter-duration child row drifts left of it. See subagent_dur_str.
         # +2: reserved marker column ('✓ ' when finished, '  ' otherwise) that
         # `subagent_row` inserts between the prefix and the duration in tree
-        # mode — keep in lockstep with its own front_w formula.
-        dur_w    = _visible_width(subagent_dur_str(sub, now))
-        front_w  = dur_w + 1 + _visible_width(sub.agent_type or '?') + 2  # dur + ' ' + type + marker(2)
-        desc_col = max(desc_col, prefix_w + front_w + 1)  # +1: leading space of ' · '
+        # mode; +3 + model_w: the ' · <model>' field appended after the name
+        # (0 when model_w is 0, e.g. an empty cohort) — keep both in
+        # lockstep with `subagent_row`'s own front_w formula.
+        dur_w      = _visible_width(subagent_dur_str(sub, now))
+        model_gap  = 3 if model_w else 0  # ' · ' separator ahead of the model field
+        front_w    = (dur_w + 1 + _visible_width(sub.agent_type or '?') + 2
+                      + model_gap + model_w)  # dur + ' ' + type + marker(2) + model
+        desc_col   = max(desc_col, prefix_w + front_w + 1)  # +1: leading space of ' · '
 
     # Everything after `desc_col + 3` (the ' · ' before the description) is up
     # for grabs between the description, the cluster, and the activity gap.
@@ -361,12 +368,16 @@ def tree_columns(
 
 
 def tree_model_width(cells: list[tuple[RunningSubagent, str]]) -> int:
-    """Widest displayed model label across a tree cohort, for TASK B's constant gap.
+    """Widest model label actually present in this tree cohort (measured,
+    not fixed).
 
-    Padding every row's model label to this shared width (instead of a fixed
-    6-char rjust or no padding at all) makes the stats/model cluster's own
-    width deterministic across rows, so a fixed-width gap can separate it from
-    the activity snippet without a variable fill-to-column pad.
+    The tree row embeds the model field directly in the front cluster
+    (`<time> <elbow> <name> <model>`, ahead of the description), padded to
+    this width so every row's model column starts and ends at the same
+    offset down the cohort — but the column itself grows/shrinks with
+    whichever models are actually running, rather than reserving a fixed
+    width sized for a worst-case label like `'sonnet[1m]'` regardless of
+    cohort content. `default=0` covers the empty-cohort case.
     """
     return max((_visible_width(model_display(sub.model)) for sub, _ in cells), default=0)
 
@@ -391,24 +402,6 @@ def tree_lines_width(cells: list[tuple[RunningSubagent, str]], per_agent: dict[s
         widths.append(len(fmt_tok_fixed(read)))
         widths.append(len(fmt_tok_fixed(changed)))
     return max(widths, default=1)
-
-
-def tree_share_width(cells: list[tuple[RunningSubagent, str]], session_inout: int) -> int:
-    """Widest formatted `share%` string across a tree cohort's visible rows.
-
-    Passed to `Renderer.subagent_row` as `tree_share_w` so the share value
-    inside the tok field's `(…%)` suffix right-aligns to a constant width —
-    the same "measure, don't assume" pattern as `tree_model_width` /
-    `tree_lines_width` — keeping the trailing `%` glyph in the same column
-    across rows even though "10.5%" and "4.9%" are different lengths. Falls
-    back to 0 (no padding) when no row in the cohort has a share value.
-    """
-    widths = []
-    for sub, _ in cells:
-        share = subagent_share(sub.total_input + sub.output, session_inout)
-        if share is not None:
-            widths.append(len(f'{share * 100:.1f}%'))
-    return max(widths, default=0)
 
 
 def workflow_divider_col(width: int) -> int:
@@ -1179,14 +1172,13 @@ def build_wide(
             left_lines   = r.task_row(tasks, left_w)
             right_cells  = subagent_cells(visible_subs, view.cfg.subagent_tree)
             right_desc_col = right_stats_col = right_activity_col = None
-            right_model_w = right_lines_w = right_share_w = None
+            right_model_w = right_lines_w = None
             if view.cfg.subagent_tree:
                 right_model_w = tree_model_width(right_cells)
                 right_lines_w = tree_lines_width(right_cells, view.tool_counts.per_agent)
-                right_share_w = tree_share_width(right_cells, session_inout)
-                right_cluster_w = subagent_cluster_width(right_lines_w, right_model_w, right_share_w)
+                right_cluster_w = subagent_cluster_width(right_lines_w)
                 right_desc_col, right_stats_col, right_activity_col = tree_columns(
-                    right_cells, right_w, cluster_full_w=right_cluster_w,
+                    right_cells, right_w, cluster_full_w=right_cluster_w, model_w=right_model_w,
                 )
             right_lines: list[str] = []
             for sub, prefix in right_cells:
@@ -1195,7 +1187,7 @@ def build_wide(
                                    stats_col=right_stats_col, tree_prefix=prefix,
                                    tree_single=view.cfg.subagent_tree, tree_desc_col=right_desc_col,
                                    tree_activity_col=right_activity_col, tree_model_w=right_model_w,
-                                   tree_lines_w=right_lines_w, tree_share_w=right_share_w,
+                                   tree_lines_w=right_lines_w,
                                    lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n')
                 )
             div_color = r.grad_at(divider_col - 1, width, fill=fill)
@@ -1254,32 +1246,34 @@ def build_wide(
             else:
                 inner = width - 4
                 desc_col = stats_col_v = activity_col = None
-                model_w = lines_w = share_w = None
+                model_w = lines_w = None
                 if view.cfg.subagent_tree:
                     model_w = tree_model_width(sub_cells)
                     lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)
-                    share_w = tree_share_width(sub_cells, session_inout)
-                    cluster_w = subagent_cluster_width(lines_w, model_w, share_w)
+                    cluster_w = subagent_cluster_width(lines_w)
                     desc_col, stats_col_v, activity_col = tree_columns(
-                        sub_cells, inner, cluster_full_w=cluster_w,
+                        sub_cells, inner, cluster_full_w=cluster_w, model_w=model_w,
                     )
                     # Overlay column labels on the section header (the
                     # `separator_dim` row just appended above): 'name' over the
-                    # desc column, 'loc read / written' over the lines column,
-                    # 'model' over the model column, 'current activity' over
-                    # the activity column. Derived from the SAME anchors and
-                    # field-offset math the rows themselves use
-                    # (desc_col/stats_col_v/activity_col plus
+                    # desc column, 'model' over the front-embedded model
+                    # field, 'loc read / written' over the lines column,
+                    # 'current activity' over the activity column. Derived
+                    # from the SAME anchors and field-offset math the rows
+                    # themselves use (desc_col/stats_col_v/activity_col plus
                     # `subagent_cluster_field_offsets`) — never a hardcoded
                     # guess, so the header can't drift from the data it labels.
                     if view.cfg.labels and rows and rows[-1].labels is not None:
-                        lines_off, _tok_off, model_off = subagent_cluster_field_offsets(
-                            lines_w, model_w, share_w or 0,
-                        )
+                        _tok_off, lines_off = subagent_cluster_field_offsets(lines_w)
+                        # Model now lives at the tail of the front field
+                        # (`desc_col - 1` is where ' · description' starts;
+                        # the model field is the `model_w` cols immediately
+                        # before that, with a 2-col gap ahead of it).
+                        model_col = max(0, desc_col - 1 - model_w) if model_w else desc_col
                         rows[-1].labels.extend([
                             ('name', 3 + desc_col),
+                            ('model', 3 + model_col),
                             ('loc read / written', 3 + stats_col_v + lines_off),
-                            ('model', 3 + stats_col_v + model_off),
                             ('current activity', 3 + activity_col),
                         ])
                 else:
@@ -1290,7 +1284,6 @@ def build_wide(
                                                tree_prefix=prefix, tree_single=view.cfg.subagent_tree,
                                                tree_desc_col=desc_col, tree_activity_col=activity_col,
                                                tree_model_w=model_w, tree_lines_w=lines_w,
-                                               tree_share_w=share_w,
                                                lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n'):
                         rows.append(RowSpec('content', content=line))
             pending_ups = ()
