@@ -425,14 +425,17 @@ def test_one_line_failed_marker_dim_styling() -> None:
 
 @pytest.mark.parametrize('status', ['completed', 'killed', 'stopped', 'failed'])
 def test_two_line_terminal_marker_in_tree_column(status: str) -> None:
-    # Tree mode reserves a fixed marker column (tree_desc_col set) between
-    # the branch prefix and the duration; every terminal state renders its
-    # glyph there instead of a blank.
+    # Tree mode renders the run-state glyph as the name/model separator
+    # (`<name> <glyph> <model>`); every terminal state shows its glyph there
+    # instead of the running '·'.
     sub = _make_state_sub(status)
-    line1, _ = _two(sub, 136, tree_prefix='├ ', tree_desc_col=40)
-    plain = strip_ansi(line1)
+    line = _r.subagent_row(sub, 136, twoline=True, tree_single=True,
+                           tree_prefix='├ ', tree_desc_col=40)
+    plain = strip_ansi(line)
     marker = {'completed': '✓', 'killed': '✗', 'stopped': '✗', 'failed': '!'}[status]
     assert marker in plain
+    # The glyph sits between the name and the model label.
+    assert plain.index('general-purpose') < plain.index(marker) < plain.index('sonnet')
 
 
 def test_two_line_strikethrough_applies_to_all_terminal_states() -> None:
@@ -468,8 +471,9 @@ def test_one_line_resumed_elapsed_continues_from_original_spawn() -> None:
 
 def test_two_line_resumed_shows_resume_glyph_in_tree_column() -> None:
     sub = _make_sub(status='running', run_count=2, resumed=True)
-    line1, _ = _two(sub, 136, tree_prefix='├ ', tree_desc_col=40)
-    plain = strip_ansi(line1)
+    line = _r.subagent_row(sub, 136, twoline=True, tree_single=True,
+                           tree_prefix='├ ', tree_desc_col=40)
+    plain = strip_ansi(line)
     assert '↺' in plain
     assert '×3' in plain  # run_count(2) + 1 total passes
 
@@ -478,7 +482,6 @@ def test_one_line_not_resumed_without_resumed_flag_or_run_count() -> None:
     sub = _make_sub(status='running')
     out = strip_ansi(_one(sub))
     assert '↺' not in out
-    assert '▶' in out
 
 
 # F. One-line collapse form ---------------------------------------------------
@@ -524,9 +527,11 @@ def test_one_line_shows_bracketed_context_suffix() -> None:
     assert 'sonnet[1m]' in out
 
 
-def test_one_line_running_keeps_marker() -> None:
+def test_one_line_running_has_blank_marker() -> None:
+    # Matches the tree twoline convention: running rows reserve a blank
+    # marker column ('✓' when done, '↺' when resumed) — no '▶' glyph.
     out = strip_ansi(_one(_make_sub()))
-    assert '▶' in out
+    assert '▶' not in out
     assert '✓' not in out
 
 
@@ -572,38 +577,33 @@ def test_one_line_long_name_padded_flush_to_width(content_width: int) -> None:
 
 
 def test_one_line_metrics_right_anchored_at_wide_width() -> None:
-    # The right metric cluster (model + hourglass + tok + dur) is flush to the
-    # closing border so the model/tokens/elapsed columns line up down stacked
-    # rows; the slack between the left run and the cluster is the interior gap
-    # (no trailing space after the duration). Fills exactly to content_width.
+    # `<time> <name> · <model> · <tok> · <activity>` — the token count sits
+    # in a fixed column straight after the model, and the activity/log is
+    # the LAST column, right-padded out to exactly content_width.
     content_width = 90
     sub = _make_sub(agent_type='grep-bot',
                     last_activity=('tool_use', 'Grep', {}))
     out  = _one(sub, content_width)
     text = strip_ansi(out)
     assert _visible_width(out) == content_width
-    # No trailing space: the duration is the last visible glyph on the row.
-    assert text == text.rstrip()
+    assert text.index(fmt_tok(sub.total_input)) < text.index('Grep')
 
 
-def test_one_line_model_in_right_cluster_not_after_type() -> None:
-    # The model moved out of the left run into the right-anchored cluster: it
-    # now sits between the agent type and the token figure, not directly abutting
-    # the type. The verb (left run) precedes the model (right cluster).
+def test_one_line_model_follows_type_before_activity() -> None:
+    # Mirrors the wide/tree reading order: `<time> <name> · <model> · <tok>
+    # · <activity>` — the activity/log is the last column.
     sub = _make_sub(agent_type='general-purpose',
                     model='claude-sonnet-4-6',
                     last_activity=('tool_use', 'Bash', {}))
     text = strip_ansi(_one(sub))
-    # type, then verb (left), then model (right cluster), then token count.
-    assert text.index('general-purpose') < text.index('Bash') < text.index('sonnet')
-    assert text.index('sonnet') < text.index(fmt_tok(sub.total_input))
+    assert text.index('general-purpose') < text.index('sonnet')
+    assert text.index('sonnet') < text.index(fmt_tok(sub.total_input)) < text.index('Bash')
 
 
-def test_one_line_model_forms_right_aligned_column() -> None:
-    # Two stacked rows with differing left widths and token widths must align
-    # their model, token, and duration fields into vertical columns because the
-    # whole cluster is fixed-width (model rjust 6, tok rjust 6, dur rjust 5) and
-    # right-anchored to the border.
+def test_one_line_model_forms_aligned_column_with_cohort_widths() -> None:
+    # Two stacked rows with differing name/model widths align their ' · model'
+    # column when the caller supplies the cohort-measured `oneline_name_w` /
+    # `oneline_model_w` (the layout builders pass these for every cohort).
     content_width = 90
     a = _make_sub(agent_type='synth', model='claude-3-5-haiku',
                   total_input=6800, first_timestamp=time.time() - 90,
@@ -611,12 +611,14 @@ def test_one_line_model_forms_right_aligned_column() -> None:
     b = _make_sub(agent_type='fetch-notebook-worker', model='claude-sonnet-4-6',
                   total_input=11500, first_timestamp=time.time() - 50,
                   last_activity=('tool_use', 'Read', {}))
-    row_a = strip_ansi(_one(a, content_width))
-    row_b = strip_ansi(_one(b, content_width))
-    # The model column start (left edge of the rjust-6 field) lines up.
-    assert row_a.index('haiku') - 1 == row_b.index('sonnet')
-    # Both rows fill to exactly content_width, so the duration column also lines
-    # up by construction.
+    name_w  = max(len('synth'), len('fetch-notebook-worker'))
+    model_w = max(len('haiku'), len('sonnet'))
+    row_a = strip_ansi(_one(a, content_width, oneline_name_w=name_w, oneline_model_w=model_w))
+    row_b = strip_ansi(_one(b, content_width, oneline_name_w=name_w, oneline_model_w=model_w))
+    # The model column start lines up despite the differing name widths.
+    assert row_a.index('haiku') == row_b.index('sonnet')
+    # Both rows fill to exactly content_width, so the right-anchored token
+    # column also lines up by construction.
     assert _visible_width(row_a) == content_width == _visible_width(row_b)
 
 
@@ -983,9 +985,13 @@ def test_tree_prefix_two_line_widths_and_indent() -> None:
 
 
 def test_tree_prefix_one_line_width() -> None:
+    # The elbow renders inline between the duration and the name — same
+    # '<time> <elbow> <name>' order as the twoline tree form.
     sub  = _make_sub()
     line = _one(sub, 96, tree_prefix='└ ')
-    assert strip_ansi(line).startswith('└ ')
+    p    = strip_ansi(line)
+    assert '└ ' in p
+    assert p.index(':') < p.index('└')  # time (M:SS) left of the elbow
     assert _visible_width(line) == 96
 
 
@@ -1108,8 +1114,10 @@ def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api', description='d' * 3)  # prefix '├ ', short type
     cells = [(root, ''), (kid, '├ ')]
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 140)
-    # desc_col matches the widest row: '' + 5 + 1 + len('spec-author') + marker(2) + 1
-    assert desc_col == 0 + 5 + 1 + len('spec-author') + 2 + 1
+    # desc_col matches the widest row: '' + 5 + 1 + len('spec-author') + 1
+    # (no leading marker column — the run-state glyph rides in the
+    # name/model separator, and model_w is 0 here so no model field either).
+    assert desc_col == 0 + 5 + 1 + len('spec-author') + 1
     assert activity_col >= stats_col + 16
     assert activity_col <= 140
     # Longest description in the cohort is 10 chars, well past the floor and
@@ -1453,8 +1461,8 @@ def test_cascade_clear_walks_multiple_ancestor_levels() -> None:
 
 def test_lines_field_shows_humanised_values() -> None:
     # 1234 -> '1.23K', 567 -> '567' via fmt_tok_fixed (subagent-row-only,
-    # 3-significant-figure formatting); rendered as '<read> /<written>' (a
-    # space before the slash, none after), no icons.
+    # 3-significant-figure formatting); rendered as '<read> / <written>' (a
+    # space on both sides of the slash), no icons.
     sub = _make_sub(total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     line1, _ = _two(sub, 136, session_inout=si, lines=(1234, 567))
@@ -1462,7 +1470,7 @@ def test_lines_field_shows_humanised_values() -> None:
     assert fmt_tok_fixed(1234) in plain
     assert fmt_tok_fixed(567) in plain
     assert _has_lines_field(plain)
-    assert f'{fmt_tok_fixed(1234)} /{fmt_tok_fixed(567)}' in plain
+    assert f'{fmt_tok_fixed(1234)} / {fmt_tok_fixed(567)}' in plain
 
 
 def test_lines_field_blank_when_both_zero() -> None:

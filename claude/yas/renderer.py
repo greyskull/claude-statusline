@@ -64,7 +64,6 @@ from yas.constants import (
     GLYPH_RENAMED,
     GLYPH_REPLYING,
     GLYPH_SKILLS,
-    GLYPH_SUBAGENT_ROW,
     GLYPH_SUBAGENT_RESUME,
     subagent_is_terminal,
     subagent_marker_glyph,
@@ -89,6 +88,7 @@ from yas.constants import (
     SEVEN_DAY_WARMUP_MINUTES,
     STRIKE,
     UNSTRIKE,
+    SUBAGENT_NAME_MAX,
     SUBAGENT_STATS_ACTIVITY_GAP,
     TASK_HEADER_RIGHT_GAP_MIN,
     WF_NAME_MIN,
@@ -107,7 +107,7 @@ from yas.render.gradient import (
 )
 from yas.context_state import context_state
 from yas.info.git import GitInfo
-from yas.render.metrics import burndown_delta, fmt_lines_pair, subagent_dur_str
+from yas.render.metrics import burndown_delta, fmt_lines_pair, subagent_dur_str, subagent_type_label
 from yas.render.pill import Pill
 from yas.render.tasks_view import fmt_duration, select_window, total_elapsed
 from yas.session import ContextWindow, RateBucket, RateLimits
@@ -768,6 +768,8 @@ class Renderer:
         tree_model_w: int | None = None,
         tree_lines_w: int | None = None,
         lines: tuple[int, int] | None = None,
+        oneline_name_w: int | None = None,
+        oneline_model_w: int | None = None,
     ) -> str:
         # Tree view: a plain branch prefix ('├ ', '└ ', indented deeper) eats
         # visible columns out of the front-field budget (between the duration
@@ -785,6 +787,10 @@ class Renderer:
         now         = time.time()
         status      = subagent_status(sub)
         is_done     = subagent_is_terminal(status)
+        # Terminal tint for the duration/name/marker fields: green for a
+        # successful finish, red for any other ending (failed, killed,
+        # stopped). Only meaningful when is_done.
+        done_clr    = self.safe if status == 'completed' else self.alert
         run_count   = getattr(sub, 'run_count', 0)
         is_resumed  = (not is_done) and (getattr(sub, 'resumed', False) or run_count >= 1)
         dur_s   = subagent_dur_str(sub, now)
@@ -797,42 +803,40 @@ class Renderer:
 
         step      = rainbow_step()
         c_marker  = rainbow_at(step, 12)
-        type_text = sub.agent_type or '?'
-        if is_resumed:
-            # Resume suffix (×2, ×3, ...) counts total runs so far
-            # (run_count completed passes + the current live one).
-            type_text = f'{type_text} ×{run_count + 1}'
+        # Includes the ×N resume suffix — shared with layout's column-width
+        # measurement (see metrics.subagent_type_label). Capped at
+        # SUBAGENT_NAME_MAX so one pathological agent type can't push the
+        # model/description columns off the row (the layout's cohort
+        # measurements apply the same cap).
+        type_text = subagent_type_label(sub)
+        if _visible_width(type_text) > SUBAGENT_NAME_MAX:
+            type_text = type_text[:SUBAGENT_NAME_MAX - 1] + ELLIPSIS
 
         target_w = content_width  # explicit content width supplied by the builder
 
         if twoline:
             # --- line 1: duration-first identity + right-aligned cluster (D6) ---
-            # Outside tree mode there's still no run-state marker here: a Done
+            # Outside tree mode there's no run-state marker here: a Done
             # agent dims every field and freezes its duration; a running one
-            # keeps live colours and a ticking duration. In tree mode
-            # (tree_prefix set) a fixed-width marker column sits between the
-            # branch prefix and the duration — a checkmark when Done, blank
-            # otherwise — so the elapsed/description columns stay aligned
-            # down the cohort regardless of finished state.
+            # keeps live colours and a ticking duration. In tree mode the
+            # run-state glyph rides in the name/model separator (see
+            # `mid_marker` below) rather than a leading marker column.
             # The right cluster is `· {share%}  {tok} · {model}`; under width
             # pressure the description truncates first, then the cluster sheds
             # share% and then tok. The model and the front duration always stay.
-            # Reserve the marker column whenever a cohort-wide desc column is
-            # supplied (tree mode), not just when *this* row has a branch
-            # prefix — the root row has no prefix but still shares the same
-            # description column as its indented children.
-            tree_mode = tree_desc_col is not None
-            marker_w  = 2 if tree_mode else 0  # reserved for '✓ ' / '  '
             # Tree-single mode embeds the model label directly in the front
-            # field — `<time> <elbow> <name> · <model>` — immediately after
-            # the name, ahead of the ' · description' separator, padded to
-            # the cohort's widest label (tree_model_w) when a cohort-wide
+            # field — `<time> <elbow> <name> <marker> <model>` — immediately
+            # after the name, ahead of the ' · description' separator, padded
+            # to the cohort's widest label (tree_model_w) when a cohort-wide
             # width is supplied, else shown unpadded (a lone row rendered
-            # outside a cohort anchor). Gated on `tree_single` itself (not on
-            # `tree_desc_col` being set) so a standalone tree_single row
-            # still gets its model field. Outside tree_single the model
-            # stays in the stats cluster (see `model_str` below).
-            front_model_gap = 3 if tree_single else 0  # ' · ' before the model field
+            # outside a cohort anchor). The separator between name and model
+            # doubles as the run-state marker: '✓'/'✗' when finished, '↺' on
+            # a resumed run, a plain '·' while running — saving the leading
+            # marker column the row used to reserve. Gated on `tree_single`
+            # itself (not on `tree_desc_col` being set) so a standalone
+            # tree_single row still gets its model field. Outside tree_single
+            # the model stays in the stats cluster (see `model_str` below).
+            front_model_gap = 3 if tree_single else 0  # ' X ' marker/separator before the model field
             front_model_str = ''
             if tree_single:
                 front_model_str = short_model.ljust(tree_model_w) if tree_model_w else short_model
@@ -845,7 +849,7 @@ class Renderer:
             # duration and the name (`<time> <elbow> <name>`), so it's part
             # of the front-field budget rather than a separate leading
             # segment.
-            front_w  = (dur_w + 1 + prefix_w + _visible_width(type_text) + marker_w
+            front_w  = (dur_w + 1 + prefix_w + _visible_width(type_text)
                         + front_model_gap + front_model_w)
 
             # Tree view: pad the type field so the front (duration + elbow +
@@ -856,7 +860,7 @@ class Renderer:
             if tree_desc_col is not None:
                 front_w = max(front_w, tree_desc_col - 1)  # -1: leading space of ' · '
                 type_text = type_text.ljust(max(
-                    0, front_w - dur_w - 1 - prefix_w - marker_w - front_model_gap - front_model_w,
+                    0, front_w - dur_w - 1 - prefix_w - front_model_gap - front_model_w,
                 ))
 
             # Tree single-line: the current-activity continuation moves onto
@@ -867,9 +871,10 @@ class Renderer:
             stats_w = target_w
             if tree_single:
                 if tree_activity_col is not None:
-                    # Caller-anchored (~50% of the row per the design mock);
-                    # leave a 2-col gap before the activity text begins.
-                    stats_w = max(front_w + 1, min(target_w, tree_activity_col - 2))
+                    # Caller-anchored: the cluster right-aligns so the ' · '
+                    # separator (SUBAGENT_STATS_ACTIVITY_GAP cols) lands the
+                    # activity text exactly at tree_activity_col.
+                    stats_w = max(front_w + 1, min(target_w, tree_activity_col - SUBAGENT_STATS_ACTIVITY_GAP))
                 else:
                     # Legacy fallback (no cohort-wide anchor supplied): reserve
                     # sized off the pre-prefix width so its absolute position
@@ -922,14 +927,14 @@ class Renderer:
             # GLYPH_LINES_READ/GLYPH_LINES_CHANGED pair) — a tight
             # '<read> /<written>' ratio notation instead, since this field
             # repeats once per cohort row and the icons added noise without
-            # adding information the '/' doesn't already convey. A space
-            # precedes the '/' (not after it) so the two sides stay visually
-            # distinct without widening the field more than necessary.
+            # adding information the '/' doesn't already convey. A space on
+            # both sides of the '/' keeps the two right-justified figures
+            # visually distinct.
             read_blank_w    = _visible_width(read_s)
             changed_blank_w = _visible_width(changed_s)
             read_part    = read_s if (lines is not None and read_lc) else ' ' * read_blank_w
             changed_part = changed_s if (lines is not None and changed_lc) else ' ' * changed_blank_w
-            lines_field  = f'{read_part} /{changed_part}'
+            lines_field  = f'{read_part} / {changed_part}'
             # Whether this row has ANY lines data at all — gates whether the
             # non-tree cluster reserves the field's width when there's
             # nothing to show. tree_single always reserves it (see
@@ -941,19 +946,6 @@ class Renderer:
                 # form keeps it in the stats cluster, unchanged.
                 model_str = short_model.rjust(6)
 
-            # Tree mode's marker column: a checkmark for a finished subagent,
-            # a same-width blank otherwise, so it never shifts the duration/
-            # description columns that follow it down the cohort.
-            if marker_w:
-                if is_done:
-                    marker = f'{self.CTX_DIM}{subagent_marker_glyph(status)}{self.R} '
-                elif is_resumed:
-                    marker = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R} '
-                else:
-                    marker = '  '
-            else:
-                marker = ''
-
             # Elbow sits between the duration and the name — '<time> <elbow>
             # <name>' — dim-coloured like the old prepended branch, whichever
             # run state colours the rest of the front field.
@@ -963,17 +955,24 @@ class Renderer:
             # colour, matching the existing BOLD convention elsewhere in
             # this method (open code, then a bare RESET at the end).
             if is_done:
-                front_c = f'{marker}{self.CTX_DIM}{dur_s}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
+                front_c = f'{done_clr}{dur_s}{self.R} {elbow}{done_clr}{ITALIC}{type_text}{self.R}'
             else:
-                front_c = f'{marker}{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
+                front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
             if tree_single:
                 # Model sits in the front field now (see `front_model_str`
-                # above), immediately after the name/type via the same
-                # ' · ' separator the rest of the row uses — always shown,
-                # never shed under width pressure.
-                front_dot_clr   = self.CTX_DIM if is_done else self.LABEL
+                # above), immediately after the name/type. The single-glyph
+                # separator ahead of it doubles as the run-state marker —
+                # '✓'/'✗' when finished, '↺' on a resumed run, a plain '·'
+                # while running — always exactly one column, so the model/
+                # description columns never shift with run state.
                 model_field_clr = self.CTX_DIM if is_done else model_clr
-                front_c += f' {front_dot_clr}{MIDDLE_DOT}{self.R} {model_field_clr}{front_model_str}{self.R}'
+                if is_done:
+                    mid_marker = f'{done_clr}{subagent_marker_glyph(status)}{self.R}'
+                elif is_resumed:
+                    mid_marker = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R}'
+                else:
+                    mid_marker = f'{self.LABEL}{MIDDLE_DOT}{self.R}'
+                front_c += f' {mid_marker} {model_field_clr}{front_model_str}{self.R}'
 
             # Cluster order (tree_single mode): '· tok · lines'. The model
             # field has already moved into the front (see above) and is no
@@ -1112,19 +1111,22 @@ class Renderer:
                 # The gap now carries a '·' separator (' · ' plus trailing pad
                 # to the constant width) rather than bare spaces, matching the
                 # design mock's 'sonnet ·   <activity>'.
-                gap       = SUBAGENT_STATS_ACTIVITY_GAP
-                dot_clr   = self.CTX_DIM if is_done else self.LABEL
-                # Dot sits flush at the gap's leading edge (no space ahead of
-                # it) so it lands one column left of the old ' · ' placement;
-                # the freed column moves to trailing pad, keeping the gap's
-                # total width — and therefore the activity column's fixed
-                # offset — unchanged.
-                gap_str   = f'{dot_clr}{MIDDLE_DOT}{self.R}  ' + ' ' * max(0, gap - 3)
-                act_w     = max(0, target_w - _visible_width(line1) - gap)
-                activity = self.subagent_activity(sub.last_activity, cap=max(0, act_w - 3))
-                if _visible_width(activity) > act_w:
-                    activity = activity[:max(0, act_w - 1)] + ELLIPSIS
-                line1 = f'{line1}{gap_str}{self.CTX_DIM}{activity}{self.R}'
+                gap     = SUBAGENT_STATS_ACTIVITY_GAP  # ' · ' separator, no extra padding
+                dot_clr = self.CTX_DIM if is_done else self.LABEL
+                # Only append the separator + activity when the row actually
+                # has room past the stats cluster — a tight side-by-side
+                # column can leave less slack than the separator itself, and
+                # appending unconditionally used to push the row past the
+                # border. The '·' renders even when the activity itself is
+                # blank (a finished row), keeping the column separator
+                # continuous down the cohort.
+                avail_act = target_w - _visible_width(line1)
+                if avail_act >= gap:
+                    act_w    = avail_act - gap
+                    activity = self.subagent_activity(sub.last_activity, cap=max(0, act_w - 3))
+                    if _visible_width(activity) > act_w:
+                        activity = activity[:max(0, act_w - 1)] + ELLIPSIS
+                    line1 = f'{line1} {dot_clr}{MIDDLE_DOT}{self.R} {self.CTX_DIM}{activity}{self.R}'
                 line1 += ' ' * max(0, target_w - _visible_width(line1))
                 # Elbow is already embedded in front_c (between the duration
                 # and the name), so line1 needs no further prefixing here.
@@ -1159,68 +1161,90 @@ class Renderer:
                 return f'{line1}\n{" " * prefix_w}{line2}'
             return f'{line1}\n{line2}'
 
-        # --- one-line collapse (D6): drops ↑output; marker/type/verb on the
-        # left, model right-anchored into the metric column ---
-        # This form doesn't put the duration next to the elbow at all (`dur_s`
-        # lives in the right-anchored metric cluster, far from the front) —
-        # the elbow just remains a leading, externally-reserved segment here,
-        # so shrink the local budget by `prefix_w` instead of embedding it.
-        if prefix_w:
-            target_w = max(1, content_width - prefix_w)
-        # Only show activity status for running agents; done agents freeze state.
-        if is_done:
-            tool_verb = ''
-        else:
-            kind = sub.last_activity[0]
-            tool_verb = sub.last_activity[1] if kind == 'tool_use' else (
-                '(thinking)' if kind == 'thinking' else
-                '(replying)' if kind == 'text' else ''
-            )
+        # --- one-line collapse (narrow/medium widths): mirrors the wide/tree
+        # reading order — `<time> <elbow> <name> <marker> <model> · <tok>
+        # [· <activity>]` — duration on the LEFT like the tree rows, the
+        # token count in a fixed column straight after the model, and the
+        # activity/log as the LAST (elastic) column, filling whatever slack
+        # remains when there is meaningful room (medium) and dropped
+        # entirely when there isn't (narrow). No hourglass glyph ahead of
+        # the token count and no trailing duration column. The run-state
+        # marker rides in the name/model separator, matching the tree
+        # twoline form: '✓'/'✗' when finished, '↺' on a resumed run, a
+        # plain '·' while running.
+        elbow_n   = f'{self.CTX_DIM}{tree_prefix}{self.R}' if prefix_w else ''
+        dot_n_clr = self.CTX_DIM if is_done else self.LABEL
+        tok_n_clr = self.CTX_DIM if is_done else ctx_clr
+        tok_n     = fmt_tok_fixed(sub.total_input).rjust(5)
+        tok_n_w   = 3 + 5  # ' · ' + fixed 5-wide tok field
 
-        # The model is a fixed-width, right-justified field at the head of the
-        # right cluster so it forms a vertical column with the tokens and
-        # duration (also right-justified) down stacked rows. Reading order:
-        # `{model:>6}  {hourglass} {tok:>5}  {dur:>5}`. Model dims when Done.
-        model_field = short_model.rjust(6)
+        # Cohort alignment (the one-line counterpart of the twoline form's
+        # tree_desc_col / tree_model_w columns): the name and model render as
+        # fixed-width, left-justified fields sized to the cohort's widest
+        # (`oneline_name_w` / `oneline_model_w`), so the marker/model/tok
+        # separators land in the same column down every row. Under width
+        # pressure the FIELD widths shrink — name first (down to a small
+        # floor), then model — identically for every row in the cohort (the
+        # arithmetic uses only cohort-wide inputs), so rows stay
+        # column-aligned and individual names truncate with an ellipsis
+        # rather than one long row drifting its separators.
+        name_field_w  = oneline_name_w or (prefix_w + _visible_width(type_text))
+        model_field_w = oneline_model_w or _visible_width(short_model)
+        over = (_visible_width(dur_s) + 1 + name_field_w + 3 + model_field_w
+                + tok_n_w - target_w)
+        if over > 0:
+            shrink        = min(over, max(0, name_field_w - 8))  # 8: name floor
+            name_field_w -= shrink
+            over         -= shrink
+        if over > 0:
+            model_field_w = max(1, model_field_w - over)
+        avail_type = max(1, name_field_w - prefix_w)
+        if _visible_width(type_text) > avail_type:
+            type_text = type_text[:avail_type - 1] + ELLIPSIS
+        type_text = type_text.ljust(avail_type)
+        if _visible_width(short_model) > model_field_w:
+            model_field = short_model[:max(1, model_field_w - 1)] + ELLIPSIS
+        else:
+            model_field = short_model.ljust(model_field_w)
+
+        if is_done:
+            front_n = f'{done_clr}{dur_s}{self.R} {elbow_n}{done_clr}{ITALIC}{type_text}{self.R}'
+        else:
+            front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{ITALIC}{type_text}{self.R}'
         model_n_clr = self.CTX_DIM if is_done else model_clr
-        tok_n       = fmt_tok(sub.total_input).rjust(6)
-        right_n = (
-            f'{model_n_clr}{model_field}{self.R}'
-            f'  {ctx_clr}{GLYPH_HOURGLASS} {tok_n}{self.R}'
-            f'  {self.CTX}{dur_s}{self.R}'
-        )
-        right_n_w = _visible_width(right_n)
-
         if is_done:
-            left_n = (
-                f'{self.CTX_DIM}{subagent_marker_glyph(status)}{self.R}  '
-                f'{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
-            )
+            mid_n = f'{done_clr}{subagent_marker_glyph(status)}{self.R}'
+        elif is_resumed:
+            mid_n = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R}'
         else:
-            row_marker = GLYPH_SUBAGENT_RESUME if is_resumed else GLYPH_SUBAGENT_ROW
-            left_n = (
-                f'{c_marker}{BOLD}{row_marker}{self.R}  '
-                f'{self.SKILLS}{ITALIC}{type_text}{self.R}'
-                f'  {self.CTX}{tool_verb}{self.R}'
-            )
-        left_n_w = _visible_width(left_n)
-        # Budget the left segment so the row never overflows the right border:
-        # the bounded right cluster (model + hourglass + tok + dur) stays
-        # intact, and the marker/type/verb run truncates with a middle ellipsis
-        # when it would otherwise push past target_w (reserving a 1-col gap).
-        left_budget = target_w - right_n_w - 1
-        if left_n_w > left_budget:
-            left_n   = _middle_ellipsis(left_n, max(1, left_budget))
-            left_n_w = _visible_width(left_n)
-        # Right-anchor the metric cluster (model + hourglass + tok + dur) flush
-        # to the closing border so the model, tokens and elapsed columns line
-        # up down stacked rows; the slack between the left run and the cluster
-        # is the gap.
-        pad_n = max(1, target_w - left_n_w - right_n_w)
-        line_n = f'{left_n}{" " * pad_n}{right_n}'
-        if prefix_w:
-            line_n = f'{self.CTX_DIM}{tree_prefix}{self.R}{line_n}'
-        return line_n
+            mid_n = f'{dot_n_clr}{MIDDLE_DOT}{self.R}'
+        front_n += (f' {mid_n} {model_n_clr}{model_field}{self.R}'
+                    f' {dot_n_clr}{MIDDLE_DOT}{self.R} {tok_n_clr}{tok_n}{self.R}')
+        front_n_w = _visible_width(front_n)
+
+        # Never overflow the right border: when even the tok-terminated front
+        # is too wide, it truncates with a middle ellipsis before the
+        # activity is considered.
+        if front_n_w > target_w:
+            front_n   = _middle_ellipsis(front_n, target_w)
+            front_n_w = _visible_width(front_n)
+
+        # Activity/log segment: last column, running agents only, and only
+        # when at least 12 columns of slack remain past the token field — so
+        # narrow rows never show it and medium rows get the full leftover.
+        act_seg   = ''
+        act_seg_w = 0
+        if not is_done:
+            avail_n = target_w - front_n_w - 3  # ' · '
+            if avail_n >= 12:
+                activity = self.subagent_activity(sub.last_activity, cap=avail_n)
+                if _visible_width(activity) > avail_n:
+                    activity = activity[:max(0, avail_n - 1)] + ELLIPSIS
+                if activity:
+                    act_seg   = f' {dot_n_clr}{MIDDLE_DOT}{self.R} {self.CTX_DIM}{activity}{self.R}'
+                    act_seg_w = 3 + _visible_width(activity)
+        pad_n = max(0, target_w - front_n_w - act_seg_w)
+        return f'{front_n}{act_seg}{" " * pad_n}'
 
     def workflow_header(self, run: RunningWorkflow, content_width: int) -> str:
         """Group header for a workflow run.

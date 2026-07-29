@@ -65,6 +65,22 @@ def subagent_dur_str(sub: object, now: float) -> str:
     return clock.rjust(5)
 
 
+def subagent_type_label(sub: object) -> str:
+    """The agent-type text a subagent row displays, including the ``×N``
+    resume suffix on a live resumed run.
+
+    Pulled out (like `subagent_dur_str`) so callers that reserve column
+    width for the name field — `layout.oneline_name_width` — measure the
+    SAME string `Renderer.subagent_row` renders.
+    """
+    label     = getattr(sub, 'agent_type', '') or '?'
+    run_count = getattr(sub, 'run_count', 0)
+    is_done   = subagent_is_terminal(subagent_status(sub))
+    if not is_done and (getattr(sub, 'resumed', False) or run_count >= 1):
+        label = f'{label} ×{run_count + 1}'
+    return label
+
+
 def burndown_delta(
     used_pct: float,
     resets_at: int,
@@ -144,6 +160,6 @@ def subagent_cluster_width(lines_w: int, *, tok_w: int = 5) -> int:
     """
     dot          = 2  # '· '
     sep          = 3  # ' · '
-    # <read> + ' /' + <changed>, each side `lines_w` wide.
-    lines_full_w = lines_w + 2 + lines_w
+    # <read> + ' / ' + <changed>, each side `lines_w` wide.
+    lines_full_w = lines_w + 3 + lines_w
     return dot + tok_w + sep + lines_full_w

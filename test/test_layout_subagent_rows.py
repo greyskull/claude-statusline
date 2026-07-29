@@ -95,7 +95,7 @@ def test_three_subagents_narrow_produces_three_rows(monkeypatch: pytest.MonkeyPa
     subs = [_make_sub('alpha'), _make_sub('beta'), _make_sub('gamma')]
     _inject(monkeypatch, subs)
     spec = layout.build_narrow(_view(), 80, _r)
-    sub_rows = _content_rows_starting_with(spec, '▶')
+    sub_rows = _subagent_block_rows(spec, ('alpha', 'beta', 'gamma'))
     assert len(sub_rows) == 3
 
 

@@ -556,7 +556,7 @@ def test_side_by_side_falls_back_to_stacked_when_narrow(monkeypatch: pytest.Monk
     # subagent marker row both appear as full-width content.
     from yas.constants import GLYPH_TASKS
     has_task = any(row.kind == 'content' and GLYPH_TASKS in strip_ansi(row.content) for row in spec.rows)
-    has_sub  = any(row.kind == 'content' and strip_ansi(row.content).lstrip().startswith('▶') for row in spec.rows)
+    has_sub  = any(row.kind == 'content' and 'Explore' in strip_ansi(row.content) for row in spec.rows)
     assert has_task and has_sub, 'both sections should render in the stacked fallback'
 
 

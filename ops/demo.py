@@ -877,6 +877,17 @@ def animate(env: dict[str, str], raw: dict[str, object], tmpdir: Path, session_i
 SNAPSHOT_COLS = 160    # wide layout shows every section
 SNAP_WINDOW   = 60.0   # STATUSLINE_TOKEN_WINDOW for snapshots (production default)
 
+# Per-scenario width tiers (see ScenarioConfig.columns). Chosen relative to the
+# renderer's own breakpoints (claude/yas/constants.py: NARROW_WIDTH=55,
+# MEDIUM_WIDTH=80): WIDE_COLS matches the existing SNAPSHOT_COLS default,
+# MEDIUM_COLS sits comfortably above MEDIUM_WIDTH so the medium layout renders
+# without falling to narrow, and NARROW_COLS sits below NARROW_WIDTH so the
+# narrow/collapsed layout (and tree mode's model-only shed ladder) is reliably
+# exercised.
+WIDE_COLS   = SNAPSHOT_COLS
+MEDIUM_COLS = 90
+NARROW_COLS = 50
+
 
 @dataclass
 class ScenarioConfig:
@@ -898,6 +909,7 @@ class ScenarioConfig:
     subagent_mtime_age: float                = 0.0
     cache_anchor_secs_ago: float | None      = None
     cache_1h_tier:         bool              = False
+    columns:       int | None                = None
 
 
 SCENARIOS: list[ScenarioConfig] = [
@@ -1136,203 +1148,294 @@ SCENARIOS: list[ScenarioConfig] = [
         seven_day_pct      = 20.0,
         subagent_mtime_age = 40.0,
     ),
+    # --- Subagent tree-mode scenarios ---------------------------------
+    # Five distinct configs, each rendered at wide/medium/narrow via the
+    # per-scenario `columns` field (see WIDE_COLS/MEDIUM_COLS/NARROW_COLS).
+    # Descriptions/activity snippets below are mined from real Claude Code
+    # subagent transcripts on this machine (~/.claude/projects/**/*.jsonl and
+    # sibling subagents/*.meta.json — the same method documented in
+    # .scratch/session-analysis.md) with every real project name, file path,
+    # and code fragment swapped for a fictional equivalent of the same shape;
+    # nothing in the strings below identifies the source project or repo.
+
+    # Config 1 — single subagent under the root.
     ScenarioConfig(
-        name        = 'subagent-tree',
-        context_pct = 0.42,
-        # Nested spawn graph rendered with tree branches: the spec-author root
-        # fans out four children (last child gets └), and the ops child spawns
-        # a grandchild to exercise the deeper indent.
-        subagents   = [
-            ('spec-author', 'Fetching openspec artifact instructions',   45_200, 1_400, ('Bash', {'command': 'openspec show --json'}), None, None, None, (210, 40)),
-            ('api',         'Creating tmp directory for report',         57_100,   900, ('Bash', {'command': 'mkdir -p /tmp/report'}), None, 1, None, (95, 18)),
-            ('fractal',     'Reading FramePipeline.load() signature',    28_700,   640, ('Read', {'file_path': 'render/pipeline.py'}), None, 1, None, (140, 5)),
-            ('ui',          'Grepping for capability flag usage',        46_100,   730, ('Grep', {'pattern': 'capability'}), None, 1, None, (60, 0)),
-            ('ops',         'Reading render-in-docker.md documentation', 46_300,   810, ('Read', {'file_path': 'docs/render-in-docker.md'}), None, 1, None, (85, 12)),
-            # Just spawned: no jsonl activity yet, so lines-read/written stays absent.
-            ('probe',       'Checking docker daemon health',             0, 0, None, None, 5, None, None, 0.5),
-        ],
-        five_hour_pct = 30.0,
-        seven_day_pct = 20.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
-    ),
-    ScenarioConfig(
-        name        = 'subagent-tree-plan',
-        context_pct = 0.40,
-        # Checklist + tree-mode cohort side by side: exercises the
-        # SUBAGENT_TREE_PLAN_WIDTH cap (the plan column should hold at ~78
-        # cols on a wide box, handing the rest to the subagent tree) rather
-        # than the old 45%-of-inner even split.
-        tasks       = [
-            ('Audit gradient palette',  'Auditing gradient palette',  'completed'),
-            ('Wire alert-mode pill',    'Wiring alert-mode pill',     'completed'),
-            ('Refactor border math',    'Refactoring border math',    'in_progress'),
-            ('Update CONTEXT.md',       'Updating CONTEXT.md',        'pending'),
-            ('Add sparkline buckets',   'Adding sparkline buckets',   'pending'),
-        ],
-        subagents   = [
-            ('spec-author', 'Fetching openspec artifact instructions',   45_200, 1_400, ('Bash', {'command': 'openspec show --json'}), None, None, None, (210, 40)),
-            ('api',         'Creating tmp directory for report',         57_100,   900, ('Bash', {'command': 'mkdir -p /tmp/report'}), None, 1, None, (95, 18)),
-            ('fractal',     'Reading FramePipeline.load() signature',    28_700,   640, ('Read', {'file_path': 'render/pipeline.py'}), None, 1, None, (140, 5)),
-            ('ui',          'Grepping for capability flag usage',        46_100,   730, ('Grep', {'pattern': 'capability'}), None, 1, None, (60, 0)),
-            ('ops',         'Reading render-in-docker.md documentation', 46_300,   810, ('Read', {'file_path': 'docs/render-in-docker.md'}), None, 1, None, (85, 12)),
-            # Just spawned: no jsonl activity yet, so lines-read/written stays absent.
-            ('probe',       'Checking docker daemon health',             0, 0, None, None, 5, None, None, 0.5),
-        ],
-        five_hour_pct = 30.0,
-        seven_day_pct = 20.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\nmax_width = 300\n',
-    ),
-    ScenarioConfig(
-        name        = 'subagent-tree-states',
+        name        = 'subagent-tree-wide-single',
         context_pct = 0.35,
-        # Closes the four-state + resume coverage gap: no other tree-mode
-        # scenario sets a <task-notification> at all, so this is the only
-        # visual-gate coverage for the ✓/✗/!/↺ markers and their strikethrough.
-        # One running root + five children, one per remaining lifecycle
-        # state — sized to land exactly on SUBAGENT_DISPLAY_CAP (6 total rows:
-        # root + 5) so cap_tree_groups's mtime-based trim never has to evict
-        # one of them (a plain "no-notification running" filler child was
-        # dropped from this list on purpose: the root itself already renders
-        # 'running' with no notification, so a duplicate child added nothing
-        # but pushed the group 1 row over the cap and silently ate the killed
-        # row — see .scratch/verifier-four-state-lifecycle.md finding B):
-        #   1. running (root)   (no notification — the pre-existing default)
-        #   2. completed        (✓, dim strikethrough)
-        #   3. killed           (✗, dim strikethrough — "ended early by intent")
-        #   4. stopped          (✗, same glyph as killed)
-        #   5. failed           (!, dim strikethrough — ended by error)
-        #   6. resumed-running  (↺, live styling, ×2 suffix — a single
-        #      non-terminal notification with a growing mtime past it is
-        #      enough to flag `resumed`; run_count stays 1 so the renderer's
-        #      `run_count + 1` reads as "1 completed pass + the current live
-        #      one" = ×2, matching renderer.py:804-806's documented meaning)
         subagents   = [
-            ('spec-implementer', 'Coordinate four-state lifecycle demo',    120_000, 4_200, ('Bash', {'command': 'echo coordinating'}), None, None, None, (320, 60)),
-            ('general-purpose',  'Ported the border elbow math',             22_100,  1_310, None, None, 1, [('completed', 30)], (110, 22)),
-            ('general-purpose',  'Killed mid-way through a runaway grep',    14_700,    640, None, None, 1, [('killed', 45)], (48, 4)),
-            ('general-purpose',  'Stopped after the parent task wrapped up', 9_800,     410, None, None, 1, [('stopped', 20)], (30, 0)),
-            ('general-purpose',  'Crashed applying a malformed patch',       11_200,    380, None, None, 1, [('failed', 15)], (25, 6)),
-            ('general-purpose',  'Re-opened to fix a follow-up review note', 26_500,  1_850, ('Edit', {'file_path': 'render/borders.py'}), None, 1, [('', 5)], (95, 30)),
+            ('general-purpose',
+             'Implement the window-based acceptance state machine with replay support in detector.py',
+             61_000, 2_400,
+             [('Edit', {'file_path': 'render/detector.py', 'old_string': 'a', 'new_string': 'b'}),
+              ('text', 'Wiring the replay buffer through the state machine now that the acceptance windows are stable')],
+             None, None, None, (340, 95)),
         ],
         five_hour_pct = 28.0,
         seven_day_pct = 18.0,
-        yas_toml      = '[layout]\nsubagent_tree = true\n',
-    ),
-    # Five real-cohort tree-mode scenarios mined from production sessions (see
-    # .scratch/session-analysis.md) — genuine 6-11-agent fan-outs, not a
-    # synthetic mockup, to sanity-check the description/gap alignment (TASK
-    # A/B) against realistic titles, durations, and token magnitudes.
-    # SUBAGENT_DISPLAY_CAP caps each render to the 6 most-recently-started
-    # rows; entries are ordered oldest-first so the cap keeps the widest part
-    # of each cohort's fan-out.
-    ScenarioConfig(
-        name        = 'subagent-tree-cohort1',
-        context_pct = 0.45,
-        # Cohort 1 (PEAK=11): one spec-implementer fans out 10 general-purpose
-        # depth-2 workers, each owning one file/module ("per-file wave"). The
-        # real parent hash is unresolved on disk, so every child attaches to
-        # the cohort root per the orphan-attachment rule.
-        subagents   = [
-            ('spec-implementer', 'Implement decouple-sections-and-apply-defaults change', 168_100_000, 53_867, ('Bash', {'command': 'mv openspec/changes/decouple-sections-and-apply-defaults'}), None, None, None, (2_400, 640)),
-            ('general-purpose',  'main.ts + migration (v6→v7)',                            4_900_000,  8_249, ('Write', {'file_path': 'report-A-main-migration.md'}), None, 1, None, (320, 95)),
-            ('general-purpose',  'resolve.ts group/bar-range slots',                          9_000_000, 27_655, ('Write', {'file_path': 'report-B-resolve.md'}), None, 1, None, (610, 180)),
-            ('general-purpose',  'seed.ts bar-span groups + riff seeding',                     2_000_000,  6_505, ('Write', {'file_path': 'report-C-seed.md'}), None, 1, None, (140, 40)),
-            ('general-purpose',  'session.ts + presets.ts instance variant removal',           1_700_000, 10_304, ('Write', {'file_path': 'report-D-session-presets.md'}), None, 1, None, (230, 70)),
-            ('general-purpose',  'group-lane.ts absolute bars + danger highlight',              5_000_000, 13_638, ('Write', {'file_path': 'report-E-group-lane.md'}), None, 1, None, (300, 90)),
-            ('general-purpose',  'config-panel/index.ts + html/css',                           33_800_000, 34_706, ('Write', {'file_path': 'report-F-config-panel.md'}), None, 1, None, (760, 210)),
-            ('general-purpose',  'delete rematch/driftFixup + sweep-harness cleanup',           1_700_000,  8_570, ('Edit', {'file_path': 'decouple-sections-and-apply-defaults/tasks.md'}), None, 1, None, (190, 55)),
-            ('general-purpose',  'corpus export drops rematch report',                          800_000,  3_584, ('Write', {'file_path': 'report-I-corpus.md'}), None, 1, None, (80, 25)),
-            ('general-purpose',  'backend menu-reanalyse config wipe',                         1_800_000,  8_477, ('Write', {'file_path': 'report-J-backend.md'}), None, 1, None, (185, 60)),
-            ('general-purpose',  'docs + whereis skill updates',                              13_500_000, 22_594, ('Write', {'file_path': 'report-K-docs.md'}), None, 1, None, (480, 130)),
-        ],
-        five_hour_pct = 40.0,
-        seven_day_pct = 25.0,
-        yas_toml      = '[layout]\nsubagent_tree = true\n',
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = WIDE_COLS,
     ),
     ScenarioConfig(
-        name        = 'subagent-tree-cohort2',
-        context_pct = 0.42,
-        # Cohort 2 (PEAK=10): spec-implementer -> 6 general-purpose (d2) ->
-        # Explore + ops (d3) spun up underneath two of the depth-2 workers.
-        # Exercises 3 depth levels, duplicate task descriptions (retries), and
-        # several unresolved parents (attached to root).
-        subagents   = [
-            ('spec-implementer', 'Implement add-server-side-render change',                    24_800_000, 35_300, ('Read', {'file_path': '5e436f0e-session.jsonl'}), None, None, None, (1_100, 380)),
-            ('general-purpose',  'API routes + lifecycle wiring (tasks 5.1-5.8)',                8_400_000, 25_447, ('Bash', {'command': 'cd backend && uv run pytest'}), None, 1, None, (520, 210)),
-            ('general-purpose',  'Frontend export modal server-render path (tasks 6.1-6.6)',     9_600_000, 25_331, ('Bash', {'command': 'echo "=== Final Verification ==="'}), None, 1, None, (540, 195)),
-            ('general-purpose',  'Export modal server-render UI (tasks 6.1-6.6)',                5_400_000, 19_439, ('Bash', {'command': 'npm test --prefix frontend'}), None, 1, None, (410, 150)),
-            ('general-purpose',  'Docker/ops render image tier (tasks 7.1-7.5)',                 8_400_000, 19_508, ('Edit', {'file_path': 'spec-implementer-add-server-side-render.md'}), None, 1, None, (430, 165)),
-            ('general-purpose',  'Documentation updates + skill sync (tasks 8.1-8.3)',           6_300_000, 18_004, ('Read', {'file_path': 'add-server-side-render/design.md'}), None, 1, None, (390, 120)),
-            ('general-purpose',  'Docker/ops render tier (tasks 7.1-7.5)',                       5_300_000, 20_275, ('Bash', {'command': 'cat > /tmp/final-verification.txt'}), None, 1, None, (440, 170)),
-            ('general-purpose',  'Documentation and skill updates (tasks 8.1-8.3)',              8_000_000, 18_943, ('Bash', {'command': 'cat 5e436f0e-session.jsonl'}), None, 1, None, (400, 125)),
-            ('Explore',          'Read render docs and backend structure',                        300_000,  2_801, ('Bash', {'command': 'ls -la /tmp/claude-1000/'}), None, 5, None, (60, 8)),
-            ('ops',              'Implement tasks 7.1-7.5 for render tier',                        300_000,  1_681, ('Bash', {'command': 'echo test'}), None, 7, None, (35, 15)),
-        ],
-        five_hour_pct = 35.0,
-        seven_day_pct = 22.0,
-        yas_toml      = '[layout]\nsubagent_tree = true\n',
-    ),
-    ScenarioConfig(
-        name        = 'subagent-tree-cohort3',
-        context_pct = 0.30,
-        # Cohort 3 (PEAK=8): spec-author fans out short (25-128s) research
-        # agents of many *named* agent types (api/fractal/ui/ops, several
-        # duplicated retries) — good stress case for varied agentType labels
-        # + very short durations + tiny token counts.
-        subagents   = [
-            ('spec-author', 'Author server-render OpenSpec change',      3_400_000, 33_460, ('Write', {'file_path': 'spec-author-server-render.md'}), None, None, None, (410, 260)),
-            ('api',         'Research backend job/cache/route infra',      700_000,    736, ('Write', {'file_path': 'spec-author-server-render.md'}), None, 1, None, (40, 12)),
-            ('fractal',     'Research offline renderer',                   300_000,  1_136, ('Write', {'file_path': 'spec-author-server-render.md'}), None, 1, None, (25, 9)),
-            # Just spawned: no jsonl activity yet, so lines-read/written stays absent.
-            ('fractal',     'Research offline renderer script',            0,   0, None, None, 1, None, None, 0.2),
-            ('ui',          'Research export modal UI',                  1_000_000,  2_428, ('Write', {'file_path': 'spec-author-server-render.md'}), None, 1, None, (55, 18)),
-            ('ops',         'Research Docker/Makefile ops layer',           200_000,  1_077, ('Read', {'file_path': 'cb81d945-session.jsonl'}), None, 1, None, (20, 6)),
-            ('ops',         'Research docker/make ops layer',               900_000,  8_797, ('Bash', {'command': 'cat > spec-author-server-render.md'}), None, 1, None, (95, 40)),
-            ('ui',          'Research export modal frontend',               300_000,  1_077, ('Read', {'file_path': 'cb81d945-session.jsonl'}), None, 1, None, (22, 7)),
-        ],
-        five_hour_pct = 25.0,
-        seven_day_pct = 15.0,
-        yas_toml      = '[layout]\nsubagent_tree = true\n',
-    ),
-    ScenarioConfig(
-        name        = 'subagent-tree-cohort4',
-        context_pct = 0.50,
-        # Cohort 4 (PEAK=7): clean per-file implementation wave — a huge-ctx
-        # spec-implementer root plus 7 uniformly-shaped general-purpose depth-2
-        # workers, all ending on a Write. Tidy "happy path" mockup.
-        subagents   = [
-            ('spec-implementer', 'Implement explicit-visual-config change',                    182_000_000, 78_809, ('Write', {'file_path': '8017af67-session.jsonl'}), None, None, None, (3_200, 920)),
-            ('general-purpose',  'Schema bump + codegen for explicit-visual-config',              4_500_000, 11_737, ('Bash', {'command': 'cat 8017af67-session.jsonl'}), None, 1, None, (260, 110)),
-            ('general-purpose',  'Delete resolver motif base layer (resolve.ts)',                  4_300_000, 11_686, ('Write', {'file_path': 'resolve.ts'}), None, 1, None, (250, 105)),
-            ('general-purpose',  'Remove caller-absent motif fallback (evaluator+pipeline)',       4_100_000, 20_571, ('Write', {'file_path': 'evaluator.ts'}), None, 1, None, (410, 180)),
-            ('general-purpose',  'Slim matrix.ts to apply-time library',                           3_200_000, 11_875, ('Write', {'file_path': 'matrix.ts'}), None, 1, None, (255, 108)),
-            ('general-purpose',  'Delete runtime generator layer (channels.ts)',                   2_500_000, 12_736, ('Write', {'file_path': 'channels.ts'}), None, 1, None, (270, 115)),
-            ('general-purpose',  'Materialize choreography at seed (seed.ts)',                     5_200_000, 29_545, ('Write', {'file_path': 'seed.ts'}), None, 1, None, (610, 260)),
-            ('general-purpose',  'Fix on-load configVersion gate (main.ts + sweep-harness.ts)',    1_200_000,  6_930, ('Write', {'file_path': 'sweep-harness.ts'}), None, 1, None, (145, 62)),
-        ],
-        five_hour_pct = 45.0,
-        seven_day_pct = 30.0,
-        yas_toml      = '[layout]\nsubagent_tree = true\n',
-    ),
-    ScenarioConfig(
-        name        = 'subagent-tree-cohort5',
+        name        = 'subagent-tree-medium-single',
         context_pct = 0.35,
-        # Cohort 5 (PEAK=7): the deepest real tree mined — spec-implementer
-        # (d1) -> nested spec-implementer (d2) -> 5 depth-3 workers of mixed
-        # types (fractal/general-purpose/ui). Genuine 3-level nesting with a
-        # spec-implementer nested under a spec-implementer.
         subagents   = [
-            ('spec-implementer', 'Implement boundary-c-and-morph-axes',                 500_000,  4_735, ('Read', {'file_path': '46b6a33b-session.jsonl'}), None, None, None, (85, 20)),
-            ('spec-implementer', 'Implement boundary-c-and-morph-axes change',       38_400_000, 73_248, ('Write', {'file_path': 'boundary-c-and-morph-axes/tasks.md'}), None, 1, None, (1_650, 720)),
-            ('fractal',          'Task 2.4/4.1/5.1 matrix.ts',                        3_100_000, 18_418, ('Write', {'file_path': 'matrix.ts'}), None, 2, None, (410, 175)),
-            ('general-purpose',  'Task 2.5/2.6/4.2 resolve.ts',                        6_300_000, 33_629, ('Write', {'file_path': 'resolve.ts'}), None, 2, None, (730, 310)),
-            ('fractal',          'Task 3.1 compositeUniforms',                        1_500_000,  7_295, ('Write', {'file_path': 'compositeUniforms.ts'}), None, 2, None, (160, 70)),
-            ('ui',               'Task 3.1 main.ts neutral bag',                        100_000,  1_641, ('Write', {'file_path': 'main.ts'}), None, 2, None, (35, 15)),
-            ('fractal',          'Task 6.1 navigation.ts captureView',                  800_000,  6_155, ('Write', {'file_path': 'navigation.ts'}), None, 2, None, (135, 55)),
+            ('general-purpose',
+             'Implement the window-based acceptance state machine with replay support in detector.py',
+             61_000, 2_400,
+             [('Edit', {'file_path': 'render/detector.py', 'old_string': 'a', 'new_string': 'b'}),
+              ('text', 'Wiring the replay buffer through the state machine now that the acceptance windows are stable')],
+             None, None, None, (340, 95)),
         ],
-        five_hour_pct = 32.0,
+        five_hour_pct = 28.0,
         seven_day_pct = 18.0,
-        yas_toml      = '[layout]\nsubagent_tree = true\n',
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = MEDIUM_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-narrow-single',
+        context_pct = 0.35,
+        subagents   = [
+            ('general-purpose',
+             'Implement the window-based acceptance state machine with replay support in detector.py',
+             61_000, 2_400,
+             [('Edit', {'file_path': 'render/detector.py', 'old_string': 'a', 'new_string': 'b'}),
+              ('text', 'Wiring the replay buffer through the state machine now that the acceptance windows are stable')],
+             None, None, None, (340, 95)),
+        ],
+        five_hour_pct = 28.0,
+        seven_day_pct = 18.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = NARROW_COLS,
+    ),
+
+    # Config 2 — several flat siblings, each a different agentType (and,
+    # since write_subagents round-robins 3 models by index, a different
+    # model too — no per-agent model override needed).
+    ScenarioConfig(
+        name        = 'subagent-tree-wide-types',
+        context_pct = 0.40,
+        subagents   = [
+            ('ui',      'Add a light/dark toggle to the report template',      18_400,  1_050, ('Edit', {'file_path': 'render/template.py', 'old_string': 'a', 'new_string': 'b'})),
+            ('ops',     'Fix the backend build, lint, and test pipeline',       9_200,    480, ('Bash', {'command': 'make lint test'})),
+            ('fractal', 'Add supersampling to the offline render pass',        26_700,  1_820, ('Edit', {'file_path': 'render/pipeline.py', 'old_string': 'a', 'new_string': 'b'})),
+            ('api',     'Wire the v3 resolver into FramePipeline',             33_100,  1_400, ('Read', {'file_path': 'render/pipeline.py'})),
+            ('explore', 'Explore the connections concept and its defaults',     7_600,    260, ('Grep', {'pattern': 'connections'})),
+        ],
+        five_hour_pct = 34.0,
+        seven_day_pct = 22.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = WIDE_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-medium-types',
+        context_pct = 0.40,
+        subagents   = [
+            ('ui',      'Add a light/dark toggle to the report template',      18_400,  1_050, ('Edit', {'file_path': 'render/template.py', 'old_string': 'a', 'new_string': 'b'})),
+            ('ops',     'Fix the backend build, lint, and test pipeline',       9_200,    480, ('Bash', {'command': 'make lint test'})),
+            ('fractal', 'Add supersampling to the offline render pass',        26_700,  1_820, ('Edit', {'file_path': 'render/pipeline.py', 'old_string': 'a', 'new_string': 'b'})),
+            ('api',     'Wire the v3 resolver into FramePipeline',             33_100,  1_400, ('Read', {'file_path': 'render/pipeline.py'})),
+            ('explore', 'Explore the connections concept and its defaults',     7_600,    260, ('Grep', {'pattern': 'connections'})),
+        ],
+        five_hour_pct = 34.0,
+        seven_day_pct = 22.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = MEDIUM_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-narrow-types',
+        context_pct = 0.40,
+        subagents   = [
+            ('ui',      'Add a light/dark toggle to the report template',      18_400,  1_050, ('Edit', {'file_path': 'render/template.py', 'old_string': 'a', 'new_string': 'b'})),
+            ('ops',     'Fix the backend build, lint, and test pipeline',       9_200,    480, ('Bash', {'command': 'make lint test'})),
+            ('fractal', 'Add supersampling to the offline render pass',        26_700,  1_820, ('Edit', {'file_path': 'render/pipeline.py', 'old_string': 'a', 'new_string': 'b'})),
+            ('api',     'Wire the v3 resolver into FramePipeline',             33_100,  1_400, ('Read', {'file_path': 'render/pipeline.py'})),
+            ('explore', 'Explore the connections concept and its defaults',     7_600,    260, ('Grep', {'pattern': 'connections'})),
+        ],
+        five_hour_pct = 34.0,
+        seven_day_pct = 22.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = NARROW_COLS,
+    ),
+
+    # Config 3 — 2 parent subagents, 2 children each. Within each pair, one
+    # child carries both lines-read and lines-changed (read+write), its
+    # sibling carries lines-read only (lines=(read, 0) omits the Edit block
+    # entirely per write_subagents, so the row renders read-only).
+    ScenarioConfig(
+        name        = 'subagent-tree-wide-nested',
+        context_pct = 0.44,
+        subagents   = [
+            ('spec-implementer', 'Implement the backend-precomputed-spectrum change', 41_000_000, 12_600, ('Bash', {'command': 'openspec show backend-precomputed-spectrum --json'}), None, None, None, (410, 60)),
+            ('general-purpose',  'Port the catalogue sweep render to the browser',      6_800_000,  9_400, ('Write', {'file_path': 'report-sweep-render.md'}), None, 1, None, (410, 95)),
+            ('general-purpose',  'Explore the snare/notation/PSV detection code',       2_100_000,  1_800, ('Read', {'file_path': 'render/notation.py'}), None, 1, None, (220, 0)),
+            ('spec-implementer', 'Implement the grid-to-drop realignment change',      37_500_000, 11_900, ('Bash', {'command': 'openspec show grid-to-drop-realignment --json'}), None, None, None, (380, 55)),
+            ('ui',               'Wire NotationView into main.ts',                     5_200_000,  6_100, ('Write', {'file_path': 'render/main.ts'}), None, 4, None, (180, 60)),
+            ('api',              'Find the fingerprinting design notes',                900_000,    420, ('Grep', {'pattern': 'fingerprint'}), None, 4, None, (75, 0)),
+        ],
+        five_hour_pct = 38.0,
+        seven_day_pct = 24.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = WIDE_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-medium-nested',
+        context_pct = 0.44,
+        subagents   = [
+            ('spec-implementer', 'Implement the backend-precomputed-spectrum change', 41_000_000, 12_600, ('Bash', {'command': 'openspec show backend-precomputed-spectrum --json'}), None, None, None, (410, 60)),
+            ('general-purpose',  'Port the catalogue sweep render to the browser',      6_800_000,  9_400, ('Write', {'file_path': 'report-sweep-render.md'}), None, 1, None, (410, 95)),
+            ('general-purpose',  'Explore the snare/notation/PSV detection code',       2_100_000,  1_800, ('Read', {'file_path': 'render/notation.py'}), None, 1, None, (220, 0)),
+            ('spec-implementer', 'Implement the grid-to-drop realignment change',      37_500_000, 11_900, ('Bash', {'command': 'openspec show grid-to-drop-realignment --json'}), None, None, None, (380, 55)),
+            ('ui',               'Wire NotationView into main.ts',                     5_200_000,  6_100, ('Write', {'file_path': 'render/main.ts'}), None, 4, None, (180, 60)),
+            ('api',              'Find the fingerprinting design notes',                900_000,    420, ('Grep', {'pattern': 'fingerprint'}), None, 4, None, (75, 0)),
+        ],
+        five_hour_pct = 38.0,
+        seven_day_pct = 24.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = MEDIUM_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-narrow-nested',
+        context_pct = 0.44,
+        subagents   = [
+            ('spec-implementer', 'Implement the backend-precomputed-spectrum change', 41_000_000, 12_600, ('Bash', {'command': 'openspec show backend-precomputed-spectrum --json'}), None, None, None, (410, 60)),
+            ('general-purpose',  'Port the catalogue sweep render to the browser',      6_800_000,  9_400, ('Write', {'file_path': 'report-sweep-render.md'}), None, 1, None, (410, 95)),
+            ('general-purpose',  'Explore the snare/notation/PSV detection code',       2_100_000,  1_800, ('Read', {'file_path': 'render/notation.py'}), None, 1, None, (220, 0)),
+            ('spec-implementer', 'Implement the grid-to-drop realignment change',      37_500_000, 11_900, ('Bash', {'command': 'openspec show grid-to-drop-realignment --json'}), None, None, None, (380, 55)),
+            ('ui',               'Wire NotationView into main.ts',                     5_200_000,  6_100, ('Write', {'file_path': 'render/main.ts'}), None, 4, None, (180, 60)),
+            ('api',              'Find the fingerprinting design notes',                900_000,    420, ('Grep', {'pattern': 'fingerprint'}), None, 4, None, (75, 0)),
+        ],
+        five_hour_pct = 38.0,
+        seven_day_pct = 24.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = NARROW_COLS,
+    ),
+
+    # Config 4 — 4 subagents, one per lifecycle state (completed / killed /
+    # stopped / resumed — a distinct 4-of-5 slice of the supported state set,
+    # not repeating any state and not the old 5-agent-plus-root layout).
+    ScenarioConfig(
+        name        = 'subagent-tree-wide-states',
+        context_pct = 0.36,
+        subagents   = [
+            ('general-purpose',
+             'Implement the backend-precomputed-spectrum change: schema bump + codegen wave',
+             58_000, 3_100,
+             ('text', 'Writing the final verification report before handing back to the parent thread'),
+             None, None, [('completed', 45)], (920, 310)),
+            ('general-purpose', 'Killed mid-way through a runaway grep across the render/ tree', 14_700,    640, None, None, None, [('killed', 55)], (48, 4)),
+            ('general-purpose', 'Stopped after the parent task already wrapped up the remaining work', 9_800, 410, None, None, None, [('stopped', 25)], (30, 0)),
+            ('general-purpose', 'Re-opened to patch a follow-up review note in the border math', 26_500,  1_850, ('Edit', {'file_path': 'render/borders.py', 'old_string': 'a', 'new_string': 'b'}), None, None, [('', 5)], (95, 30)),
+        ],
+        five_hour_pct = 27.0,
+        seven_day_pct = 17.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = WIDE_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-medium-states',
+        context_pct = 0.36,
+        subagents   = [
+            ('general-purpose',
+             'Implement the backend-precomputed-spectrum change: schema bump + codegen wave',
+             58_000, 3_100,
+             ('text', 'Writing the final verification report before handing back to the parent thread'),
+             None, None, [('completed', 45)], (920, 310)),
+            ('general-purpose', 'Killed mid-way through a runaway grep across the render/ tree', 14_700,    640, None, None, None, [('killed', 55)], (48, 4)),
+            ('general-purpose', 'Stopped after the parent task already wrapped up the remaining work', 9_800, 410, None, None, None, [('stopped', 25)], (30, 0)),
+            ('general-purpose', 'Re-opened to patch a follow-up review note in the border math', 26_500,  1_850, ('Edit', {'file_path': 'render/borders.py', 'old_string': 'a', 'new_string': 'b'}), None, None, [('', 5)], (95, 30)),
+        ],
+        five_hour_pct = 27.0,
+        seven_day_pct = 17.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = MEDIUM_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-narrow-states',
+        context_pct = 0.36,
+        subagents   = [
+            ('general-purpose',
+             'Implement the backend-precomputed-spectrum change: schema bump + codegen wave',
+             58_000, 3_100,
+             ('text', 'Writing the final verification report before handing back to the parent thread'),
+             None, None, [('completed', 45)], (920, 310)),
+            ('general-purpose', 'Killed mid-way through a runaway grep across the render/ tree', 14_700,    640, None, None, None, [('killed', 55)], (48, 4)),
+            ('general-purpose', 'Stopped after the parent task already wrapped up the remaining work', 9_800, 410, None, None, None, [('stopped', 25)], (30, 0)),
+            ('general-purpose', 'Re-opened to patch a follow-up review note in the border math', 26_500,  1_850, ('Edit', {'file_path': 'render/borders.py', 'old_string': 'a', 'new_string': 'b'}), None, None, [('', 5)], (95, 30)),
+        ],
+        five_hour_pct = 27.0,
+        seven_day_pct = 17.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = NARROW_COLS,
+    ),
+
+    # Config 5 — plan + tree together, shown midway through a spec-implementer
+    # run: some tasks done, some not, and a mix of completed/still-running
+    # subagents (not all done, not all running).
+    ScenarioConfig(
+        name        = 'subagent-tree-wide-plan',
+        context_pct = 0.41,
+        tasks       = [
+            ('Schema bump + codegen wave',        'Bumping schema + running codegen',       'completed'),
+            ('Port sweep render to browser',      'Porting sweep render to the browser',    'completed'),
+            ('Wire NotationView into main.ts',    'Wiring NotationView into main.ts',       'in_progress'),
+            ('Explore build-up zoom/moves system', 'Exploring build-up zoom/moves system',  'pending'),
+            ('Find download popup UI code',       'Finding download popup UI code',         'pending'),
+        ],
+        subagents   = [
+            ('spec-implementer', 'Implement the backend-precomputed-spectrum change', 41_000_000, 12_600, ('Bash', {'command': 'openspec show backend-precomputed-spectrum --json'}), None, None, None, (410, 60)),
+            ('general-purpose',  'Port the catalogue sweep render to the browser',      6_800_000,  9_400, ('Write', {'file_path': 'report-sweep-render.md'}), None, 1, [('completed', 90)], (410, 120)),
+            ('general-purpose',  'Explore the build-up zoom and moves system',          2_600_000,  2_100, ('Grep', {'pattern': 'buildUp'}), None, 1, None, (120, 0)),
+            ('ui',               'Wire NotationView into main.ts',                     5_200_000,  6_100, ('Write', {'file_path': 'render/main.ts'}), None, 1, [('completed', 45)], (180, 60)),
+            ('api',              'Find the download popup UI code',                     900_000,    380, ('Grep', {'pattern': 'downloadPopup'}), None, 1, None, (40, 0)),
+        ],
+        five_hour_pct = 36.0,
+        seven_day_pct = 23.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\nmax_width = 300\n',
+        columns     = WIDE_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-medium-plan',
+        context_pct = 0.41,
+        tasks       = [
+            ('Schema bump + codegen wave',        'Bumping schema + running codegen',       'completed'),
+            ('Port sweep render to browser',      'Porting sweep render to the browser',    'completed'),
+            ('Wire NotationView into main.ts',    'Wiring NotationView into main.ts',       'in_progress'),
+            ('Explore build-up zoom/moves system', 'Exploring build-up zoom/moves system',  'pending'),
+            ('Find download popup UI code',       'Finding download popup UI code',         'pending'),
+        ],
+        subagents   = [
+            ('spec-implementer', 'Implement the backend-precomputed-spectrum change', 41_000_000, 12_600, ('Bash', {'command': 'openspec show backend-precomputed-spectrum --json'}), None, None, None, (410, 60)),
+            ('general-purpose',  'Port the catalogue sweep render to the browser',      6_800_000,  9_400, ('Write', {'file_path': 'report-sweep-render.md'}), None, 1, [('completed', 90)], (410, 120)),
+            ('general-purpose',  'Explore the build-up zoom and moves system',          2_600_000,  2_100, ('Grep', {'pattern': 'buildUp'}), None, 1, None, (120, 0)),
+            ('ui',               'Wire NotationView into main.ts',                     5_200_000,  6_100, ('Write', {'file_path': 'render/main.ts'}), None, 1, [('completed', 45)], (180, 60)),
+            ('api',              'Find the download popup UI code',                     900_000,    380, ('Grep', {'pattern': 'downloadPopup'}), None, 1, None, (40, 0)),
+        ],
+        five_hour_pct = 36.0,
+        seven_day_pct = 23.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = MEDIUM_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-narrow-plan',
+        context_pct = 0.41,
+        tasks       = [
+            ('Schema bump + codegen wave',        'Bumping schema + running codegen',       'completed'),
+            ('Port sweep render to browser',      'Porting sweep render to the browser',    'completed'),
+            ('Wire NotationView into main.ts',    'Wiring NotationView into main.ts',       'in_progress'),
+            ('Explore build-up zoom/moves system', 'Exploring build-up zoom/moves system',  'pending'),
+            ('Find download popup UI code',       'Finding download popup UI code',         'pending'),
+        ],
+        subagents   = [
+            ('spec-implementer', 'Implement the backend-precomputed-spectrum change', 41_000_000, 12_600, ('Bash', {'command': 'openspec show backend-precomputed-spectrum --json'}), None, None, None, (410, 60)),
+            ('general-purpose',  'Port the catalogue sweep render to the browser',      6_800_000,  9_400, ('Write', {'file_path': 'report-sweep-render.md'}), None, 1, [('completed', 90)], (410, 120)),
+            ('general-purpose',  'Explore the build-up zoom and moves system',          2_600_000,  2_100, ('Grep', {'pattern': 'buildUp'}), None, 1, None, (120, 0)),
+            ('ui',               'Wire NotationView into main.ts',                     5_200_000,  6_100, ('Write', {'file_path': 'render/main.ts'}), None, 1, [('completed', 45)], (180, 60)),
+            ('api',              'Find the download popup UI code',                     900_000,    380, ('Grep', {'pattern': 'downloadPopup'}), None, 1, None, (40, 0)),
+        ],
+        five_hour_pct = 36.0,
+        seven_day_pct = 23.0,
+        yas_toml    = '[layout]\nsubagent_tree = true\n',
+        columns     = NARROW_COLS,
     ),
     ScenarioConfig(
         name        = 'cohort-two-column',
@@ -1348,49 +1451,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 30.0,
         seven_day_pct = 20.0,
-    ),
-    ScenarioConfig(
-        name        = 'subagent-tree-lines',
-        context_pct = 0.40,
-        # Closes the per-subagent lines-read/changed coverage gap (no other
-        # demo scenario carries non-zero `ToolCounts.per_agent` values, so the
-        # tree-row `lines_field` never rendered a number and couldn't have
-        # caught the alignment regressions fixed in 7d39f2d/1a2273d). One
-        # unprefixed running root + two nested children:
-        #   - child 1: 2-digit-width lines (fmt_tok "42"/"15") and a
-        #     sub-10-minute duration (3m36s = 5 chars, subagent_dur_str).
-        #   - child 2: 4-char-width lines (fmt_tok "8.6K"/"1.2K") and a
-        #     post-10-minute duration (40m23s = 6 chars) — the exact
-        #     dur_w mismatch class that was the 7d39f2d bug.
-        # tree_lines_width/tree_columns must measure both cohort maxima (not
-        # assume a fixed width) for the '⇩ read ⇧ changed' columns and the
-        # duration-first identity column to land on the same absolute
-        # position across both rows despite the digit/duration-width jump.
-        subagents   = [
-            ('explore', 'Coordinate cross-file gradient border fix', 45_000, 1_200,
-             ('Bash', {'command': 'echo coordinating'}), None, None, None, None, 310),
-            ('ops', 'Patch elbow math off-by-one in renderer.py', 62_000, 2_100,
-             ('Edit', {'file_path': 'claude/yas/renderer.py', 'old_string': 'a', 'new_string': 'b'}),
-             None, 1, None, (42, 15), 216),
-            ('api', 'Backfill lines-read/changed regression coverage', 91_000, 3_600,
-             ('Read', {'file_path': 'test/test_subagent_rows.py'}),
-             None, 1, None, (8_600, 1_200), 2423),
-        ],
-        five_hour_pct = 30.0,
-        seven_day_pct = 20.0,
-        # max_width=400: tree-single rows reserve their stats cluster's slack
-        # as `min(target_w, tree_activity_col - 2) - stats_col`, and
-        # tree_activity_col is capped at `stats_col + 16` until the box is
-        # wide enough for `round(width * 0.50)` to win instead (renderer.py's
-        # Decision 10 shed ladder drops `lines` first, before share%/tok, so a
-        # narrow box always sheds to the model-only fallback regardless of
-        # this scenario's data). A wide box gives the cluster the ~45+ cols
-        # `lines` needs to survive the shed — this scenario needs an actually
-        # wide terminal (or a real tty) to visually confirm the numbers;
-        # narrower terminals will still compute correct `per_agent` data but
-        # the row will (correctly, per existing shed-ladder behaviour) fall
-        # back to model-only.
-        yas_toml    = '[layout]\nsubagent_tree = true\nmax_width = 400\n',
     ),
 ]
 
@@ -1507,7 +1567,18 @@ def render_scenario(
     # and only as defaults: setdefault lets a user-provided value win so the demo
     # responds to those too (e.g. `COLUMNS=90 make demo/img` for the medium layout).
     snap_env = dict(env)
-    snap_env.setdefault('COLUMNS', str(SNAPSHOT_COLS))
+    # terminal_width() checks TMUX_PANE before COLUMNS (renderer.py's live-tmux
+    # fast path), which would silently override the pinned/per-scenario width
+    # whenever `make demo/img` itself runs inside tmux. Snapshots must be
+    # deterministic regardless of the host terminal, so drop it here.
+    snap_env.pop('TMUX_PANE', None)
+    if cfg.columns is not None:
+        # An explicit per-scenario width always wins over the ambient/inherited
+        # COLUMNS (e.g. the real terminal width demo.py runs under) — that's
+        # the whole point of the field (wide/medium/narrow tree-mode triples).
+        snap_env['COLUMNS'] = str(cfg.columns)
+    else:
+        snap_env.setdefault('COLUMNS', str(SNAPSHOT_COLS))
     snap_env.setdefault('STATUSLINE_TOKEN_WINDOW', str(SNAP_WINDOW))
     if theme is not None:
         snap_env['YAS_THEME'] = theme

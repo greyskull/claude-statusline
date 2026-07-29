@@ -473,12 +473,15 @@ SUBAGENT_RETENTION_SECONDS = 120
 # inverted: a large hard minimum doesn't make sense once description is the
 # first thing to give ground under width pressure rather than the last.
 SUBAGENT_DESC_FLOOR            = 16
+# Widest the agent-name (type) column may grow in subagent rows — a longer
+# label truncates with an ellipsis so one pathological agent type can't push
+# the model/description columns off the row.
+SUBAGENT_NAME_MAX              = 50
 # Constant gap (visible cols) between the stats/model cluster and the
 # activity snippet in tree-single rows, once the model label is padded to the
-# cohort's widest model width (see renderer.Renderer.subagent_row). Widened
-# from 2 -> 4 to make room for the '·' separator now rendered in the gap
-# (' · ' plus one col of padding) instead of bare spaces.
-SUBAGENT_STATS_ACTIVITY_GAP    = 4
+# cohort's widest model width (see renderer.Renderer.subagent_row). Exactly
+# the ' · ' separator rendered in the gap — no extra padding.
+SUBAGENT_STATS_ACTIVITY_GAP    = 3
 
 # Four-state subagent lifecycle: 'running' (live), 'completed' (normal finish),
 # 'killed'/'stopped' (ended early by intent — same glyph, see

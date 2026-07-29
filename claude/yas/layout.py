@@ -19,6 +19,7 @@ from yas.constants import (
     RESET,
     SUBAGENT_DESC_FLOOR,
     SUBAGENT_DISPLAY_CAP,
+    SUBAGENT_NAME_MAX,
     SUBAGENT_RETENTION_SECONDS,
     SUBAGENT_STATS_ACTIVITY_GAP,
     subagent_is_terminal,
@@ -38,6 +39,7 @@ from yas.render.metrics import (
     subagent_cluster_field_offsets,
     subagent_cluster_width,
     subagent_dur_str,
+    subagent_type_label,
 )
 from yas.render.pill import Pill
 from yas.render.gradient import model_display
@@ -334,15 +336,16 @@ def tree_columns(
         # actual string `subagent_row` will render, or a long-running parent
         # row silently claims one column less than it needs and every
         # shorter-duration child row drifts left of it. See subagent_dur_str.
-        # +2: reserved marker column ('✓ ' when finished, '  ' otherwise) that
-        # `subagent_row` inserts between the prefix and the duration in tree
-        # mode; +3 + model_w: the ' · <model>' field appended after the name
-        # (0 when model_w is 0, e.g. an empty cohort) — keep both in
-        # lockstep with `subagent_row`'s own front_w formula.
+        # The name is measured via `subagent_type_label` (includes the ×N
+        # resume suffix `subagent_row` renders) capped at SUBAGENT_NAME_MAX
+        # (the renderer truncates past that); +3 + model_w: the ' X <model>'
+        # field after the name, where X is the run-state marker/separator
+        # glyph (0 when model_w is 0, e.g. an empty cohort) — keep all of it
+        # in lockstep with `subagent_row`'s own front_w formula.
         dur_w      = _visible_width(subagent_dur_str(sub, now))
-        model_gap  = 3 if model_w else 0  # ' · ' separator ahead of the model field
-        front_w    = (dur_w + 1 + _visible_width(sub.agent_type or '?') + 2
-                      + model_gap + model_w)  # dur + ' ' + type + marker(2) + model
+        model_gap  = 3 if model_w else 0  # ' X ' marker/separator ahead of the model field
+        name_w     = min(_visible_width(subagent_type_label(sub)), SUBAGENT_NAME_MAX)
+        front_w    = dur_w + 1 + name_w + model_gap + model_w  # dur + ' ' + type + marker + model
         desc_col   = max(desc_col, prefix_w + front_w + 1)  # +1: leading space of ' · '
 
     # Everything after `desc_col + 3` (the ' · ' before the description) is up
@@ -378,6 +381,22 @@ def tree_columns(
     if activity_col < stats_col + activity_floor:
         stats_col = max(desc_col + 3, activity_col - activity_floor)
     return desc_col, stats_col, activity_col
+
+
+def oneline_name_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+    """Widest branch-prefix + type-label run across a cohort's rows.
+
+    Passed to `Renderer.subagent_row` as `oneline_name_w` so the one-line
+    collapse form pads every row's name field to a common width — the
+    ' · model' column then starts at the same offset down the cohort,
+    mirroring the twoline form's `tree_desc_col` alignment.
+    """
+    return max(
+        (_visible_width(prefix)
+         + min(_visible_width(subagent_type_label(sub)), SUBAGENT_NAME_MAX)
+         for sub, prefix in cells),
+        default=0,
+    )
 
 
 def tree_model_width(cells: list[tuple[RunningSubagent, str]]) -> int:
@@ -571,10 +590,14 @@ def build_narrow(
             rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     if visible_subs:
-        for sub, prefix in subagent_cells(visible_subs, view.cfg.subagent_tree):
+        cells = subagent_cells(visible_subs, view.cfg.subagent_tree)
+        name_w = oneline_name_width(cells)
+        model_w = tree_model_width(cells)
+        for sub, prefix in cells:
             for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
                                        stats_col=100 if width >= 125 else None,
-                                       tree_prefix=prefix).split('\n'):
+                                       tree_prefix=prefix, oneline_name_w=name_w,
+                                       oneline_model_w=model_w).split('\n'):
                 rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     wf_rows = build_workflow_rows(view, width, r, per_agent=False)
@@ -648,10 +671,14 @@ def build_medium(
             rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     if visible_subs:
-        for sub, prefix in subagent_cells(visible_subs, view.cfg.subagent_tree):
+        cells = subagent_cells(visible_subs, view.cfg.subagent_tree)
+        name_w = oneline_name_width(cells)
+        model_w = tree_model_width(cells)
+        for sub, prefix in cells:
             for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
                                        stats_col=100 if width >= 125 else None,
-                                       tree_prefix=prefix).split('\n'):
+                                       tree_prefix=prefix, oneline_name_w=name_w,
+                                       oneline_model_w=model_w).split('\n'):
                 rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     wf_rows = build_workflow_rows(view, width, r, per_agent=False)
@@ -1311,16 +1338,19 @@ def build_wide(
                             ('name', 3 + desc_col + 2),
                             ('model', 3 + model_col),
                             ('LOC r/w', loc_col),
-                            ('log', 3 + activity_col + 2),
+                            ('log', 3 + activity_col),
                         ])
                 else:
                     stats_col_v = 100 if width >= 125 else None
+                name_w = oneline_name_width(sub_cells)
+                oneline_model_w = tree_model_width(sub_cells)
                 for sub, prefix in sub_cells:
                     for line in r.subagent_row(sub, inner, twoline=width > 100, session_inout=session_inout,
                                                stats_col=stats_col_v,
                                                tree_prefix=prefix, tree_single=view.cfg.subagent_tree,
                                                tree_desc_col=desc_col, tree_activity_col=activity_col,
                                                tree_model_w=model_w, tree_lines_w=lines_w,
+                                               oneline_name_w=name_w, oneline_model_w=oneline_model_w,
                                                lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n'):
                         rows.append(RowSpec('content', content=line))
             pending_ups = ()
