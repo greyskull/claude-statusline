@@ -17,9 +17,11 @@ the sibling parsers — first-wins would undercount.
 
 ## In-scope tools
 
-Three tools contribute to line counts: ``Read``, ``Write``, and ``Edit``. Others
-(``Bash``, ``NotebookEdit``, etc.) are excluded. ``NotebookEdit`` is excluded
-because its cell model does not map cleanly to line counts.
+Four tools contribute to line counts: ``Read``, ``Write``, ``Edit``, and the MCP
+``DesignSync`` tool's ``get_file`` method (all other ``DesignSync`` methods,
+e.g. ``list_files``, are not reads). Others (``Bash``, ``NotebookEdit``, etc.)
+are excluded. ``NotebookEdit`` is excluded because its cell model does not map
+cleanly to line counts.
 
 ## Lines read measurement
 
@@ -28,6 +30,14 @@ the paired ``tool_result.content``, but only when that content is a string
 starting with ``1\t`` (the ``cat -n`` tabular format). Image and document reads
 have list-valued content and are skipped. This is the canonical sniff test for
 text-shaped reads.
+
+For each ``DesignSync`` ``tool_use`` with ``input.method == 'get_file'``,
+``lines_read`` accumulates the newline count of the ``.content`` field inside
+the paired ``tool_result``, whose content is a JSON *string* shaped like
+``{"method":"get_file","path":...,"content":"<file text>"}`` rather than a
+``cat -n`` blob. If the result content doesn't parse as that shape (e.g. a
+harness-truncated ``<persisted-output>`` wrapper), the entry is skipped, not
+raised.
 
 ## Lines changed measurement
 
@@ -100,6 +110,10 @@ def count_transcript(
     per_id_changed: dict[str, int] = {}
     # tool_use id -> True for each Read seen; used to match tool_result.
     read_ids: set[str] = set()
+    # tool_use id -> True for each DesignSync get_file call seen; matched
+    # against tool_result the same way, but the result is a JSON string
+    # rather than a cat -n blob (see the DesignSync branch below).
+    designsync_read_ids: set[str] = set()
     # tool_use_id -> True once its tool_result has contributed to lines_read,
     # so a retransmitted/duplicate tool_result can't double-count.
     counted_read_ids: set[str] = set()
@@ -115,10 +129,11 @@ def count_transcript(
                 if b'"tool_use"' not in raw and b'"tool_result"' not in raw:
                     continue
 
-                # (b) if line has tool_result but not tool_use, require the
-                #     cat -n marker (JSON-escaped as '1\t') before decoding.
+                # (b) if line has tool_result but not tool_use, require either
+                #     the cat -n marker (JSON-escaped as '1\t', native Read) or
+                #     the DesignSync get_file marker before decoding.
                 if b'"tool_result"' in raw and b'"tool_use"' not in raw:
-                    if b'1\\t' not in raw:
+                    if b'1\\t' not in raw and b'get_file' not in raw:
                         continue
 
                 # (c) if skip_sidechain, reject sidechain records before decoding.
@@ -153,14 +168,36 @@ def count_transcript(
                         if block.get('type') != 'tool_result':
                             continue
                         tool_use_id = block.get('tool_use_id')
-                        if tool_use_id not in read_ids or tool_use_id in counted_read_ids:
+                        if tool_use_id in counted_read_ids:
                             continue
                         content = block.get('content')
-                        # Only count if content is a string starting with '1\t'
-                        # (the cat -n shape, Decision 2).
-                        if isinstance(content, str) and content.startswith('1\t'):
-                            lines_read += content.count('\n')
-                        counted_read_ids.add(tool_use_id)
+                        if tool_use_id in read_ids:
+                            # Only count if content is a string starting with
+                            # '1\t' (the cat -n shape, Decision 2).
+                            if isinstance(content, str) and content.startswith('1\t'):
+                                lines_read += content.count('\n')
+                            counted_read_ids.add(tool_use_id)
+                        elif tool_use_id in designsync_read_ids:
+                            # DesignSync's result is a JSON string shaped like
+                            # {"method":"get_file","path":...,"content":...}
+                            # rather than a cat -n blob. Parse it and count
+                            # newlines in the .content field; skip (don't
+                            # crash) on any shape mismatch, e.g. a
+                            # <persisted-output> wrapper from truncation.
+                            if isinstance(content, str):
+                                try:
+                                    parsed = json.loads(content)
+                                except (ValueError, TypeError):
+                                    parsed = None
+                                if isinstance(parsed, dict):
+                                    file_text = parsed.get('content')
+                                    if isinstance(file_text, str):
+                                        lines_read += (
+                                            file_text.count('\n') + 1
+                                            if file_text
+                                            else 0
+                                        )
+                            counted_read_ids.add(tool_use_id)
 
                     # The mid guard below only protects the tool_use-side
                     # accounting (`counts`, `lines_changed` via per_id /
@@ -194,6 +231,14 @@ def count_transcript(
                                 block_id = block.get('id')
                                 if block_id:
                                     read_ids.add(block_id)
+                            elif name == 'DesignSync':
+                                # Only method 'get_file' is a read; other
+                                # methods (e.g. list_files) are not.
+                                inp = block.get('input') or {}
+                                if inp.get('method') == 'get_file':
+                                    block_id = block.get('id')
+                                    if block_id:
+                                        designsync_read_ids.add(block_id)
                             elif name == 'Edit':
                                 # lines_changed += max(old_string, new_string)
                                 inp = block.get('input') or {}

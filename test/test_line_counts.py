@@ -76,6 +76,20 @@ def _write_use(block_id: str, content: str) -> dict:
     return {'type': 'tool_use', 'id': block_id, 'name': 'Write', 'input': {'content': content}}
 
 
+def _designsync_use(block_id: str, method: str, path: str = '_ds/x/tokens/base.css') -> dict:
+    return {
+        'type':  'tool_use',
+        'id':    block_id,
+        'name':  'DesignSync',
+        'input': {'method': method, 'projectId': 'p1', 'path': path},
+    }
+
+
+def _designsync_result(method: str, path: str, content: str | None) -> str:
+    """JSON-encode the DesignSync tool_result content shape."""
+    return json.dumps({'method': method, 'path': path, 'content': content})
+
+
 def _notebook_edit_use(block_id: str) -> dict:
     return {
         'type':  'tool_use',
@@ -176,6 +190,29 @@ def test_edit_replace_all_counts_once_documented_undercount(tmp_path: Path) -> N
     # Regardless of how many times 'x' actually occurred in the real file,
     # the hunk size is counted exactly once (max(1, 1) == 1 here).
     assert stats.lines_changed == 1
+
+
+# --- DesignSync get_file counts as a read; other methods do not --------------
+
+def test_designsync_get_file_result_counts_newlines_into_lines_read(tmp_path: Path) -> None:
+    file_text = '<!DOCTYPE html>\n<html>\n<body></body>\n</html>'  # 3 newlines, non-empty
+    path = _write_file(tmp_path, 'main.jsonl', [
+        _assistant_line('m1', [_designsync_use('d1', 'get_file')]),
+        _user_line('u1', 'd1', _designsync_result('get_file', '_ds/x/tokens/base.css', file_text)),
+    ])
+    stats = count_transcript(path, None, skip_sidechain=True)
+    assert stats.lines_read == file_text.count('\n') + 1
+    assert stats.counts['DesignSync'] == 1
+
+
+def test_designsync_list_files_not_counted_as_read(tmp_path: Path) -> None:
+    path = _write_file(tmp_path, 'main.jsonl', [
+        _assistant_line('m1', [_designsync_use('d1', 'list_files')]),
+        _user_line('u1', 'd1', json.dumps({'method': 'list_files', 'files': ['a', 'b']})),
+    ])
+    stats = count_transcript(path, None, skip_sidechain=True)
+    assert stats.lines_read == 0
+    assert stats.counts['DesignSync'] == 1  # tool_use still counted, just not as a read
 
 
 # --- 7.3: sidechain asymmetry -------------------------------------------------

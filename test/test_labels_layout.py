@@ -14,6 +14,7 @@ from yas.config import Config
 from yas.constants import ICON_LIMIT_5H, ICON_LIMIT_7D
 from yas.info import SessionView
 from yas.info.git import GitInfo
+from yas.info.subagents import RunningSubagent, RunningSubagents
 from yas.info.tasks import Task, TaskList
 from yas.render.text import superscript
 from yas.tokens import TickRecord, TokenLog
@@ -276,6 +277,24 @@ def test_specs_caption_at_content_start_on_openspec_separator():
     assert sep.index(superscript('specs')) == 2
 
 
+def test_agent_caption_shifted_off_content_start_on_subagent_separator():
+    view = _view(_full_limits_dict())
+    now = time.time()
+    view.__dict__['subagents'] = RunningSubagents([RunningSubagent(
+        agent_type='reviewer', description='review pr', billed_in=1000,
+        output=500, first_timestamp=now - 30, mtime=now - 1,
+        model='claude-sonnet-4-6', cache_read_in=0, total_input=1000,
+        last_activity=('tool_use', 'Bash', {'command': 'ls'}), end_ts=0.0,
+        status='running', run_count=0, resumed=False,
+    )])
+    view.__dict__['read_last_prompt_ts'] = now - 60
+    sep = _caption_line(_render_view(view), 'agent')
+    assert sep, 'agent caption not found'
+    # Column shifted right (~8 cols) off the content start, unlike `plan`/`specs`
+    # which anchor at col 3 (0-indexed 2).
+    assert sep.index(superscript('agent')) == 10
+
+
 def test_section_captions_absent_when_labels_off():
     view = _view(_full_limits_dict(), labels=False)
     view.__dict__['tasks'] = TaskList(
@@ -284,5 +303,5 @@ def test_section_captions_absent_when_labels_off():
     )
     view.__dict__['changes'] = [('demo-change', 3, 5)]
     blob = '\n'.join(strip_ansi(ln) for ln in _render_view(view))
-    for word in ('plan', 'specs', 'subagents', 'workflow'):
+    for word in ('plan', 'specs', 'agent', 'workflow'):
         assert superscript(word) not in blob, word

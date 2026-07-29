@@ -8,7 +8,8 @@ LABEL_VOCAB = [
     'context', 'fill', 'dumb', 'path', 'git',
     'changes', 'input sess/day', 'cache sess/day',
     'output sess/day', 'cost sess/day',
-    'plan', 'subagents', 'specs', 'workflow',
+    'plan', 'agent', 'specs', 'workflow',
+    'name', 'model', 'LOC read/write', 'LOC r/w', 'log',
 ]
 
 

@@ -1113,3 +1113,71 @@ def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> Non
     downs_fresh   = spec_fresh.rows[0].downs
     # Same number of elbows: clear timer shares the existing elapsed divider
     assert len(downs_cleared) == len(downs_fresh)
+
+
+# --- Subagent Tree View column labels ('LOC r/w' anchoring, 'name' offset) ---
+
+def test_tree_labels_loc_slash_stacks_over_data_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 'LOC r/w' header's own '/' must land in the SAME printed column as
+    the '/' in a tree row's '<read> /<changed>' data — not at the field's
+    start like the (session-level) full-word 'LOC read/write' label does."""
+    from helper import strip_ansi
+    _silence_dynamic(monkeypatch)
+    sub = _make_sub()
+    sub.jsonl_path = '/fake/ui.jsonl'
+    monkeypatch.setattr(
+        subagents_mod.RunningSubagents, 'from_session',
+        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
+    )
+
+    view = SessionView(_session(), Config(subagent_tree=True, labels=True))
+    view.__dict__['tool_counts'] = type(
+        'FakeTC', (), {
+            'counts': {}, 'per_agent': {'/fake/ui.jsonl': (381, 239)},
+            'lines_read': 381, 'lines_changed': 239,
+        },
+    )()
+
+    spec = layout.build_wide(view, _tick(), 200, _r)
+    out  = layout.render_layout(spec, _r)
+
+    label_line = next(ln for ln in out if 'ʳᐟʷ' in strip_ansi(ln))
+    data_line  = next(ln for ln in out if 'Explore' in strip_ansi(ln) or 'test desc' in strip_ansi(ln))
+    label_plain = strip_ansi(label_line)
+    data_plain  = strip_ansi(data_line)
+    assert label_plain.index('ᐟ') == data_plain.index('/'), (
+        f"label '/' at {label_plain.index('ᐟ')} != data '/' at {data_plain.index('/')}"
+    )
+
+
+def test_tree_labels_name_shifted_right_of_desc_col_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 'name' header no longer sits flush against the desc column's exact
+    start — it's nudged right so it settles under the actual name text rather
+    than crowding the 'model' label to its left."""
+    _silence_dynamic(monkeypatch)
+    sub = _make_sub()
+    monkeypatch.setattr(
+        subagents_mod.RunningSubagents, 'from_session',
+        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
+    )
+
+    view = SessionView(_session(), Config(subagent_tree=True, labels=True))
+    spec = layout.build_wide(view, _tick(), 200, _r)
+
+    header_row = next(row for row in spec.rows if row.labels and any(lbl == 'name' for lbl, _ in row.labels))
+    name_col  = next(col for lbl, col in header_row.labels if lbl == 'name')
+    desc_col, _, _ = tree_columns_for(view)
+    assert name_col == 3 + desc_col + 2
+
+
+def tree_columns_for(view: SessionView) -> tuple[int, int, int]:
+    """Recompute the same desc/stats/activity anchors `build_wide` used, so
+    the test can assert the label's offset relative to them without
+    hardcoding a width-specific magic number."""
+    from yas.layout import tree_columns, tree_model_width, tree_lines_width, subagent_cluster_width
+    sub_cells = layout.subagent_cells(view.subagents.visible(0, None), True)
+    inner = 200 - 4
+    model_w = tree_model_width(sub_cells)
+    lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)
+    cluster_w = subagent_cluster_width(lines_w)
+    return tree_columns(sub_cells, inner, cluster_full_w=cluster_w, model_w=model_w)

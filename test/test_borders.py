@@ -225,14 +225,14 @@ def test_label_never_shifts_past_its_own_anchor_column(r: borders.BorderRenderer
 
 
 def test_label_uses_caller_abbreviation_when_full_text_cannot_shift_to_fit(r: borders.BorderRenderer) -> None:
-    # 'loc read / written' doesn't fit even the full run between two nearby
-    # elbows, but its registered abbreviation ('loc r/w') does -- and that's
+    # 'LOC read/write' doesn't fit even the full run between two nearby
+    # elbows, but its registered abbreviation ('LOC r/w') does -- and that's
     # preferred over an ellipsis shrink of the full phrase.
-    out = r.border_separator(width=60, downs=(9, 24), labels=(('loc read / written', 12),))
+    out = r.border_separator(width=60, downs=(9, 20), labels=(('LOC read/write', 12),))
     stripped = strip_ansi(out)
-    assert stripped[8] == '┬' and stripped[23] == '┬'  # both elbows intact
-    run = stripped[9:23]  # the whole fill run between the two elbows
-    assert superscript('loc r/w') in run
+    assert stripped[8] == '┬' and stripped[19] == '┬'  # both elbows intact
+    run = stripped[9:19]  # the whole fill run between the two elbows
+    assert superscript('LOC r/w') in run
     assert ELLIPSIS not in run  # abbreviation fits outright, no shrink needed
 
 
@@ -363,7 +363,7 @@ def test_label_sweep_never_clips_mid_word_or_hits_elbow(r: borders.BorderRendere
     # combination: the label is either untouched-from-bare (dropped) or a
     # legitimate rendering per `_is_valid_rendered_label`; either way neither
     # elbow is ever disturbed and the two elbows' own columns never move.
-    labels = ['input', 'output', 'cost', 'loc read / written', 'output sess/day']
+    labels = ['input', 'output', 'cost', 'LOC read/write', 'output sess/day']
     for text in labels:
         for run_len in range(1, 12):
             left_elbow = 5

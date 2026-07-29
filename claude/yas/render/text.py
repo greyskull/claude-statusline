@@ -198,15 +198,18 @@ def _middle_ellipsis(text: str, max_w: int) -> str:
 # ASCII -> Unicode superscript glyphs for section labels. Every glyph is a
 # non-PUA, width-1 character (modifier letters + the superscript block), so
 # `_visible_width(superscript(s)) == len(s)` holds. Characters with no standard
-# superscript form (e.g. 'q', and capitals C/F/Q/S/X/Y/Z) are intentionally
+# superscript form (e.g. 'q', and capitals F/Q/S/X/Y/Z) are intentionally
 # absent and pass through unchanged — substituting a wrong-letter or wide glyph
 # would break the width-equals-length invariant the label overlay relies on.
+# 'C' uses U+A7F2 MODIFIER LETTER CAPITAL C (Latin Extended-D) — the only
+# standard superscript-style capital C; it is not in the Private Use Area, so
+# it is exempt from the PUA hoist rule, but it's still narrow (width 1).
 _SUPERSCRIPT = {
     'a': 'ᵃ', 'b': 'ᵇ', 'c': 'ᶜ', 'd': 'ᵈ', 'e': 'ᵉ', 'f': 'ᶠ', 'g': 'ᵍ',
     'h': 'ʰ', 'i': 'ⁱ', 'j': 'ʲ', 'k': 'ᵏ', 'l': 'ˡ', 'm': 'ᵐ', 'n': 'ⁿ',
     'o': 'ᵒ', 'p': 'ᵖ', 'r': 'ʳ', 's': 'ˢ', 't': 'ᵗ', 'u': 'ᵘ', 'v': 'ᵛ',
     'w': 'ʷ', 'x': 'ˣ', 'y': 'ʸ', 'z': 'ᶻ',
-    'A': 'ᴬ', 'B': 'ᴮ', 'D': 'ᴰ', 'E': 'ᴱ', 'G': 'ᴳ', 'H': 'ᴴ', 'I': 'ᴵ',
+    'A': 'ᴬ', 'B': 'ᴮ', 'C': 'ꟲ', 'D': 'ᴰ', 'E': 'ᴱ', 'G': 'ᴳ', 'H': 'ᴴ', 'I': 'ᴵ',
     'J': 'ᴶ', 'K': 'ᴷ', 'L': 'ᴸ', 'M': 'ᴹ', 'N': 'ᴺ', 'O': 'ᴼ', 'P': 'ᴾ',
     'R': 'ᴿ', 'T': 'ᵀ', 'U': 'ᵁ', 'V': 'ⱽ', 'W': 'ᵂ',
     '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶',

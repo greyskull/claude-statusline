@@ -1212,9 +1212,9 @@ def build_wide(
                 )
             div_color = r.grad_at(divider_col - 1, width, fill=fill)
             divider   = f'{div_color}{BOX_V}{RESET}'
-            # `plan` over the checklist column, `subagents` over the cohort column.
+            # `plan` over the checklist column, `agent` over the cohort column.
             sbs_labels: list[tuple[str, int]] = (
-                [('plan', 3), ('subagents', divider_col + 2)] if view.cfg.labels else []
+                [('plan', 3), ('agent', divider_col + 10)] if view.cfg.labels else []
             )
             rows.append(RowSpec(sep_kind('separator_dim'), ups=pending_ups, downs=(divider_col,), labels=sbs_labels))
             for line in zip_columns(left_lines, right_lines, left_w, right_w, divider):
@@ -1231,7 +1231,7 @@ def build_wide(
             pending_ups = ()
 
         if visible_subs:
-            sub_labels: list[tuple[str, int]] = [('subagents', 3)] if view.cfg.labels else []
+            sub_labels: list[tuple[str, int]] = [('agent', 11)] if view.cfg.labels else []
             rows.append(RowSpec(sep_kind('separator_dim'), ups=pending_ups, labels=sub_labels))
             sub_cells = subagent_cells(visible_subs, view.cfg.subagent_tree)
             # Tree mode always stacks: a column-major pairing would tear the
@@ -1277,8 +1277,8 @@ def build_wide(
                     # Overlay column labels on the section header (the
                     # `separator_dim` row just appended above): 'name' over the
                     # desc column, 'model' over the front-embedded model
-                    # field, 'loc read / written' over the lines column,
-                    # 'current activity' over the activity column. Derived
+                    # field, 'LOC r/w' over the lines column, 'log'
+                    # over the activity column. Derived
                     # from the SAME anchors and field-offset math the rows
                     # themselves use (desc_col/stats_col_v/activity_col plus
                     # `subagent_cluster_field_offsets`) — never a hardcoded
@@ -1290,11 +1290,28 @@ def build_wide(
                         # the model field is the `model_w` cols immediately
                         # before that, with a 2-col gap ahead of it).
                         model_col = max(0, desc_col - 1 - model_w) if model_w else desc_col
+                        # The data row renders the lines field as
+                        # '<read> /<changed>' — `lines_w`-wide read, then a
+                        # space, then the '/'. Measured against the actual
+                        # rendered cluster (not re-derived from the field
+                        # widths alone — the tok field's own padding shifts
+                        # this by a column the naive arithmetic misses), the
+                        # '/' lands at `lines_off + lines_w` inside the stats
+                        # cluster. 'LOC r/w' has its own '/' at index 5
+                        # ('L','O','C',' ','r','/'), so anchoring the label
+                        # there — rather than at the field's start like the
+                        # full-word form — keeps the two '/'s stacked
+                        # regardless of the cohort's measured `lines_w`.
+                        loc_slash_col = stats_col_v + lines_off + lines_w
+                        loc_col = 3 + loc_slash_col - 5
                         rows[-1].labels.extend([
-                            ('name', 3 + desc_col),
+                            # +2: nudges 'name' off the desc column's exact
+                            # start so it settles visually under the name
+                            # values rather than flush against 'model'.
+                            ('name', 3 + desc_col + 2),
                             ('model', 3 + model_col),
-                            ('loc read / written', 3 + stats_col_v + lines_off),
-                            ('current activity', 3 + activity_col),
+                            ('LOC r/w', loc_col),
+                            ('log', 3 + activity_col + 2),
                         ])
                 else:
                     stats_col_v = 100 if width >= 125 else None

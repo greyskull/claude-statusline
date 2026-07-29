@@ -109,8 +109,8 @@ def subagent_cluster_field_offsets(
     `layout.tree_columns`'s `model_w` parameter) — so this only covers the
     two fields that remain here.
 
-    Single source of truth for that layout so the SUBAGENTS header's
-    'loc read / written'/'current activity' labels (built in `layout.py`)
+    Single source of truth for that layout so the agent header's
+    'LOC r/w'/'log' labels (built in `layout.py`)
     can anchor over the SAME columns the data rows use, instead of a
     hardcoded guess that drifts the moment `lines_w` changes per cohort.
     ``tok_w=5`` is `fmt_tok_fixed`'s own guaranteed max width (3 significant

@@ -1114,7 +1114,12 @@ class Renderer:
                 # design mock's 'sonnet ·   <activity>'.
                 gap       = SUBAGENT_STATS_ACTIVITY_GAP
                 dot_clr   = self.CTX_DIM if is_done else self.LABEL
-                gap_str   = f' {dot_clr}{MIDDLE_DOT}{self.R} ' + ' ' * max(0, gap - 3)
+                # Dot sits flush at the gap's leading edge (no space ahead of
+                # it) so it lands one column left of the old ' · ' placement;
+                # the freed column moves to trailing pad, keeping the gap's
+                # total width — and therefore the activity column's fixed
+                # offset — unchanged.
+                gap_str   = f'{dot_clr}{MIDDLE_DOT}{self.R}  ' + ' ' * max(0, gap - 3)
                 act_w     = max(0, target_w - _visible_width(line1) - gap)
                 activity = self.subagent_activity(sub.last_activity, cap=max(0, act_w - 3))
                 if _visible_width(activity) > act_w:
