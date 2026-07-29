@@ -440,16 +440,21 @@ def _make_tasklist(long_subject: bool = False) -> tasks_mod.TaskList:
 
     With ``long_subject`` the widest task line easily exceeds 45% of the inner
     width at any realistic terminal, so the left column is always capped — which
-    lets the width-driven fallback be exercised deterministically.
+    lets the width-driven fallback be exercised deterministically. The active
+    task's ``active_form`` is lengthened alongside its subject, since that is
+    what the in-progress row actually renders.
     """
     now  = time.time()
+    long = long_subject
     subj = ('a fairly long task subject line wide enough to cap the left column'
-            if long_subject else 'second task here')
+            if long else 'second task here')
+    act  = ('doing a fairly long task wide enough to cap the left column too'
+            if long else 'doing second')
     return tasks_mod.TaskList(
         tasks=[
             tasks_mod.Task(id=1, subject='first task subject', active_form='doing first',
                            status='completed', completed_at=now - 30),
-            tasks_mod.Task(id=2, subject=subj, active_form='doing second',
+            tasks_mod.Task(id=2, subject=subj, active_form=act,
                            status='in_progress', started_at=now - 10),
             tasks_mod.Task(id=3, subject='third pending task', active_form='third',
                            status='pending'),
@@ -556,8 +561,9 @@ def test_side_by_side_falls_back_to_stacked_when_narrow(monkeypatch: pytest.Monk
 
 
 def test_side_by_side_plan_column_capped_in_tree_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tree mode + wide box: the plan column is fixed at SUBAGENT_TREE_PLAN_WIDTH
-    (not the old 45%-of-inner even split), so the subagent tree gets the rest."""
+    """Tree mode + wide box + a plan longer than the cap: the plan column stops
+    at SUBAGENT_TREE_PLAN_WIDTH (not the old 45%-of-inner even split), so the
+    subagent tree gets the rest."""
     from helper import strip_ansi
     from yas.constants import SUBAGENT_TREE_PLAN_WIDTH
     _both_sections(monkeypatch, long_subject=True)
@@ -573,6 +579,31 @@ def test_side_by_side_plan_column_capped_in_tree_mode(monkeypatch: pytest.Monkey
     divider_col = div_cols.pop()
     left_w = divider_col - 4
     assert left_w == SUBAGENT_TREE_PLAN_WIDTH, f'left_w={left_w}, expected {SUBAGENT_TREE_PLAN_WIDTH}'
+
+
+def test_side_by_side_plan_column_sized_to_content_in_tree_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tree mode + a plan shorter than the cap: the plan column is sized to the
+    longest rendered plan line plus SUBAGENT_TREE_PLAN_PAD — no trailing band of
+    padding before the divider — and every reclaimed column goes to the tree."""
+    from helper import strip_ansi
+    from yas.constants import SUBAGENT_TREE_PLAN_PAD, SUBAGENT_TREE_PLAN_WIDTH
+    _both_sections(monkeypatch, long_subject=False)
+
+    width = 300
+    view  = SessionView(_session(), Config(subagent_tree=True))
+    spec  = layout.build_wide(view, _tick(), width, _r)
+
+    combined_idx = _divider_content_idx(spec)
+    assert combined_idx, 'expected a side-by-side block with a divider column'
+    div_cols = {3 + strip_ansi(spec.rows[i].content).index('│') for i in combined_idx}
+    assert len(div_cols) == 1, f'divider column drifts across rows: {div_cols}'
+    left_w = div_cols.pop() - 4
+
+    longest = layout.plan_content_width(_r.task_row(view.tasks, SUBAGENT_TREE_PLAN_WIDTH))
+    assert longest + SUBAGENT_TREE_PLAN_PAD < SUBAGENT_TREE_PLAN_WIDTH, \
+        'precondition: this plan must be shorter than the cap'
+    assert left_w == longest + SUBAGENT_TREE_PLAN_PAD, \
+        f'left_w={left_w}, expected content width {longest} + {SUBAGENT_TREE_PLAN_PAD}'
 
 
 def test_subagent_tree_plan_width_cap_value() -> None:
@@ -608,9 +639,9 @@ def test_side_by_side_plan_split_unchanged_when_tree_mode_off(monkeypatch: pytes
 
 
 def test_side_by_side_plan_column_degrades_at_narrow_width(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tree mode on, but the box is too narrow for a fixed SUBAGENT_TREE_PLAN_WIDTH-col
-    plan column to leave >=40 cols for the tree: falls back to the old
-    45%-of-inner cap (still side-by-side, just not pinned at the fixed width)."""
+    """Tree mode on with a plan longer than the ceiling, but the box is too
+    narrow for a SUBAGENT_TREE_PLAN_WIDTH-col plan column: the ceiling falls
+    back to the old 45%-of-inner cap (still side-by-side)."""
     from helper import strip_ansi
     from yas.constants import SUBAGENT_TREE_PLAN_WIDTH
     _both_sections(monkeypatch, long_subject=True)
@@ -896,8 +927,12 @@ def test_clear_timer_clear_first_in_cell(monkeypatch: pytest.MonkeyPatch) -> Non
     assert plain.index('18:33') < plain.index('13:27')
 
 
-def test_clear_timer_fresh_session_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clear_timer_fresh_session_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, frozen_clock: float,
+) -> None:
     """Fresh session (clear_epoch=None): top content row is byte-identical to the pre-change render."""
+    # frozen_clock pins the rainbow palette, which rolls once a second and would
+    # otherwise colour the two builds differently.
     _silence_dynamic(monkeypatch)
     view_fresh = _view()
     view_fresh.__dict__['now'] = 1_750_000_000.0

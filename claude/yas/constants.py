@@ -45,8 +45,15 @@ TWO_COL_SUBAGENT_WIDTH = 120
 # the 45%-of-inner ceiling on narrow terminals so it degrades to the old
 # behavior when the box is too small to justify a fixed-width left column.
 # 68 (down from an earlier 78) hands the subagent side ~10 more columns on
-# typical wide boxes while still leaving the plan column readable.
+# typical wide boxes while still leaving the plan column readable. It is now a
+# *ceiling* rather than a fixed size: the column is sized to the longest
+# rendered plan line plus SUBAGENT_TREE_PLAN_PAD, so a short plan hands its
+# slack to the subagent tree instead of rendering a band of trailing padding.
 SUBAGENT_TREE_PLAN_WIDTH = 68
+# Trailing pad, in cells, between the longest plan line and the column divider
+# in the tree-mode side-by-side split. `zip_columns` already puts one space on
+# each side of the `│`, so this is the extra breathing room on top of that.
+SUBAGENT_TREE_PLAN_PAD = 1
 # Unused. Was a fixed width for the tree-row model field; `layout.tree_model_width`
 # now measures the cohort's actual widest model label per-render instead
 # (dynamic sizing), so nothing reads this constant any more. Kept defined

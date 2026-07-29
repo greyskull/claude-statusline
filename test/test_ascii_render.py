@@ -228,7 +228,8 @@ def test_render_width_identical_to_nerdfont(mode: str, width: int) -> None:
 # --- 4. Per-mode content invariants -------------------------------------------
 
 @pytest.mark.parametrize('width', [50, 70, 160])
-def test_nerdfont_is_byte_identical_to_default(width: int) -> None:
+def test_nerdfont_is_byte_identical_to_default(width: int, frozen_clock: float) -> None:
+    # frozen_clock keeps the two renders on one rainbow step / one elapsed timer.
     info = _load_example()
     assert app.render(info, width, glyph_mode='nerdfont') == app.render(info, width)
 

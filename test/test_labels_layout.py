@@ -33,8 +33,8 @@ def _tick() -> TickRecord:
     return TickRecord(token_log=TokenLog(), day_cost=0.0, tok_rate=0)
 
 
-def _render(labels: bool) -> list[str]:
-    view = SessionView(_session(), Config(labels=labels))
+def _render(labels: bool, now: float | None = None) -> list[str]:
+    view = SessionView(_session(), Config(labels=labels), now)
     spec = layout.build_wide(view, _tick(), 160, _r)
     return layout.render_layout(spec, _r)
 
@@ -70,13 +70,13 @@ def test_labels_off_has_no_superscripts():
         assert superscript(word) not in blob
 
 
-def test_labels_off_byte_identical_to_default():
+def test_labels_off_byte_identical_to_default(frozen_clock):
     # labels=False (the default) must change nothing: every RowSpec.labels stays
     # empty so render_layout passes an empty tuple into the border methods, and
     # the rendered bytes equal the labels-attribute-absent baseline.
-    assert _render(labels=False) == _render(labels=False)
-    off = _render(labels=False)
-    on  = _render(labels=True)
+    assert _render(labels=False, now=frozen_clock) == _render(labels=False, now=frozen_clock)
+    off = _render(labels=False, now=frozen_clock)
+    on  = _render(labels=True,  now=frozen_clock)
     # The two differ only where captions were overlaid (so they are not equal),
     # but the off render must carry zero superscript glyphs.
     assert off != on

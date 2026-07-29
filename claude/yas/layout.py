@@ -23,6 +23,7 @@ from yas.constants import (
     SUBAGENT_STATS_ACTIVITY_GAP,
     subagent_is_terminal,
     subagent_status,
+    SUBAGENT_TREE_PLAN_PAD,
     SUBAGENT_TREE_PLAN_WIDTH,
     TOKENS_COST_MIN_WIDTH,
     TWO_COL_SUBAGENT_WIDTH,
@@ -137,6 +138,18 @@ def append_error_row(rows: list[RowSpec], cfg: Config, width: int, r: Renderer) 
     rows.append(RowSpec('separator_dim', ups=bottom.ups))
     rows.append(RowSpec('content', content=f'{CLR_WARN}{text}{RESET}'))
     rows.append(RowSpec('bottom_border'))
+
+
+def plan_content_width(lines: list[str]) -> int:
+    """Intrinsic visible width of a rendered task checklist.
+
+    ``Renderer.task_row`` lays its item rows out to exactly the width it is
+    handed, so ``_visible_width`` of a rendered line always reports that width
+    rather than the width the content actually needs. Strip the ANSI first (a
+    trailing ``RESET`` sits after the padding, so a bare ``rstrip`` would miss
+    it), then drop trailing blanks, and take the widest remaining line.
+    """
+    return max((_visible_width(_ANSI_RE.sub('', line).rstrip()) for line in lines), default=0)
 
 
 def zip_columns(
@@ -1157,12 +1170,19 @@ def build_wide(
         inner             = width - 4
         task_lines_full   = r.task_row(tasks, inner)
         longest_task_line = max((_visible_width(line) for line in task_lines_full), default=0)
-        # Tree mode: fix the plan column at SUBAGENT_TREE_PLAN_WIDTH so the
-        # subagent tree gets the rest of the box on wide terminals, instead of
-        # an even 45% split that starves it. Still clamped to the old 45%
-        # cap, so on narrow terminals this degrades to the pre-tree behavior.
+        # Tree mode: size the plan column to its content — the longest rendered
+        # plan line plus SUBAGENT_TREE_PLAN_PAD — so every reclaimed column goes
+        # to the subagent tree instead of a band of trailing padding. `task_row`
+        # right-pads its item rows to the width it is handed, so the content
+        # width is measured off a probe render at the ceiling with trailing
+        # padding stripped (ANSI first, since a trailing RESET follows the pad).
+        # The ceiling is SUBAGENT_TREE_PLAN_WIDTH (a long plan never eats the
+        # whole box) clamped by the old 45%-of-inner cap, so a narrow box still
+        # degrades to the pre-tree behavior.
         if view.cfg.subagent_tree:
-            left_w        = min(SUBAGENT_TREE_PLAN_WIDTH, inner * 45 // 100)
+            plan_ceiling  = min(SUBAGENT_TREE_PLAN_WIDTH, inner * 45 // 100)
+            plan_content  = plan_content_width(r.task_row(tasks, plan_ceiling))
+            left_w        = min(plan_content + SUBAGENT_TREE_PLAN_PAD, plan_ceiling)
         else:
             left_w        = min(longest_task_line, inner * 45 // 100)
         right_w           = inner - 3 - left_w
