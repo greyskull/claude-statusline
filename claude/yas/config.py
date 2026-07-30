@@ -31,7 +31,6 @@ from yas.constants import (
     DEFAULT_THEME,
     DEFAULT_SHOW_DAY_STATS,
     DEFAULT_SHOW_TOOL_USES,
-    DEFAULT_SUBAGENT_TREE,
 )
 from yas.themes import THEMES
 
@@ -342,7 +341,7 @@ class Config:
         'max_width', 'full_width', 'justify', 'labels', 'soft_limit',
         'token_window', 'theme', 'bg_shift', 'glyph_mode', 'single_width',
         'show_day_stats', 'context_state', 'context_labels', 'context_thresholds',
-        'show_render_time', 'show_tool_uses', 'subagent_tree', 'soft_limit_models', 'errors', 'debug_lines',
+        'show_render_time', 'show_tool_uses', 'soft_limit_models', 'errors', 'debug_lines',
     )
 
     max_width:          int
@@ -361,7 +360,6 @@ class Config:
     context_thresholds: tuple[int, ...]
     show_render_time:   bool
     show_tool_uses:     bool
-    subagent_tree:      bool
     soft_limit_models:  tuple[tuple[str, int], ...]
     errors:             tuple[str, ...]
     debug_lines:        tuple[str, ...]
@@ -384,7 +382,6 @@ class Config:
         context_thresholds: tuple[int, ...] = DEFAULT_CONTEXT_THRESHOLDS,
         show_render_time:   bool = False,
         show_tool_uses:     bool = DEFAULT_SHOW_TOOL_USES,
-        subagent_tree:      bool = DEFAULT_SUBAGENT_TREE,
         soft_limit_models:  tuple[tuple[str, int], ...] = (),
         errors:             tuple[str, ...] = (),
         debug_lines:        tuple[str, ...] = (),
@@ -406,7 +403,6 @@ class Config:
         s(self, 'context_thresholds', context_thresholds)
         s(self, 'show_render_time', show_render_time)
         s(self, 'show_tool_uses', show_tool_uses)
-        s(self, 'subagent_tree', subagent_tree)
         s(self, 'soft_limit_models', soft_limit_models)
         s(self, 'errors', errors)
         s(self, 'debug_lines', debug_lines)
@@ -425,7 +421,6 @@ class Config:
                 f'show_day_stats={self.show_day_stats}, context_state={self.context_state}, '
                 f'context_labels={self.context_labels!r}, context_thresholds={self.context_thresholds!r}, '
                 f'show_render_time={self.show_render_time}, show_tool_uses={self.show_tool_uses}, '
-                f'subagent_tree={self.subagent_tree}, '
                 f'soft_limit_models={self.soft_limit_models!r}, '
                 f'errors={self.errors!r}, debug_lines={self.debug_lines!r})')
 
@@ -520,10 +515,6 @@ class Config:
             'show_tool_uses',
             _env_sources(env, 'YAS_SHOW_TOOL_USES') + toml_src(layout, 'show_tool_uses'),
             _parse_bool, DEFAULT_SHOW_TOOL_USES, errors, debug)
-        subagent_tree = _resolve(
-            'subagent_tree',
-            _env_sources(env, 'YAS_SUBAGENT_TREE') + toml_src(layout, 'subagent_tree'),
-            _parse_bool, DEFAULT_SUBAGENT_TREE, errors, debug)
         justify = _resolve(
             'justify',
             _env_sources(env, 'YAS_JUSTIFY') + toml_src(layout, 'justify'),
@@ -564,7 +555,6 @@ class Config:
             context_thresholds=context_thresholds,
             show_render_time=show_render_time,
             show_tool_uses=show_tool_uses,
-            subagent_tree=subagent_tree,
             soft_limit_models=tuple(soft_limit_models),
             errors=tuple(errors),
             debug_lines=tuple(debug),

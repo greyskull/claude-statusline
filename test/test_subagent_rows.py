@@ -904,14 +904,8 @@ def test_subagent_cells_prefixes_branch_glyphs() -> None:
     k1   = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
     k2   = _make_tree_sub('agent-c', parent_id='a', ts_off=2)
     gk   = _make_tree_sub('agent-d', parent_id='c', ts_off=3)
-    cells = layout.subagent_cells([root, k1, k2, gk], True)
+    cells = layout.subagent_cells([root, k1, k2, gk])
     assert [p for _, p in cells] == ['', '├ ', '└ ', '  └ ']
-
-
-def test_subagent_cells_flat_mode_unchanged() -> None:
-    subs = [_make_tree_sub('agent-b', parent_id='a'), _make_tree_sub('agent-a', ts_off=1)]
-    # Default (flat) mode: original order, no prefixes, no reordering.
-    assert layout.subagent_cells(subs, False) == [(subs[0], ''), (subs[1], '')]
 
 
 def test_cap_tree_groups_keeps_active_parent_with_child() -> None:
@@ -1388,7 +1382,7 @@ def test_build_wide_tree_mode_renders_branches(monkeypatch: pytest.MonkeyPatch) 
         classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[root, kid1, kid2])),
     )
     session = session_mod.SessionInfo.from_dict(json.loads(SESSION.read_text()))
-    view    = SessionView(session, Config(subagent_tree=True))
+    view    = SessionView(session, Config())
     tick    = TickRecord(token_log=TokenLog(), day_cost=0.0, tok_rate=0)
     spec    = layout.build_wide(view, tick, 140, _r)
     out     = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
@@ -1424,7 +1418,7 @@ def test_retention_drops_terminal_row_past_120s() -> None:
     now = time.time()
     fresh_done = _rs('a', status='completed', end_ts=now - 10)
     stale_done = _rs('b', status='completed', end_ts=now - 200)
-    out = layout.select_visible_cohort([fresh_done, stale_done], cap=6, tree=False, now=now)
+    out = layout.select_visible_cohort([fresh_done, stale_done], cap=6, now=now)
     assert fresh_done in out
     assert stale_done not in out
 
@@ -1432,7 +1426,7 @@ def test_retention_drops_terminal_row_past_120s() -> None:
 def test_retention_never_drops_running_row() -> None:
     now = time.time()
     running = _rs('a', status='running')
-    out = layout.select_visible_cohort([running], cap=6, tree=False, now=now)
+    out = layout.select_visible_cohort([running], cap=6, now=now)
     assert running in out
 
 
@@ -1440,7 +1434,7 @@ def test_cascade_clear_forces_running_descendant_terminal() -> None:
     now = time.time()
     parent = _rs('p', status='completed', end_ts=now - 5)
     child  = _rs('c', status='running', parent_id='p')
-    out = layout.select_visible_cohort([parent, child], cap=6, tree=True, now=now)
+    out = layout.select_visible_cohort([parent, child], cap=6, now=now)
     child_out = next(s for s in out if s.agent_id == 'c')
     assert child_out.status == 'completed'
     assert child_out.end_ts == parent.end_ts
@@ -1451,7 +1445,7 @@ def test_cascade_clear_walks_multiple_ancestor_levels() -> None:
     grandparent = _rs('gp', status='killed', end_ts=now - 5)
     parent      = _rs('p', status='running', parent_id='gp')
     child       = _rs('c', status='running', parent_id='p')
-    out = layout.select_visible_cohort([grandparent, parent, child], cap=6, tree=True, now=now)
+    out = layout.select_visible_cohort([grandparent, parent, child], cap=6, now=now)
     for sub in out:
         if sub.agent_id in ('p', 'c'):
             assert sub.status == 'killed'
@@ -1772,7 +1766,7 @@ def test_eviction_drops_oldest_completion_first_across_states() -> None:
         _rs('run-1',      status='running'),
         _rs('run-2',      status='running'),
     ]
-    out = layout.select_visible_cohort(subs, cap=4, tree=True, now=now)
+    out = layout.select_visible_cohort(subs, cap=4, now=now)
     ids = {s.agent_id for s in out}
     assert 'old-fail' not in ids           # oldest completion evicted first
     assert 'run-1' in ids and 'run-2' in ids  # running rows never displaced

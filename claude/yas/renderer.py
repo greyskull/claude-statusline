@@ -1004,8 +1004,12 @@ class Renderer:
             # before the text and self.R (RESET) closes it along with the
             # colour, matching the existing BOLD convention elsewhere in
             # this method (open code, then a bare RESET at the end).
+            # The type/name text greys via CTX_DIM when finished, same as the
+            # model field below — only the ✓/✗ status marker keeps done_clr
+            # (green/alert) so pass-vs-fail stays visually distinguishable.
+            # The duration field itself keeps done_clr (unchanged styling).
             if is_done:
-                front_c = f'{done_clr}{dur_s}{self.R} {elbow}{done_clr}{ITALIC}{type_text}{self.R}'
+                front_c = f'{done_clr}{dur_s}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
             else:
                 front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
             if tree_single:
