@@ -1584,9 +1584,22 @@ def render_scenario(
         snap_env['YAS_THEME'] = theme
     out = render_once(snap_env, json.dumps(raw))
     stem = theme if theme is not None else cfg.name
+    out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f'{stem}.txt'
     dest.write_text('\n\n'+out+'\n\n')
     print(f'  wrote {dest}')
+
+
+def scenario_out_dir(base_dir: Path, cfg: ScenarioConfig) -> Path:
+    """Route subagent-tree scenarios into a `subagents/` subdir of `base_dir`.
+
+    The 15 `subagent-tree-*` scenarios (wide/medium/narrow x single/types/
+    nested/states/plan) would otherwise clutter the flat demo/ dir alongside
+    every other scenario's .txt/.png; keep them grouped instead.
+    """
+    if cfg.name.startswith('subagent-tree-'):
+        return base_dir / 'subagents'
+    return base_dir
 
 
 def _render_isolated(fixture: dict[str, object], cfg: ScenarioConfig, out_dir: Path, theme: str | None = None) -> None:
@@ -1628,7 +1641,9 @@ def main() -> int:
                 names = ', '.join(c.name for c in SCENARIOS)
                 print(f'DEMO_ONLY={only!r}: no such scenario. Available: {names}', file=sys.stderr)
                 return 1
-            tasks: list[tuple[ScenarioConfig, Path, str | None]] = [(cfg, out_dir, None) for cfg in scenarios]
+            tasks: list[tuple[ScenarioConfig, Path, str | None]] = [
+                (cfg, scenario_out_dir(out_dir, cfg), None) for cfg in scenarios
+            ]
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=min(len(tasks), (os.cpu_count() or 4))) as pool:
                 futures = [pool.submit(_render_isolated, fixture, cfg, dest, theme) for cfg, dest, theme in tasks]
@@ -1647,7 +1662,7 @@ def main() -> int:
 
         # (cfg, out_dir, theme) tasks: each is independent (own $HOME), so the
         # ~68ms-per-render subprocesses run concurrently instead of serially.
-        tasks = [(cfg, out_dir, None) for cfg in SCENARIOS]
+        tasks = [(cfg, scenario_out_dir(out_dir, cfg), None) for cfg in SCENARIOS]
         for theme_name in sorted(THEMES):
             theme_dir = light_dir if theme_name in light_themes else dark_dir
             tasks.append((kitchen_sink, theme_dir, theme_name))

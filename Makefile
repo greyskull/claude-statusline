@@ -36,7 +36,11 @@ demo:
 demo/img:
 	@uv run python3 ops/demo.py --snapshots demo/
 	@if [ -n "$(DEMO_ONLY)" ]; then \
-		uv run python3 ops/ansi_png.py demo/$(DEMO_ONLY).txt demo/$(DEMO_ONLY).png; \
+		case "$(DEMO_ONLY)" in \
+			subagent-tree-*) d=demo/subagents;; \
+			*) d=demo;; \
+		esac; \
+		uv run python3 ops/ansi_png.py $$d/$(DEMO_ONLY).txt $$d/$(DEMO_ONLY).png; \
 	fi
 
 test:
