@@ -8,7 +8,7 @@ import zlib
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from yas.render.borders import BorderRenderer
 from yas.constants import (
@@ -184,6 +184,28 @@ def _ctx_fill_ratio(ctx: ContextWindow, soft_limit: int) -> tuple[float, float]:
     fill_ratio = min(_ctx_used_tokens(ctx) / soft_limit, 1.0)
     pct_soft   = fill_ratio * 100.0
     return fill_ratio, pct_soft
+
+
+def _best_fit_cluster(
+    build_cluster: Callable[[bool, bool], str],
+    fits: Callable[[str], bool],
+) -> str:
+    """Pick the richest subagent stats cluster that satisfies `fits`.
+
+    Shared shed ladder (Decision 10) for `Renderer.subagent_row`'s anchored
+    and right-aligned branches: start from the model-only fallback, then try
+    progressively richer clusters (lines+tok, then tok-only), keeping the
+    first candidate that fits. The two branches differ only in what "fits"
+    means (slack past a fixed anchor column vs. slack alongside the front
+    field), which is why `fits` is a caller-supplied predicate.
+    """
+    cluster = build_cluster(False, False)  # model-only fallback
+    for show_lines, show_tok in ((True, True), (False, True)):
+        cand = build_cluster(show_lines, show_tok)
+        if fits(cand):
+            cluster = cand
+            break
+    return cluster
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +775,34 @@ class Renderer:
             return f'{GLYPH_REPLYING} {raw}'
         return ''
 
+    def _subagent_desc_tint(
+        self, desc_text: str, desc_max: int, is_done: bool,
+    ) -> tuple[str, int]:
+        """Truncate + colour-tint a subagent row's description field.
+
+        Shared by `subagent_row`'s anchored and right-aligned branches, which
+        differ only in how `desc_max` (the column budget for the description)
+        is derived. Returns `(sep_desc, sep_desc_w)`: the rendered
+        ' · <description>' segment (empty if there's no room) and its visible
+        width (0 when empty).
+        """
+        if not desc_text or desc_max <= 0:
+            return '', 0
+        if _visible_width(desc_text) > desc_max:
+            desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
+        desc_w = _visible_width(desc_text)
+        if is_done:
+            # Strikethrough the description (not the type/model/token fields)
+            # to mark the task itself as finished; SGR-only, applied after
+            # truncation so it never perturbs the width math above.
+            sep_desc = (
+                f' {self.CTX_DIM}·{self.R} '
+                f'{self.CTX_DIM}{STRIKE}{ITALIC}{desc_text}{UNSTRIKE}{self.R}'
+            )
+        else:
+            sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{ITALIC}{desc_text}{self.R}'
+        return sep_desc, 3 + desc_w
+
     def subagent_row(
         self,
         sub: RunningSubagent,
@@ -997,10 +1047,10 @@ class Renderer:
                     # column-aligned. The non-tree path below omits the
                     # field entirely when there's no data (`has_lines`).
                     if show_lines:
-                        fields.append(f'{d if is_done else self.LABEL}{lines_field}{self.R}')
+                        fields.append(f'{d if is_done else self.white_brt}{lines_field}{self.R}')
                 else:
                     if show_lines and has_lines:
-                        fields.append(f'{d if is_done else self.LABEL}{lines_field}{self.R}')
+                        fields.append(f'{d if is_done else self.white_brt}{lines_field}{self.R}')
                     if show_tok:
                         tok_clr = d if is_done else ctx_clr
                         fields.append(f'{tok_clr}{tok_field}{self.R}')
@@ -1026,36 +1076,16 @@ class Renderer:
                 # Shed ladder (Decision 10): lines is the FIRST field dropped
                 # under width pressure, then tok — model and duration are
                 # never shed.
-                cluster = build_cluster(False, False)  # model-only fallback
-                for show_lines, show_tok in ((True, True), (False, True)):
-                    cand = build_cluster(show_lines, show_tok)
-                    if _visible_width(cand) <= avail:
-                        cluster = cand
-                        break
+                cluster = _best_fit_cluster(
+                    build_cluster, lambda cand: _visible_width(cand) <= avail,
+                )
                 cluster_w = _visible_width(cluster)
 
                 # Truncate the description so it stops before the stats column
                 # with at least a 1-col gap. ' · ' separator is 3 cols wide.
                 desc_text  = sub.description or ''
                 desc_max   = stats_col - front_w - 3 - 1
-                sep_desc   = ''
-                sep_desc_w = 0
-                if desc_text and desc_max > 0:
-                    if _visible_width(desc_text) > desc_max:
-                        desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
-                    desc_w = _visible_width(desc_text)
-                    if is_done:
-                        # Strikethrough the description (not the type/model/
-                        # token fields) to mark the task itself as finished;
-                        # SGR-only, applied after truncation so it never
-                        # perturbs the width math above.
-                        sep_desc = (
-                            f' {self.CTX_DIM}·{self.R} '
-                            f'{self.CTX_DIM}{STRIKE}{ITALIC}{desc_text}{UNSTRIKE}{self.R}'
-                        )
-                    else:
-                        sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{ITALIC}{desc_text}{self.R}'
-                    sep_desc_w = 3 + desc_w
+                sep_desc, sep_desc_w = self._subagent_desc_tint(desc_text, desc_max, is_done)
 
                 # Anchor the cluster's first `·` at content-offset stats_col.
                 pad1  = max(1, stats_col - front_w - sep_desc_w)
@@ -1065,35 +1095,16 @@ class Renderer:
                 # Pick the richest cluster that fits alongside the front + a 1-col gap.
                 # Same shed ladder as the anchored branch above: lines first,
                 # then tok.
-                cluster = build_cluster(False, False)  # model-only fallback
-                for show_lines, show_tok in ((True, True), (False, True)):
-                    cand = build_cluster(show_lines, show_tok)
-                    if front_w + 1 + _visible_width(cand) <= stats_w:
-                        cluster = cand
-                        break
+                cluster = _best_fit_cluster(
+                    build_cluster,
+                    lambda cand: front_w + 1 + _visible_width(cand) <= stats_w,
+                )
                 cluster_w = _visible_width(cluster)
 
                 # Fill the description into the space left over (truncates first).
                 desc_text  = sub.description or ''
                 desc_max   = stats_w - front_w - cluster_w - 1 - 3  # 1-col gap + ' · '
-                sep_desc   = ''
-                sep_desc_w = 0
-                if desc_text and desc_max > 0:
-                    if _visible_width(desc_text) > desc_max:
-                        desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
-                    desc_w = _visible_width(desc_text)
-                    if is_done:
-                        # Strikethrough the description (not the type/model/
-                        # token fields) to mark the task itself as finished;
-                        # SGR-only, applied after truncation so it never
-                        # perturbs the width math above.
-                        sep_desc = (
-                            f' {self.CTX_DIM}·{self.R} '
-                            f'{self.CTX_DIM}{STRIKE}{ITALIC}{desc_text}{UNSTRIKE}{self.R}'
-                        )
-                    else:
-                        sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{ITALIC}{desc_text}{self.R}'
-                    sep_desc_w = 3 + desc_w
+                sep_desc, sep_desc_w = self._subagent_desc_tint(desc_text, desc_max, is_done)
 
                 pad1  = max(1, stats_w - front_w - sep_desc_w - cluster_w)
                 line1 = f'{front_c}{sep_desc}{" " * pad1}{cluster}'

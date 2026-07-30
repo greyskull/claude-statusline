@@ -54,11 +54,6 @@ SUBAGENT_TREE_PLAN_WIDTH = 68
 # in the tree-mode side-by-side split. `zip_columns` already puts one space on
 # each side of the `│`, so this is the extra breathing room on top of that.
 SUBAGENT_TREE_PLAN_PAD = 1
-# Unused. Was a fixed width for the tree-row model field; `layout.tree_model_width`
-# now measures the cohort's actual widest model label per-render instead
-# (dynamic sizing), so nothing reads this constant any more. Kept defined
-# rather than removed in case a caller still imports it.
-SUBAGENT_TREE_MODEL_WIDTH = 9
 # Floor for the wide layout's three-segment tokens │ cost │ rate row. Below this
 # the row cannot hold both columns at full size plus the rate/spark leader, so
 # build_wide drops it for the compact context line instead of overflowing the

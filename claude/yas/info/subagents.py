@@ -379,15 +379,17 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     return billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts
 
 
-def tree_order(subs: list[RunningSubagent]) -> list[tuple[RunningSubagent, int, bool]]:
-    '''Order a visible cohort parent-first for the tree view.
+def _build_tree_index(
+    subs: list[RunningSubagent],
+) -> tuple[dict[int, list[RunningSubagent]], list[RunningSubagent]]:
+    '''Build the parent→children map and root list shared by the tree helpers.
 
-    Returns ``(sub, depth, is_last_child)`` triples in depth-first order:
-    children group directly under their parent (matched by ``parent_id``
-    against the parent's ``agent_id``, with or without the ``agent-`` filename
-    prefix), siblings keep first_timestamp order, and an agent whose parent is
-    unknown or not in ``subs`` renders as a top-level root (depth 0,
-    is_last_child False). Pure ordering — no ANSI, no glyphs.
+    Matches each ``sub.parent_id`` against a sibling's ``agent_id`` (with or
+    without the ``agent-`` filename prefix); an agent whose parent is unknown
+    or not present in ``subs`` becomes a root. Returns ``(children, roots)``
+    where ``children`` is keyed by ``id(parent)`` — the shared traversal
+    primitive behind ``tree_order``, ``group_trees``, and (transitively)
+    ``cap_tree_groups``.
     '''
     by_id: dict[str, RunningSubagent] = {}
     for sub in subs:
@@ -402,6 +404,20 @@ def tree_order(subs: list[RunningSubagent]) -> list[tuple[RunningSubagent, int, 
             children.setdefault(id(parent), []).append(sub)
         else:
             roots.append(sub)
+    return children, roots
+
+
+def tree_order(subs: list[RunningSubagent]) -> list[tuple[RunningSubagent, int, bool]]:
+    '''Order a visible cohort parent-first for the tree view.
+
+    Returns ``(sub, depth, is_last_child)`` triples in depth-first order:
+    children group directly under their parent (matched by ``parent_id``
+    against the parent's ``agent_id``, with or without the ``agent-`` filename
+    prefix), siblings keep first_timestamp order, and an agent whose parent is
+    unknown or not in ``subs`` renders as a top-level root (depth 0,
+    is_last_child False). Pure ordering — no ANSI, no glyphs.
+    '''
+    children, roots = _build_tree_index(subs)
     out: list[tuple[RunningSubagent, int, bool]] = []
 
     def walk(sub: RunningSubagent, depth: int, last: bool) -> None:
@@ -425,19 +441,7 @@ def group_trees(subs: list[RunningSubagent]) -> list[list[RunningSubagent]]:
     then each child's own subtree); groups are returned in root
     ``first_timestamp`` order (the order ``subs`` arrives in).
     '''
-    by_id: dict[str, RunningSubagent] = {}
-    for sub in subs:
-        if sub.agent_id:
-            by_id[sub.agent_id] = sub
-            by_id[sub.agent_id.removeprefix('agent-')] = sub
-    children: dict[int, list[RunningSubagent]] = {}
-    roots: list[RunningSubagent] = []
-    for sub in subs:
-        parent = by_id.get(sub.parent_id) if sub.parent_id else None
-        if parent is not None and parent is not sub:
-            children.setdefault(id(parent), []).append(sub)
-        else:
-            roots.append(sub)
+    children, roots = _build_tree_index(subs)
 
     def collect(sub: RunningSubagent, out: list[RunningSubagent]) -> None:
         out.append(sub)

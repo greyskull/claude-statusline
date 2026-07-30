@@ -223,7 +223,8 @@ When present, the lines segment SHALL contribute a third divider column to the
 value `tokens_cost` returns for elbow threading, so every `│` in the row has a
 matching `┬` above and `┴` below. When shed, the returned divider columns SHALL be
 the two-column form. With section labels enabled (`cfg.labels`), the segment SHALL
-carry the caption `lines read/changed`, centred over the segment, and the existing
+carry the caption `LOC read/write` (abbreviated `LOC r/w` under width pressure via
+`LABEL_ABBREVIATIONS`), centred over the segment, and the existing
 `cost` and `tokens over time` captions SHALL remain anchored to their own
 segments in both the shed and present forms.
 
@@ -241,15 +242,15 @@ segments in both the shed and present forms.
 #### Scenario: Caption shown when labels are on
 
 - **WHEN** `cfg.labels` is true and the lines segment is present
-- **THEN** the separator above shows the `lines read/changed` caption over the
+- **THEN** the separator above shows the `LOC read/write` caption over the
   segment, and the `cost` and `tokens over time` captions remain over theirs
 
 ### Requirement: Per-subagent lines field is self-scoped
 
 Each subagent row SHALL show the line counts of its OWN transcript only. A parent
 SHALL NOT roll up its descendants' counts, and a `fork` subagent SHALL count to
-itself. The field SHALL sit in the line-1 stats cluster alongside share%, tokens,
-and model, and SHALL humanise both numbers in the same form as the tokens field.
+itself. The field SHALL sit in the line-1 stats cluster alongside tokens and
+model, and SHALL humanise both numbers in the same form as the tokens field.
 
 #### Scenario: Parent excludes its children
 
@@ -270,10 +271,9 @@ and model, and SHALL humanise both numbers in the same form as the tokens field.
 
 The lines field SHALL render as blank padding — not `0` — when the subagent has
 neither read nor changed anything, preserving the fixed cluster width. Under width
-pressure the field SHALL be the FIRST cluster field dropped, before share% and
-before tok, so the shed order becomes lines, then share%, then tok, with the model
-and the front duration always retained. Narrow terminals SHALL therefore render
-exactly as they do today.
+pressure the field SHALL be the FIRST cluster field dropped, before tok, so the
+shed order becomes lines, then tok, with the model and the front duration always
+retained. Narrow terminals SHALL therefore render exactly as they do today.
 
 #### Scenario: Idle subagent shows blank
 
@@ -281,13 +281,13 @@ exactly as they do today.
 - **THEN** its lines field renders as spaces, not as `0`, and the cluster keeps its
   width
 
-#### Scenario: Lines sheds before share%
+#### Scenario: Lines sheds before tok
 
 - **WHEN** the cluster does not fit at the available width
-- **THEN** the lines field is dropped first while share%, tok, and model remain
+- **THEN** the lines field is dropped first while tok and model remain
 
 #### Scenario: Existing shed ladder is preserved below
 
 - **WHEN** the cluster still does not fit after the lines field is dropped
-- **THEN** share% is dropped, then tok, with model and duration always retained
+- **THEN** tok is dropped, with model and duration always retained
 
