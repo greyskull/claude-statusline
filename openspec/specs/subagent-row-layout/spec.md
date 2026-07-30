@@ -114,8 +114,8 @@ is applied.
 
 The line-1 stats cluster SHALL carry a lines field showing the subagent's own
 `lines_read` and `lines_changed`, each humanised in the same form as the tok field
-(for example `1.2k`), rendered as a tight `<read> /<changed>` ratio — a single
-space before the `/`, none after, with no icon on either side. This no-icon
+(for example `1.2k`), rendered as a tight `<read> / <changed>` ratio — a
+space on both sides of the `/`, with no icon on either side. This no-icon
 notation was adopted (commit ad10872) in place of an earlier per-figure-glyph
 form specifically because per-figure icons cost extra width the crowded
 subagent cohort display could not spare. The field SHALL be fixed-width in the
