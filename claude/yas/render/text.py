@@ -198,15 +198,18 @@ def _middle_ellipsis(text: str, max_w: int) -> str:
 # ASCII -> Unicode superscript glyphs for section labels. Every glyph is a
 # non-PUA, width-1 character (modifier letters + the superscript block), so
 # `_visible_width(superscript(s)) == len(s)` holds. Characters with no standard
-# superscript form (e.g. 'q', and capitals C/F/Q/S/X/Y/Z) are intentionally
+# superscript form (e.g. 'q', and capitals F/Q/S/X/Y/Z) are intentionally
 # absent and pass through unchanged — substituting a wrong-letter or wide glyph
 # would break the width-equals-length invariant the label overlay relies on.
+# 'C' uses U+A7F2 MODIFIER LETTER CAPITAL C (Latin Extended-D) — the only
+# standard superscript-style capital C; it is not in the Private Use Area, so
+# it is exempt from the PUA hoist rule, but it's still narrow (width 1).
 _SUPERSCRIPT = {
     'a': 'ᵃ', 'b': 'ᵇ', 'c': 'ᶜ', 'd': 'ᵈ', 'e': 'ᵉ', 'f': 'ᶠ', 'g': 'ᵍ',
     'h': 'ʰ', 'i': 'ⁱ', 'j': 'ʲ', 'k': 'ᵏ', 'l': 'ˡ', 'm': 'ᵐ', 'n': 'ⁿ',
     'o': 'ᵒ', 'p': 'ᵖ', 'r': 'ʳ', 's': 'ˢ', 't': 'ᵗ', 'u': 'ᵘ', 'v': 'ᵛ',
     'w': 'ʷ', 'x': 'ˣ', 'y': 'ʸ', 'z': 'ᶻ',
-    'A': 'ᴬ', 'B': 'ᴮ', 'D': 'ᴰ', 'E': 'ᴱ', 'G': 'ᴳ', 'H': 'ᴴ', 'I': 'ᴵ',
+    'A': 'ᴬ', 'B': 'ᴮ', 'C': 'ꟲ', 'D': 'ᴰ', 'E': 'ᴱ', 'G': 'ᴳ', 'H': 'ᴴ', 'I': 'ᴵ',
     'J': 'ᴶ', 'K': 'ᴷ', 'L': 'ᴸ', 'M': 'ᴹ', 'N': 'ᴺ', 'O': 'ᴼ', 'P': 'ᴾ',
     'R': 'ᴿ', 'T': 'ᵀ', 'U': 'ᵁ', 'V': 'ⱽ', 'W': 'ᵂ',
     '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶',
@@ -264,6 +267,37 @@ def fmt_tok(n: int) -> str:
     if n >= 1000:
         return f'{n/1000:.1f}K'
     return str(n)
+
+
+def fmt_tok_fixed(n: int) -> str:
+    """3-significant-figure `fmt_tok` variant for constant-width subagent-row columns.
+
+    `fmt_tok` always uses 1 decimal ('.1f'), so a single-digit mantissa ('7.5M')
+    and a double-digit one ('56.8K') land at different visible widths once the
+    unit suffix is added. Subagent-row columns (the tok/share cluster and the
+    lines-read/-written pair) stack many rows in a cohort and need every value
+    at the SAME width so the trailing '%'/unit glyphs line up — this variant
+    fixes that by using 2 decimals when the mantissa has 1 digit and 0 when it
+    has 3, so every value renders at 3 significant figures.
+
+    Deliberately NOT used by the session-level input/cache/output row or day
+    totals (`fmt_tok` unchanged there) — only per-subagent columns need
+    cross-row alignment; a single session/day row has nothing to align against.
+    """
+    if n >= 999_950_000:
+        div, suf = 1_000_000_000, 'B'
+    elif n >= 999_950:
+        div, suf = 1_000_000, 'M'
+    elif n >= 1000:
+        div, suf = 1_000, 'K'
+    else:
+        return str(n)
+    val = n / div
+    for decimals in (2, 1, 0):
+        s = f'{val:.{decimals}f}'
+        if len(s.split('.')[0]) == 3 - decimals:
+            return f'{s}{suf}'
+    return f'{val:.0f}{suf}'  # defensive fallback; every n above should hit the loop
 
 
 def fmt_dur(seconds: float) -> str:

@@ -15,8 +15,17 @@ from yas.constants import (
     GLYPH_HOURGLASS,
     GLYPH_RENAMED,
     GLYPH_WF_DIVIDER,
+    LINES_LABEL,
     RESET,
+    SUBAGENT_DESC_FLOOR,
     SUBAGENT_DISPLAY_CAP,
+    SUBAGENT_NAME_MAX,
+    SUBAGENT_RETENTION_SECONDS,
+    SUBAGENT_STATS_ACTIVITY_GAP,
+    subagent_is_terminal,
+    subagent_status,
+    SUBAGENT_TREE_PLAN_PAD,
+    SUBAGENT_TREE_PLAN_WIDTH,
     TOKENS_COST_MIN_WIDTH,
     TWO_COL_SUBAGENT_WIDTH,
     TOOL_COUNTS_LABEL,
@@ -25,10 +34,17 @@ from yas.constants import (
     WORKFLOW_RUN_CAP,
 )
 from yas.info import SessionView, _fmt_elapsed_clock
-from yas.info.subagents import RunningSubagent, read_last_prompt_ts
+from yas.info.subagents import RunningSubagent, cap_tree_groups, read_last_prompt_ts, tree_order
+from yas.render.metrics import (
+    subagent_cluster_field_offsets,
+    subagent_cluster_width,
+    subagent_dur_str,
+    subagent_type_label,
+)
 from yas.render.pill import Pill
+from yas.render.gradient import model_display
 from yas.renderer import Renderer
-from yas.render.text import _visible_width, _token_offsets
+from yas.render.text import _visible_width, _token_offsets, fmt_tok_fixed
 from yas.tokens import TickRecord
 
 # Characters that can start a dirty-status block in the plain-text path string.
@@ -126,6 +142,18 @@ def append_error_row(rows: list[RowSpec], cfg: Config, width: int, r: Renderer) 
     rows.append(RowSpec('bottom_border'))
 
 
+def plan_content_width(lines: list[str]) -> int:
+    """Intrinsic visible width of a rendered task checklist.
+
+    ``Renderer.task_row`` lays its item rows out to exactly the width it is
+    handed, so ``_visible_width`` of a rendered line always reports that width
+    rather than the width the content actually needs. Strip the ANSI first (a
+    trailing ``RESET`` sits after the padding, so a bare ``rstrip`` would miss
+    it), then drop trailing blanks, and take the widest remaining line.
+    """
+    return max((_visible_width(_ANSI_RE.sub('', line).rstrip()) for line in lines), default=0)
+
+
 def zip_columns(
     left_lines: list[str],
     right_lines: list[str],
@@ -151,6 +179,261 @@ def zip_columns(
         right = f'{right}{" " * max(0, right_w - _visible_width(right))}'
         rows.append(f'{left} {divider} {right}')
     return rows
+
+
+def select_visible_cohort(
+    visible_subs: list[RunningSubagent],
+    cap: int,
+    *,
+    tree: bool,
+    now: float | None = None,
+) -> list[RunningSubagent]:
+    """Apply retention, cascade-clear, then the display cap to a raw cohort.
+
+    Retention: a terminal (non-running) row drops outright once
+    ``SUBAGENT_RETENTION_SECONDS`` have passed since its ``end_ts`` — a
+    maximum, not a guarantee; the cap below can still evict it sooner.
+
+    Cascade clear: once a parent reaches any terminal status, every
+    descendant still showing 'running' is forced to the parent's terminal
+    status (and end_ts) too. This is sound by construction — a notification
+    only fires once an agent has no live children, so a 'running' descendant
+    at that point is a missed notification, not live work — and it prevents
+    a stale child from pinning a finished parent's cohort open forever.
+
+    Eviction: tree mode defers to ``cap_tree_groups`` (whole-group eviction,
+    oldest-completion-first, never separating a live parent from a running
+    child); flat mode keeps the existing trailing-slice cap. Both keep every
+    running row before evicting any terminal one, and terminal rows are
+    always evicted oldest-``end_ts``-first regardless of which terminal
+    state they ended in.
+    """
+    if now is None:
+        now = time.time()
+
+    visible_subs = [
+        sub for sub in visible_subs
+        if not subagent_is_terminal(subagent_status(sub))
+        or now - sub.end_ts <= SUBAGENT_RETENTION_SECONDS
+    ]
+
+    by_id: dict[str, RunningSubagent] = {}
+    for sub in visible_subs:
+        if sub.agent_id:
+            by_id[sub.agent_id] = sub
+            by_id[sub.agent_id.removeprefix('agent-')] = sub
+
+    def terminal_ancestor(sub: RunningSubagent) -> RunningSubagent | None:
+        seen: set[int] = set()
+        parent = by_id.get(sub.parent_id) if sub.parent_id else None
+        while parent is not None and id(parent) not in seen:
+            if subagent_is_terminal(subagent_status(parent)):
+                return parent
+            seen.add(id(parent))
+            parent = by_id.get(parent.parent_id) if parent.parent_id else None
+        return None
+
+    for sub in visible_subs:
+        if subagent_is_terminal(subagent_status(sub)):
+            continue
+        ancestor = terminal_ancestor(sub)
+        if ancestor is None:
+            continue
+        try:
+            sub.status  = subagent_status(ancestor)
+            sub.end_ts  = ancestor.end_ts
+        except AttributeError:
+            pass  # `.status` isn't a slot on this build yet — nothing to cascade.
+
+    if tree:
+        # Tree mode: cap by whole parent+descendant group so a still-running
+        # parent can't be evicted while a finished child (later timestamp)
+        # lingers and fills the flat cap's slice.
+        return cap_tree_groups(visible_subs, cap)
+    return visible_subs[-cap:]
+
+
+def subagent_cells(
+    visible_subs: list[RunningSubagent],
+    tree: bool,
+) -> list[tuple[RunningSubagent, str]]:
+    """Pair each visible subagent with its tree-branch prefix.
+
+    Flat mode (``tree`` False, the default) returns the cohort unchanged with
+    empty prefixes, so the rendering is byte-identical to before. Tree mode
+    reorders parent-first via ``tree_order`` and builds the branch prefix:
+    depth-0 roots carry none; a child gets ``'├ '`` (``'└ '`` when it is its
+    parent's last child), indented two spaces per extra nesting level.
+    """
+    if not tree:
+        return [(sub, '') for sub in visible_subs]
+    cells: list[tuple[RunningSubagent, str]] = []
+    for sub, depth, last in tree_order(visible_subs):
+        if depth == 0:
+            prefix = ''
+        else:
+            prefix = '  ' * (depth - 1) + ('└ ' if last else '├ ')
+        cells.append((sub, prefix))
+    return cells
+
+
+def tree_desc_content_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+    """Widest `sub.description` string across a tree cohort's visible rows.
+
+    Used by `tree_columns` to size the description column to what the cohort
+    actually needs (content-measured) rather than a fixed guarantee/fraction
+    of the terminal width — the same "measure, don't assume" pattern as
+    `tree_model_width`/`tree_lines_width`. A subagent's
+    `description` is set once at spawn and doesn't change frame-to-frame
+    (unlike `last_activity`, which does), so measuring it here carries none
+    of the jitter risk that measuring the activity snippet would.
+    """
+    return max((_visible_width(sub.description or '') for sub, _ in cells), default=0)
+
+
+def tree_columns(
+    cells: list[tuple[RunningSubagent, str]],
+    width: int,
+    *,
+    cluster_full_w: int = 0,
+    model_w: int = 0,
+) -> tuple[int, int, int]:
+    """Compute the (desc_col, stats_col, activity_col) anchors for tree-single rows.
+
+    ``desc_col`` is the widest (prefix + duration + type + model) front-field
+    across the cohort, plus the leading gap before ' · description' — so
+    every row's description starts at the same absolute column regardless of
+    its own prefix depth, type-name length, or model-label width (the
+    renderer pads the shorter rows' type field to match). ``model_w`` is the
+    cohort's `tree_model_width` — the model field now lives in the front
+    cluster (`<time> <elbow> <name> <model>`), not the stats cluster, so it
+    must be folded into this front-field measurement.
+
+    Priority (inverted from the earlier design): the description/activity text
+    is the ELASTIC side of the row and truncates first as the terminal
+    narrows; the lines/share%/tok stats cluster is protected and sheds only
+    once the description is already at its floor (`SUBAGENT_DESC_FLOOR`). So
+    ``stats_col`` — where the cluster's leading '·' lands — is placed at
+    ``desc_col + 3 + min(cohort's longest actual description, available room)``:
+    it grows with the description's real content (never truncating on a wide
+    terminal just because of a fixed cap) but never pads the column out past
+    what the longest description needs (no dead gutter on a wide terminal
+    with short descriptions either). ``cluster_full_w`` (the fully-populated
+    cluster's measured width — see `render.metrics.subagent_cluster_width`)
+    is what "available room" is computed against: room is only handed to the
+    description once the full cluster plus a minimal activity gap are
+    accounted for; past that, the description is held at its floor and the
+    cluster starts shedding fields instead (see the "anchored" branch of
+    `Renderer.subagent_row`).
+    """
+    now      = time.time()
+    desc_col = 0
+    desc_content_w = tree_desc_content_width(cells)
+    for sub, prefix in cells:
+        prefix_w = _visible_width(prefix)
+        # dur_s is NOT fixed-width (fmt_dur grows an extra digit past 9
+        # minutes/hours: '3m36s' is 5 chars, '40m23s' is 6) — measure the
+        # actual string `subagent_row` will render, or a long-running parent
+        # row silently claims one column less than it needs and every
+        # shorter-duration child row drifts left of it. See subagent_dur_str.
+        # The name is measured via `subagent_type_label` (includes the ×N
+        # resume suffix `subagent_row` renders) capped at SUBAGENT_NAME_MAX
+        # (the renderer truncates past that); +3 + model_w: the ' X <model>'
+        # field after the name, where X is the run-state marker/separator
+        # glyph (0 when model_w is 0, e.g. an empty cohort) — keep all of it
+        # in lockstep with `subagent_row`'s own front_w formula.
+        dur_w      = _visible_width(subagent_dur_str(sub, now))
+        model_gap  = 3 if model_w else 0  # ' X ' marker/separator ahead of the model field
+        name_w     = min(_visible_width(subagent_type_label(sub)), SUBAGENT_NAME_MAX)
+        front_w    = dur_w + 1 + name_w + model_gap + model_w  # dur + ' ' + type + marker + model
+        desc_col   = max(desc_col, prefix_w + front_w + 1)  # +1: leading space of ' · '
+
+    # Everything after `desc_col + 3` (the ' · ' before the description) is up
+    # for grabs between the description, the cluster, and the activity gap.
+    # Reserve the full cluster plus a minimal activity gap (room for at least
+    # the model-only fallback) first; whatever's left is what the description
+    # is allowed to grow into, capped by what it actually needs so a short
+    # cohort of descriptions never gets padded out into a gutter.
+    activity_floor = 16  # model-only fallback + a breath of activity text
+    room_after_desc_col = max(0, width - desc_col - 3)
+    room_for_desc        = max(0, room_after_desc_col - cluster_full_w - activity_floor)
+    desc_w = min(desc_content_w, max(SUBAGENT_DESC_FLOOR, room_for_desc))
+    # Never grow past the row's own width (degenerate very-narrow case).
+    desc_w = max(0, min(desc_w, room_after_desc_col))
+    stats_col = desc_col + 3 + desc_w
+
+    # The activity column starts after the cluster's full width plus the
+    # constant stats/activity gap, so wider terminals — where the description
+    # didn't need all its "room for full cluster" allotment — hand the extra
+    # space straight to the activity column instead of leaving it as a dead
+    # gutter between the description and the cluster. Floored at
+    # `stats_col + activity_floor` (room for the model-only fallback) and
+    # capped at the row's own width.
+    activity_col = max(stats_col + activity_floor, stats_col + cluster_full_w + SUBAGENT_STATS_ACTIVITY_GAP)
+    activity_col = min(activity_col, width)  # never past the row's target width
+    # Degenerate very-narrow case: clamping activity_col down to `width` can
+    # leave less than the activity-floor gap between it and stats_col (the
+    # description was already squeezed to its floor and there still isn't
+    # room). Pull stats_col back in step so the gap invariant callers rely on
+    # (`activity_col >= stats_col + 16`) always holds — the description
+    # degrades below its floor rather than the whole row producing
+    # nonsensical overlapping columns.
+    if activity_col < stats_col + activity_floor:
+        stats_col = max(desc_col + 3, activity_col - activity_floor)
+    return desc_col, stats_col, activity_col
+
+
+def oneline_name_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+    """Widest branch-prefix + type-label run across a cohort's rows.
+
+    Passed to `Renderer.subagent_row` as `oneline_name_w` so the one-line
+    collapse form pads every row's name field to a common width — the
+    ' · model' column then starts at the same offset down the cohort,
+    mirroring the twoline form's `tree_desc_col` alignment.
+    """
+    return max(
+        (_visible_width(prefix)
+         + min(_visible_width(subagent_type_label(sub)), SUBAGENT_NAME_MAX)
+         for sub, prefix in cells),
+        default=0,
+    )
+
+
+def tree_model_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+    """Widest model label actually present in this tree cohort (measured,
+    not fixed).
+
+    The tree row embeds the model field directly in the front cluster
+    (`<time> <elbow> <name> <model>`, ahead of the description), padded to
+    this width so every row's model column starts and ends at the same
+    offset down the cohort — but the column itself grows/shrinks with
+    whichever models are actually running, rather than reserving a fixed
+    width sized for a worst-case label like `'sonnet[1m]'` regardless of
+    cohort content. `default=0` covers the empty-cohort case.
+    """
+    return max((_visible_width(model_display(sub.model)) for sub, _ in cells), default=0)
+
+
+def tree_lines_width(cells: list[tuple[RunningSubagent, str]], per_agent: dict[str, tuple[int, int]]) -> int:
+    """Widest `fmt_tok` string any cohort row's read/changed count needs.
+
+    Passed to `Renderer.subagent_row` as `tree_lines_w` so the Lines Read/
+    Changed field reserves only as much column width as this cohort's actual
+    counts require, instead of always assuming `fmt_tok`'s full 6-char ceiling
+    (`'999.9B'`) — the same "measure, don't assume" fix already applied to the
+    duration field (`subagent_dur_str`), since `fmt_tok`'s output is equally
+    NOT fixed-width. Falls back to 1 for an all-idle cohort (no lines data at
+    all), so a idle row's blank-field width still matches a populated one.
+    """
+    widths = []
+    for sub, _ in cells:
+        pair = per_agent.get(sub.jsonl_path)
+        if pair is None:
+            continue
+        read, changed = pair
+        widths.append(len(fmt_tok_fixed(read)))
+        widths.append(len(fmt_tok_fixed(changed)))
+    return max(widths, default=1)
 
 
 def workflow_divider_col(width: int) -> int:
@@ -284,7 +567,8 @@ def build_narrow(
     tasks     = view.tasks
     subagents = view.subagents
     last_prompt_ts = read_last_prompt_ts(session.session_id)
-    visible_subs   = subagents.visible(time.time(), last_prompt_ts)[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs   = subagents.visible(time.time(), last_prompt_ts)
+    visible_subs = select_visible_cohort(visible_subs, SUBAGENT_DISPLAY_CAP, tree=view.cfg.subagent_tree)
     spec = LayoutSpec(width=width, fill=fill, session_id=session.session_id)
     if pill_pct:
         rows: list[RowSpec] = [
@@ -306,9 +590,14 @@ def build_narrow(
             rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     if visible_subs:
-        for sub in visible_subs:
+        cells = subagent_cells(visible_subs, view.cfg.subagent_tree)
+        name_w = oneline_name_width(cells)
+        model_w = tree_model_width(cells)
+        for sub, prefix in cells:
             for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
-                                       stats_col=100 if width >= 125 else None).split('\n'):
+                                       stats_col=100 if width >= 125 else None,
+                                       tree_prefix=prefix, oneline_name_w=name_w,
+                                       oneline_model_w=model_w).split('\n'):
                 rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     wf_rows = build_workflow_rows(view, width, r, per_agent=False)
@@ -374,16 +663,22 @@ def build_medium(
     tasks     = view.tasks
     subagents = view.subagents
     last_prompt_ts = read_last_prompt_ts(session.session_id)
-    visible_subs   = subagents.visible(time.time(), last_prompt_ts)[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs   = subagents.visible(time.time(), last_prompt_ts)
+    visible_subs = select_visible_cohort(visible_subs, SUBAGENT_DISPLAY_CAP, tree=view.cfg.subagent_tree)
     rows: list[RowSpec] = [top_row, content_row, sep_row]
     if tasks.is_visible():
         for line in r.task_row(tasks, width - 4):
             rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     if visible_subs:
-        for sub in visible_subs:
+        cells = subagent_cells(visible_subs, view.cfg.subagent_tree)
+        name_w = oneline_name_width(cells)
+        model_w = tree_model_width(cells)
+        for sub, prefix in cells:
             for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
-                                       stats_col=100 if width >= 125 else None).split('\n'):
+                                       stats_col=100 if width >= 125 else None,
+                                       tree_prefix=prefix, oneline_name_w=name_w,
+                                       oneline_model_w=model_w).split('\n'):
                 rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
     wf_rows = build_workflow_rows(view, width, r, per_agent=False)
@@ -433,12 +728,18 @@ def build_wide(
         session.effort.level if session.thinking.enabled else '',
         fast_mode=session.fast_mode,
     )
+    # Reading `view.tool_counts` here forces its transcript scan on every wide
+    # render (previously only when `cfg.show_tool_uses` was on, for the
+    # per-tool row further down) — needed to feed the session-total lines
+    # read/changed segment into `tokens_cost` below. Accepted +2.9ms cost per
+    # design.md Decision 6.
     line_tokens, vsep_cols, _mark_col, tokens_min_w = r.tokens_cost(
         usage.billed_in, usage.cache_read, usage.out,
         token_log.day_in, token_log.day_cache_read, token_log.day_out,
         sess_cost, day_cost, tok_rate,
         session.session_id, width, fill, view.cfg.show_day_stats,
         view.cfg.justify,
+        lines=(view.tool_counts.lines_read, view.tool_counts.lines_changed),
     )
     # The three-segment tokens │ cost │ rate row is fixed-content-width: at the
     # bottom of the wide band (box ~80-84) it cannot hold both columns plus the
@@ -826,13 +1127,21 @@ def build_wide(
                 tok_labels.append((_cache_lbl, _cache_anchor))
             if _out_i != -1:
                 tok_labels.append((f'output{_suf}', 3 + _out_i))
-            # Centre `cost` within its cell (between the two vseps) instead of
+            # Centre `cost` within its cell (between the last two vseps) instead of
             # left-anchoring at the cell's start. The cost cell is its own section
             # (bounded by vseps), so this never conflicts with the token labels.
+            # Index from the end: vsep_cols is a 2-tuple when the lines segment is
+            # shed and a 3-tuple when it's included (design.md Decision 8), and the
+            # cost cell is always the pair immediately preceding the sparkline.
             _cost_lbl = f'cost{_suf}'
-            _cost_mid = (vsep_cols[0] + vsep_cols[1]) // 2
-            tok_labels.append((_cost_lbl, max(vsep_cols[0] + 1, _cost_mid - len(_cost_lbl) // 2)))
-            tok_labels.append(('tokens over time', vsep_cols[1] + 2))
+            _cost_mid = (vsep_cols[-2] + vsep_cols[-1]) // 2
+            tok_labels.append((_cost_lbl, max(vsep_cols[-2] + 1, _cost_mid - len(_cost_lbl) // 2)))
+            tok_labels.append(('tokens over time', vsep_cols[-1] + 2))
+            # `lines read/changed` caption, centred between the first two vseps —
+            # only present when the segment itself is (len == 3; Decision 8).
+            if len(vsep_cols) == 3:
+                _lines_mid = (vsep_cols[0] + vsep_cols[1]) // 2
+                tok_labels.append((LINES_LABEL, max(vsep_cols[0] + 1, _lines_mid - len(LINES_LABEL) // 2)))
         rows.append(RowSpec('separator_dim', downs=vsep_cols, labels=tok_labels))
         for lt in line_tokens:
             rows.append(RowSpec('content', content=lt))
@@ -873,7 +1182,8 @@ def build_wide(
         pending_ups = ()
 
     last_prompt_ts = read_last_prompt_ts(session.session_id)
-    visible_subs   = subagents.visible(time.time(), last_prompt_ts)[-SUBAGENT_DISPLAY_CAP:]
+    visible_subs   = subagents.visible(time.time(), last_prompt_ts)
+    visible_subs = select_visible_cohort(visible_subs, SUBAGENT_DISPLAY_CAP, tree=view.cfg.subagent_tree)
 
     # Side-by-side composition (D2/D3/D5/D7): when the wide layout has BOTH a
     # visible checklist AND >=1 visible subagent, lay the checklist (left) and
@@ -887,22 +1197,51 @@ def build_wide(
         inner             = width - 4
         task_lines_full   = r.task_row(tasks, inner)
         longest_task_line = max((_visible_width(line) for line in task_lines_full), default=0)
-        left_w            = min(longest_task_line, inner * 45 // 100)
+        # Tree mode: size the plan column to its content — the longest rendered
+        # plan line plus SUBAGENT_TREE_PLAN_PAD — so every reclaimed column goes
+        # to the subagent tree instead of a band of trailing padding. `task_row`
+        # right-pads its item rows to the width it is handed, so the content
+        # width is measured off a probe render at the ceiling with trailing
+        # padding stripped (ANSI first, since a trailing RESET follows the pad).
+        # The ceiling is SUBAGENT_TREE_PLAN_WIDTH (a long plan never eats the
+        # whole box) clamped by the old 45%-of-inner cap, so a narrow box still
+        # degrades to the pre-tree behavior.
+        if view.cfg.subagent_tree:
+            plan_ceiling  = min(SUBAGENT_TREE_PLAN_WIDTH, inner * 45 // 100)
+            plan_content  = plan_content_width(r.task_row(tasks, plan_ceiling))
+            left_w        = min(plan_content + SUBAGENT_TREE_PLAN_PAD, plan_ceiling)
+        else:
+            left_w        = min(longest_task_line, inner * 45 // 100)
         right_w           = inner - 3 - left_w
         if right_w >= 40:
             side_by_side = True
             divider_col  = 3 + left_w + 1  # 1-indexed visual column of the │
             left_lines   = r.task_row(tasks, left_w)
+            right_cells  = subagent_cells(visible_subs, view.cfg.subagent_tree)
+            right_desc_col = right_stats_col = right_activity_col = None
+            right_model_w = right_lines_w = None
+            if view.cfg.subagent_tree:
+                right_model_w = tree_model_width(right_cells)
+                right_lines_w = tree_lines_width(right_cells, view.tool_counts.per_agent)
+                right_cluster_w = subagent_cluster_width(right_lines_w)
+                right_desc_col, right_stats_col, right_activity_col = tree_columns(
+                    right_cells, right_w, cluster_full_w=right_cluster_w, model_w=right_model_w,
+                )
             right_lines: list[str] = []
-            for sub in visible_subs:
+            for sub, prefix in right_cells:
                 right_lines.extend(
-                    r.subagent_row(sub, right_w, twoline=True, session_inout=session_inout).split('\n')
+                    r.subagent_row(sub, right_w, twoline=True, session_inout=session_inout,
+                                   stats_col=right_stats_col, tree_prefix=prefix,
+                                   tree_single=view.cfg.subagent_tree, tree_desc_col=right_desc_col,
+                                   tree_activity_col=right_activity_col, tree_model_w=right_model_w,
+                                   tree_lines_w=right_lines_w,
+                                   lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n')
                 )
             div_color = r.grad_at(divider_col - 1, width, fill=fill)
             divider   = f'{div_color}{BOX_V}{RESET}'
-            # `plan` over the checklist column, `subagents` over the cohort column.
+            # `plan` over the checklist column, `agent` over the cohort column.
             sbs_labels: list[tuple[str, int]] = (
-                [('plan', 3), ('subagents', divider_col + 2)] if view.cfg.labels else []
+                [('plan', 3), ('agent', divider_col + 10)] if view.cfg.labels else []
             )
             rows.append(RowSpec(sep_kind('separator_dim'), ups=pending_ups, downs=(divider_col,), labels=sbs_labels))
             for line in zip_columns(left_lines, right_lines, left_w, right_w, divider):
@@ -919,20 +1258,27 @@ def build_wide(
             pending_ups = ()
 
         if visible_subs:
-            sub_labels: list[tuple[str, int]] = [('subagents', 3)] if view.cfg.labels else []
+            sub_labels: list[tuple[str, int]] = [('agent', 11)] if view.cfg.labels else []
             rows.append(RowSpec(sep_kind('separator_dim'), ups=pending_ups, labels=sub_labels))
-            two_col = width >= TWO_COL_SUBAGENT_WIDTH and len(visible_subs) >= 2
+            sub_cells = subagent_cells(visible_subs, view.cfg.subagent_tree)
+            # Tree mode always stacks: a column-major pairing would tear the
+            # parent/child branches apart across the two columns.
+            two_col   = (width >= TWO_COL_SUBAGENT_WIDTH and len(visible_subs) >= 2
+                         and not view.cfg.subagent_tree)
             if two_col:
                 inner     = width - 4
                 half_w    = (inner - 5) // 2
                 div_color = r.grad_at(workflow_divider_col(width) - 1, width, fill=fill)
                 divider   = f'  {div_color}{GLYPH_WF_DIVIDER}{RESET}  '
-                left_count = (len(visible_subs) + 1) // 2  # ceil: left column gets the extra agent
-                left       = visible_subs[:left_count]
-                right      = visible_subs[left_count:]
+                left_count = (len(sub_cells) + 1) // 2  # ceil: left column gets the extra agent
+                left       = sub_cells[:left_count]
+                right      = sub_cells[left_count:]
 
-                def cell_lines(sub: RunningSubagent) -> list[str]:
-                    raw = r.subagent_row(sub, half_w, twoline=True, session_inout=session_inout)
+                def cell_lines(cell: tuple[RunningSubagent, str]) -> list[str]:
+                    sub, prefix = cell
+                    raw = r.subagent_row(sub, half_w, twoline=True, session_inout=session_inout,
+                                         tree_prefix=prefix,
+                                         lines=view.tool_counts.per_agent.get(sub.jsonl_path))
                     lines = raw.split('\n')
                     return [f'{ln}{" " * max(0, half_w - _visible_width(ln))}' for ln in lines]
 
@@ -945,9 +1291,67 @@ def build_wide(
                     for j in range(len(left_lines)):
                         rows.append(RowSpec('content', content=f'{left_lines[j]}{divider}{right_lines[j]}'))
             else:
-                for sub in visible_subs:
-                    for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=session_inout,
-                                               stats_col=100 if width >= 125 else None).split('\n'):
+                inner = width - 4
+                desc_col = stats_col_v = activity_col = None
+                model_w = lines_w = None
+                if view.cfg.subagent_tree:
+                    model_w = tree_model_width(sub_cells)
+                    lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)
+                    cluster_w = subagent_cluster_width(lines_w)
+                    desc_col, stats_col_v, activity_col = tree_columns(
+                        sub_cells, inner, cluster_full_w=cluster_w, model_w=model_w,
+                    )
+                    # Overlay column labels on the section header (the
+                    # `separator_dim` row just appended above): 'name' over the
+                    # desc column, 'model' over the front-embedded model
+                    # field, 'LOC r/w' over the lines column, 'log'
+                    # over the activity column. Derived
+                    # from the SAME anchors and field-offset math the rows
+                    # themselves use (desc_col/stats_col_v/activity_col plus
+                    # `subagent_cluster_field_offsets`) — never a hardcoded
+                    # guess, so the header can't drift from the data it labels.
+                    if view.cfg.labels and rows and rows[-1].labels is not None:
+                        _tok_off, lines_off = subagent_cluster_field_offsets(lines_w)
+                        # Model now lives at the tail of the front field
+                        # (`desc_col - 1` is where ' · description' starts;
+                        # the model field is the `model_w` cols immediately
+                        # before that, with a 2-col gap ahead of it).
+                        model_col = max(0, desc_col - 1 - model_w) if model_w else desc_col
+                        # The data row renders the lines field as
+                        # '<read> /<changed>' — `lines_w`-wide read, then a
+                        # space, then the '/'. Measured against the actual
+                        # rendered cluster (not re-derived from the field
+                        # widths alone — the tok field's own padding shifts
+                        # this by a column the naive arithmetic misses), the
+                        # '/' lands at `lines_off + lines_w` inside the stats
+                        # cluster. 'LOC r/w' has its own '/' at index 5
+                        # ('L','O','C',' ','r','/'), so anchoring the label
+                        # there — rather than at the field's start like the
+                        # full-word form — keeps the two '/'s stacked
+                        # regardless of the cohort's measured `lines_w`.
+                        loc_slash_col = stats_col_v + lines_off + lines_w
+                        loc_col = 3 + loc_slash_col - 5
+                        rows[-1].labels.extend([
+                            # +2: nudges 'name' off the desc column's exact
+                            # start so it settles visually under the name
+                            # values rather than flush against 'model'.
+                            ('name', 3 + desc_col + 2),
+                            ('model', 3 + model_col),
+                            ('LOC r/w', loc_col),
+                            ('log', 3 + activity_col),
+                        ])
+                else:
+                    stats_col_v = 100 if width >= 125 else None
+                name_w = oneline_name_width(sub_cells)
+                oneline_model_w = tree_model_width(sub_cells)
+                for sub, prefix in sub_cells:
+                    for line in r.subagent_row(sub, inner, twoline=width > 100, session_inout=session_inout,
+                                               stats_col=stats_col_v,
+                                               tree_prefix=prefix, tree_single=view.cfg.subagent_tree,
+                                               tree_desc_col=desc_col, tree_activity_col=activity_col,
+                                               tree_model_w=model_w, tree_lines_w=lines_w,
+                                               oneline_name_w=name_w, oneline_model_w=oneline_model_w,
+                                               lines=view.tool_counts.per_agent.get(sub.jsonl_path)).split('\n'):
                         rows.append(RowSpec('content', content=line))
             pending_ups = ()
 

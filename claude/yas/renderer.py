@@ -8,7 +8,7 @@ import zlib
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from yas.render.borders import BorderRenderer
 from yas.constants import (
@@ -56,13 +56,18 @@ from yas.constants import (
     GLYPH_CLEAR,
     GLYPH_HOURGLASS,
     GLYPH_IN,
+    GLYPH_LINES_READ,
+    GLYPH_LINES_CHANGED,
+    LINES_SEGMENT_MIN_WIDTH,
     GLYPH_MODEL_LIGHT,
     GLYPH_PLUGINS,
     GLYPH_RENAMED,
     GLYPH_REPLYING,
     GLYPH_SKILLS,
-    GLYPH_SUBAGENT_ROW,
-    GLYPH_SUBAGENT_DONE,
+    GLYPH_SUBAGENT_RESUME,
+    subagent_is_terminal,
+    subagent_marker_glyph,
+    subagent_status,
     GLYPH_TASKS,
     GLYPH_TASK_ACTIVE,
     GLYPH_TASK_DONE,
@@ -81,6 +86,10 @@ from yas.constants import (
     PILL_RIGHT,
     SEVEN_DAY_MINUTES,
     SEVEN_DAY_WARMUP_MINUTES,
+    STRIKE,
+    UNSTRIKE,
+    SUBAGENT_NAME_MAX,
+    SUBAGENT_STATS_ACTIVITY_GAP,
     TASK_HEADER_RIGHT_GAP_MIN,
     WF_NAME_MIN,
     WF_PHASE_DOT,
@@ -88,6 +97,7 @@ from yas.constants import (
 )
 from yas.render.gradient import (
     GradientEngine,
+    model_display,
     model_key,
     paint_bg_span,
     pill_gradient_fg,
@@ -97,14 +107,14 @@ from yas.render.gradient import (
 )
 from yas.context_state import context_state
 from yas.info.git import GitInfo
-from yas.render.metrics import burndown_delta, subagent_share
+from yas.render.metrics import burndown_delta, fmt_lines_pair, subagent_dur_str, subagent_type_label
 from yas.render.pill import Pill
 from yas.render.tasks_view import fmt_duration, select_window, total_elapsed
 from yas.session import ContextWindow, RateBucket, RateLimits
 from yas.info.subagents import RunningSubagent
 from yas.info.workflows import RunningWorkflow
 from yas.info.tasks import TaskList
-from yas.render.text import _middle_ellipsis, _visible_width, fmt_dur, fmt_tok
+from yas.render.text import _middle_ellipsis, _visible_width, fmt_tok, fmt_tok_fixed
 from yas.tokens import TokenRate
 
 if TYPE_CHECKING:
@@ -174,6 +184,28 @@ def _ctx_fill_ratio(ctx: ContextWindow, soft_limit: int) -> tuple[float, float]:
     fill_ratio = min(_ctx_used_tokens(ctx) / soft_limit, 1.0)
     pct_soft   = fill_ratio * 100.0
     return fill_ratio, pct_soft
+
+
+def _best_fit_cluster(
+    build_cluster: Callable[[bool, bool], str],
+    fits: Callable[[str], bool],
+) -> str:
+    """Pick the richest subagent stats cluster that satisfies `fits`.
+
+    Shared shed ladder (Decision 10) for `Renderer.subagent_row`'s anchored
+    and right-aligned branches: start from the model-only fallback, then try
+    progressively richer clusters (lines+tok, then tok-only), keeping the
+    first candidate that fits. The two branches differ only in what "fits"
+    means (slack past a fixed anchor column vs. slack alongside the front
+    field), which is why `fits` is a caller-supplied predicate.
+    """
+    cluster = build_cluster(False, False)  # model-only fallback
+    for show_lines, show_tok in ((True, True), (False, True)):
+        cand = build_cluster(show_lines, show_tok)
+        if fits(cand):
+            cluster = cand
+            break
+    return cluster
 
 
 # ---------------------------------------------------------------------------
@@ -743,6 +775,34 @@ class Renderer:
             return f'{GLYPH_REPLYING} {raw}'
         return ''
 
+    def _subagent_desc_tint(
+        self, desc_text: str, desc_max: int, is_done: bool,
+    ) -> tuple[str, int]:
+        """Truncate + colour-tint a subagent row's description field.
+
+        Shared by `subagent_row`'s anchored and right-aligned branches, which
+        differ only in how `desc_max` (the column budget for the description)
+        is derived. Returns `(sep_desc, sep_desc_w)`: the rendered
+        ' · <description>' segment (empty if there's no room) and its visible
+        width (0 when empty).
+        """
+        if not desc_text or desc_max <= 0:
+            return '', 0
+        if _visible_width(desc_text) > desc_max:
+            desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
+        desc_w = _visible_width(desc_text)
+        if is_done:
+            # Strikethrough the description (not the type/model/token fields)
+            # to mark the task itself as finished; SGR-only, applied after
+            # truncation so it never perturbs the width math above.
+            sep_desc = (
+                f' {self.CTX_DIM}·{self.R} '
+                f'{self.CTX_DIM}{STRIKE}{ITALIC}{desc_text}{UNSTRIKE}{self.R}'
+            )
+        else:
+            sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{ITALIC}{desc_text}{self.R}'
+        return sep_desc, 3 + desc_w
+
     def subagent_row(
         self,
         sub: RunningSubagent,
@@ -751,60 +811,255 @@ class Renderer:
         twoline: bool = False,
         session_inout: int = 0,
         stats_col: int | None = None,
+        tree_prefix: str = '',
+        tree_single: bool = False,
+        tree_desc_col: int | None = None,
+        tree_activity_col: int | None = None,
+        tree_model_w: int | None = None,
+        tree_lines_w: int | None = None,
+        lines: tuple[int, int] | None = None,
+        oneline_name_w: int | None = None,
+        oneline_model_w: int | None = None,
     ) -> str:
-        now     = time.time()
-        is_done = sub.end_ts > 0
-        if is_done:
-            dur = max(0.0, sub.end_ts - sub.first_timestamp)
-        else:
-            dur = max(0.0, now - sub.first_timestamp) if sub.first_timestamp > 0 else 0.0
-        dur_s   = fmt_dur(dur).rjust(5)
+        # Tree view: a plain branch prefix ('├ ', '└ ', indented deeper) eats
+        # visible columns out of the front-field budget (between the duration
+        # and the agent name — see below), so the stats/activity anchors
+        # shift left by the same amount to keep those columns straight across
+        # mixed depths.
+        # The branch elbow now renders INLINE between the duration and the
+        # agent name (`<time> <elbow> <name>`, not `<elbow> <time> <name>`),
+        # so it occupies columns inside `content_width`/`front_w` rather than
+        # being prepended ahead of it. `content_width` therefore stays the
+        # full row width — no coordinate shift here — and `stats_col`/
+        # `tree_desc_col`/`tree_activity_col` (already absolute, row-start-
+        # relative offsets per `layout.tree_columns`) are used as-is.
+        prefix_w = _visible_width(tree_prefix)
+        now         = time.time()
+        status      = subagent_status(sub)
+        is_done     = subagent_is_terminal(status)
+        # Terminal tint for the duration/name/marker fields: green for a
+        # successful finish, red for any other ending (failed, killed,
+        # stopped). Only meaningful when is_done.
+        done_clr    = self.safe if status == 'completed' else self.alert
+        run_count   = getattr(sub, 'run_count', 0)
+        is_resumed  = (not is_done) and (getattr(sub, 'resumed', False) or run_count >= 1)
+        dur_s   = subagent_dur_str(sub, now)
 
-        short_model = model_key(sub.model)  # 'opus'/'sonnet'/'haiku'/'fable'/'mythos'/'other'
+        # Display form keeps any bracketed context-size suffix (e.g. 'sonnet[1m]')
+        # from agent frontmatter; colour lookup still keys off the bare family.
+        short_model = model_display(sub.model)
         model_clr   = self.model_colour(sub.model)
         ctx_clr     = self.risk_zone_color(sub.total_input)
 
         step      = rainbow_step()
         c_marker  = rainbow_at(step, 12)
-        type_text = sub.agent_type or '?'
+        # Includes the ×N resume suffix — shared with layout's column-width
+        # measurement (see metrics.subagent_type_label). Capped at
+        # SUBAGENT_NAME_MAX so one pathological agent type can't push the
+        # model/description columns off the row (the layout's cohort
+        # measurements apply the same cap).
+        type_text = subagent_type_label(sub)
+        if _visible_width(type_text) > SUBAGENT_NAME_MAX:
+            type_text = type_text[:SUBAGENT_NAME_MAX - 1] + ELLIPSIS
 
         target_w = content_width  # explicit content width supplied by the builder
 
         if twoline:
             # --- line 1: duration-first identity + right-aligned cluster (D6) ---
-            # No run-state marker: a Done agent dims every field and freezes its
-            # duration; a running one keeps live colours and a ticking duration.
+            # Outside tree mode there's no run-state marker here: a Done
+            # agent dims every field and freezes its duration; a running one
+            # keeps live colours and a ticking duration. In tree mode the
+            # run-state glyph rides in the name/model separator (see
+            # `mid_marker` below) rather than a leading marker column.
             # The right cluster is `· {share%}  {tok} · {model}`; under width
             # pressure the description truncates first, then the cluster sheds
             # share% and then tok. The model and the front duration always stay.
-            front_w = 5 + 1 + _visible_width(type_text)  # dur(5) + ' ' + type
+            # Tree-single mode embeds the model label directly in the front
+            # field — `<time> <elbow> <name> <marker> <model>` — immediately
+            # after the name, ahead of the ' · description' separator, padded
+            # to the cohort's widest label (tree_model_w) when a cohort-wide
+            # width is supplied, else shown unpadded (a lone row rendered
+            # outside a cohort anchor). The separator between name and model
+            # doubles as the run-state marker: '✓'/'✗' when finished, '↺' on
+            # a resumed run, a plain '·' while running — saving the leading
+            # marker column the row used to reserve. Gated on `tree_single`
+            # itself (not on `tree_desc_col` being set) so a standalone
+            # tree_single row still gets its model field. Outside tree_single
+            # the model stays in the stats cluster (see `model_str` below).
+            front_model_gap = 3 if tree_single else 0  # ' X ' marker/separator before the model field
+            front_model_str = ''
+            if tree_single:
+                front_model_str = short_model.ljust(tree_model_w) if tree_model_w else short_model
+            front_model_w = _visible_width(front_model_str)
+            # dur_s is NOT fixed-width: fmt_dur grows an extra digit past 9
+            # minutes/hours ('3m36s' is 5 chars, '40m23s' is 6), so measure
+            # the actual string rather than assuming 5 — see subagent_dur_str.
+            dur_w    = _visible_width(dur_s)
+            # dur + ' ' + elbow + type + model; the elbow sits between the
+            # duration and the name (`<time> <elbow> <name>`), so it's part
+            # of the front-field budget rather than a separate leading
+            # segment.
+            front_w  = (dur_w + 1 + prefix_w + _visible_width(type_text)
+                        + front_model_gap + front_model_w)
 
-            share     = subagent_share(sub.total_input + sub.output, session_inout)
-            share_str = f'{share * 100:.1f}%' if share is not None else ''
-            tok_field = fmt_tok(sub.total_input).rjust(5)
-            model_str = short_model.rjust(6)
+            # Tree view: pad the type field so the front (duration + elbow +
+            # type + model) reaches a caller-supplied common width across the
+            # whole cohort — every row's ' · description' then starts at the
+            # same absolute column regardless of prefix depth or type-name
+            # length.
+            if tree_desc_col is not None:
+                front_w = max(front_w, tree_desc_col - 1)  # -1: leading space of ' · '
+                type_text = type_text.ljust(max(
+                    0, front_w - dur_w - 1 - prefix_w - front_model_gap - front_model_w,
+                ))
 
-            if is_done:
-                front_c = f'{self.CTX_DIM}{dur_s}{self.R} {self.CTX_DIM}{type_text}{self.R}'
+            # Tree single-line: the current-activity continuation moves onto
+            # line 1 as a right-hand column. The stats/model cluster right-
+            # aligns to a fixed `stats_w` (leaving a reserved activity column to
+            # its right) instead of flushing to the full content width, so the
+            # activity column starts at a consistent offset down the cohort.
+            stats_w = target_w
+            if tree_single:
+                if tree_activity_col is not None:
+                    # Caller-anchored: the cluster right-aligns so the ' · '
+                    # separator (SUBAGENT_STATS_ACTIVITY_GAP cols) lands the
+                    # activity text exactly at tree_activity_col.
+                    stats_w = max(front_w + 1, min(target_w, tree_activity_col - SUBAGENT_STATS_ACTIVITY_GAP))
+                else:
+                    # Legacy fallback (no cohort-wide anchor supplied): reserve
+                    # sized off the pre-prefix width so its absolute position
+                    # is identical at every tree depth.
+                    activity_reserve = min(48, content_width // 3)
+                    stats_w          = max(front_w + 1, target_w - activity_reserve)
+
+            # `fmt_tok_fixed` (3 significant figures) instead of `fmt_tok`: a
+            # subagent-row-only formatter so every row's tok reading lands at
+            # the SAME width regardless of mantissa digit count ('7.52M' /
+            # '3.50M' / '56.8K' are all 5 chars) — never applied to the
+            # session-level input/cache/output row or day totals, which keep
+            # `fmt_tok`'s original 1-decimal behaviour. `rjust(5)`:
+            # `fmt_tok_fixed`'s own docstring caps its output at 5 visible
+            # chars ("7.52M"); below 1000 it's an unsuffixed int of at most 3
+            # digits, so 5 is the guaranteed ceiling — same "measure the
+            # ceiling" reasoning the old `fmt_tok().rjust(6)` relied on.
+            # (The `(N.N%)` session-share suffix that used to follow this
+            # field has been removed — just the bare token count now.)
+            tok_field = fmt_tok_fixed(sub.total_input).rjust(5)
+            # Self-scoped lines read/changed (Decision 10): each of read/
+            # changed sheds independently — a subagent that read but didn't
+            # write (or vice versa) shows a blank for the zero side rather
+            # than a literal '0', while the OTHER side still renders. Every
+            # blank occupies exactly the width the populated field would have
+            # (the value's own width — no glyph any more, see below), so the
+            # cluster's total width — and therefore the constant activity gap
+            # after it in tree_single mode — stays deterministic regardless of
+            # which fields are populated.
+            # A subagent with no lines data at all (lines is None or (0, 0))
+            # still reserves the field's full column width — both sides
+            # blank-padded, same as the existing per-side blanking below —
+            # rather than omitting the field, so cohort rows without data
+            # stay aligned under sibling rows that do have data. Only the
+            # width-pressure shed ladder (`build_cluster`'s `show_lines`)
+            # drops the field entirely now.
+            read_lc, changed_lc = lines if lines is not None else (0, 0)
+            if tree_single:
+                # `tree_lines_w`: the cohort's own MEASURED max fmt_tok_fixed
+                # width (`layout.tree_lines_width`), not a hardcoded guess —
+                # sized to what this cohort's read/changed counts actually
+                # need. Falls back to 5 (fmt_tok_fixed's guaranteed max width)
+                # for callers that don't supply a cohort measurement.
+                lines_w = tree_lines_w if tree_lines_w is not None else 5
+                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc, width=lines_w, fixed=True)
             else:
-                front_c = f'{self.CTX}{dur_s}{self.R} {self.SKILLS}{type_text}{self.R}'
+                lines_w = 0
+                read_s, changed_s = fmt_lines_pair(read_lc, changed_lc, fixed=True)
+            # No icons here (unlike the session-level tokens/cost row's
+            # GLYPH_LINES_READ/GLYPH_LINES_CHANGED pair) — a tight
+            # '<read> /<written>' ratio notation instead, since this field
+            # repeats once per cohort row and the icons added noise without
+            # adding information the '/' doesn't already convey. A space on
+            # both sides of the '/' keeps the two right-justified figures
+            # visually distinct.
+            read_blank_w    = _visible_width(read_s)
+            changed_blank_w = _visible_width(changed_s)
+            read_part    = read_s if (lines is not None and read_lc) else ' ' * read_blank_w
+            changed_part = changed_s if (lines is not None and changed_lc) else ' ' * changed_blank_w
+            lines_field  = f'{read_part} / {changed_part}'
+            # Whether this row has ANY lines data at all — gates whether the
+            # non-tree cluster reserves the field's width when there's
+            # nothing to show. tree_single always reserves it (see
+            # `build_cluster` below) regardless of `has_lines`.
+            has_lines = lines is not None and bool(read_lc or changed_lc)
+            if not tree_single:
+                # Tree-single mode moves the model field into the front
+                # cluster (see `front_model_str` above); the flat two-line
+                # form keeps it in the stats cluster, unchanged.
+                model_str = short_model.rjust(6)
 
-            def build_cluster(show_share: bool, show_tok: bool) -> str:
+            # Elbow sits between the duration and the name — '<time> <elbow>
+            # <name>' — dim-coloured like the old prepended branch, whichever
+            # run state colours the rest of the front field.
+            elbow = f'{self.CTX_DIM}{tree_prefix}{self.R}' if prefix_w else ''
+            # Agent name (type_text) renders italic — ITALIC is opened right
+            # before the text and self.R (RESET) closes it along with the
+            # colour, matching the existing BOLD convention elsewhere in
+            # this method (open code, then a bare RESET at the end).
+            if is_done:
+                front_c = f'{done_clr}{dur_s}{self.R} {elbow}{done_clr}{ITALIC}{type_text}{self.R}'
+            else:
+                front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
+            if tree_single:
+                # Model sits in the front field now (see `front_model_str`
+                # above), immediately after the name/type. The single-glyph
+                # separator ahead of it doubles as the run-state marker —
+                # '✓'/'✗' when finished, '↺' on a resumed run, a plain '·'
+                # while running — always exactly one column, so the model/
+                # description columns never shift with run state.
+                model_field_clr = self.CTX_DIM if is_done else model_clr
                 if is_done:
-                    d   = self.CTX_DIM
-                    seg = f'{d}{MIDDLE_DOT}{self.R} '
-                    if show_share and share is not None:
-                        seg += f'{d}{share_str}{self.R}  '
+                    mid_marker = f'{done_clr}{subagent_marker_glyph(status)}{self.R}'
+                elif is_resumed:
+                    mid_marker = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R}'
+                else:
+                    mid_marker = f'{self.LABEL}{MIDDLE_DOT}{self.R}'
+                front_c += f' {mid_marker} {model_field_clr}{front_model_str}{self.R}'
+
+            # Cluster order (tree_single mode): '· tok · lines'. The model
+            # field has already moved into the front (see above) and is no
+            # longer part of this cluster. A dot-separated field precedes
+            # every field after the first — see
+            # `render.metrics.subagent_cluster_field_offsets`, the single
+            # source of truth this mirrors for the header-label anchors.
+            # Outside tree_single, the cluster still carries the model field
+            # (unchanged legacy '· lines · tok · model' order).
+            dot = f'{MIDDLE_DOT} '
+
+            def build_cluster(show_lines: bool, show_tok: bool) -> str:
+                d = self.CTX_DIM if is_done else self.LABEL
+                fields: list[str] = []
+                if tree_single:
                     if show_tok:
-                        seg += f'{d}{tok_field}{self.R} {d}{MIDDLE_DOT}{self.R} '
-                    return seg + f'{d}{model_str}{self.R}'
-                share_clr = self.gradient.gradient_color(share) if share is not None else ''
-                seg = f'{self.LABEL}{MIDDLE_DOT}{self.R} '
-                if show_share and share is not None:
-                    seg += f'{share_clr}{share_str}{self.R}  '
-                if show_tok:
-                    seg += f'{ctx_clr}{tok_field}{self.R} {self.LABEL}{MIDDLE_DOT}{self.R} '
-                return seg + f'{model_clr}{model_str}{self.R}'
+                        tok_clr = d if is_done else ctx_clr
+                        fields.append(f'{tok_clr}{tok_field}{self.R}')
+                    # tree_single ALWAYS reserves the lines field's width
+                    # when show_lines (width-pressure hasn't shed it) — even
+                    # with no data — so sibling rows in the cohort stay
+                    # column-aligned. The non-tree path below omits the
+                    # field entirely when there's no data (`has_lines`).
+                    if show_lines:
+                        fields.append(f'{d if is_done else self.white_brt}{lines_field}{self.R}')
+                else:
+                    if show_lines and has_lines:
+                        fields.append(f'{d if is_done else self.white_brt}{lines_field}{self.R}')
+                    if show_tok:
+                        tok_clr = d if is_done else ctx_clr
+                        fields.append(f'{tok_clr}{tok_field}{self.R}')
+                    model_clr_use = d if is_done else model_clr
+                    fields.append(f'{model_clr_use}{model_str}{self.R}')
+                if not fields:
+                    return ''
+                sep = f' {d}{dot}{self.R}'
+                return f'{d}{dot}{self.R}' + sep.join(fields)
 
             # Decide whether the stats cluster anchors at a fixed content
             # column (wide layouts) or right-aligns to the content edge. The
@@ -812,72 +1067,91 @@ class Renderer:
             # the slack to the right of `stats_col`; otherwise we fall through
             # to the right-aligned path so very narrow widths stay sane.
             model_only_w = _visible_width(build_cluster(False, False))
-            anchored     = stats_col is not None and (target_w - stats_col) >= model_only_w
+            anchored     = stats_col is not None and (stats_w - stats_col) >= model_only_w
 
             if anchored:
                 assert stats_col is not None  # narrowed by `anchored`
-                avail = target_w - stats_col  # slack to the right of the anchor
+                avail = stats_w - stats_col  # slack to the right of the anchor
                 # Pick the richest cluster that fits within the anchored slack.
-                cluster = build_cluster(False, False)  # model-only fallback
-                for show_share, show_tok in ((True, True), (False, True)):
-                    cand = build_cluster(show_share, show_tok)
-                    if _visible_width(cand) <= avail:
-                        cluster = cand
-                        break
+                # Shed ladder (Decision 10): lines is the FIRST field dropped
+                # under width pressure, then tok — model and duration are
+                # never shed.
+                cluster = _best_fit_cluster(
+                    build_cluster, lambda cand: _visible_width(cand) <= avail,
+                )
                 cluster_w = _visible_width(cluster)
 
                 # Truncate the description so it stops before the stats column
                 # with at least a 1-col gap. ' · ' separator is 3 cols wide.
                 desc_text  = sub.description or ''
                 desc_max   = stats_col - front_w - 3 - 1
-                sep_desc   = ''
-                sep_desc_w = 0
-                if desc_text and desc_max > 0:
-                    if _visible_width(desc_text) > desc_max:
-                        desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
-                    desc_w = _visible_width(desc_text)
-                    if is_done:
-                        sep_desc = f' {self.CTX_DIM}·{self.R} {self.CTX_DIM}{desc_text}{self.R}'
-                    else:
-                        sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{desc_text}{self.R}'
-                    sep_desc_w = 3 + desc_w
+                sep_desc, sep_desc_w = self._subagent_desc_tint(desc_text, desc_max, is_done)
 
                 # Anchor the cluster's first `·` at content-offset stats_col.
                 pad1  = max(1, stats_col - front_w - sep_desc_w)
                 line1 = f'{front_c}{sep_desc}{" " * pad1}{cluster}'
-                line1 += ' ' * max(0, target_w - _visible_width(line1))
+                line1 += ' ' * max(0, stats_w - _visible_width(line1))
             else:
                 # Pick the richest cluster that fits alongside the front + a 1-col gap.
-                cluster = build_cluster(False, False)  # model-only fallback
-                for show_share, show_tok in ((True, True), (False, True)):
-                    cand = build_cluster(show_share, show_tok)
-                    if front_w + 1 + _visible_width(cand) <= target_w:
-                        cluster = cand
-                        break
+                # Same shed ladder as the anchored branch above: lines first,
+                # then tok.
+                cluster = _best_fit_cluster(
+                    build_cluster,
+                    lambda cand: front_w + 1 + _visible_width(cand) <= stats_w,
+                )
                 cluster_w = _visible_width(cluster)
 
                 # Fill the description into the space left over (truncates first).
                 desc_text  = sub.description or ''
-                desc_max   = target_w - front_w - cluster_w - 1 - 3  # 1-col gap + ' · '
-                sep_desc   = ''
-                sep_desc_w = 0
-                if desc_text and desc_max > 0:
-                    if _visible_width(desc_text) > desc_max:
-                        desc_text = desc_text[:desc_max - 1] + '…'  # U+2026 HORIZONTAL ELLIPSIS
-                    desc_w = _visible_width(desc_text)
-                    if is_done:
-                        sep_desc = f' {self.CTX_DIM}·{self.R} {self.CTX_DIM}{desc_text}{self.R}'
-                    else:
-                        sep_desc = f' {self.LABEL}·{self.R} {self.CTX}{desc_text}{self.R}'
-                    sep_desc_w = 3 + desc_w
+                desc_max   = stats_w - front_w - cluster_w - 1 - 3  # 1-col gap + ' · '
+                sep_desc, sep_desc_w = self._subagent_desc_tint(desc_text, desc_max, is_done)
 
-                pad1  = max(1, target_w - front_w - sep_desc_w - cluster_w)
+                pad1  = max(1, stats_w - front_w - sep_desc_w - cluster_w)
                 line1 = f'{front_c}{sep_desc}{" " * pad1}{cluster}'
+
+            if tree_single:
+                # Append the current-activity column after the stats cluster.
+                # The model label (and, when tree_single, the share field) is
+                # now padded to a fixed width, so the cluster's own width is
+                # deterministic across rows and a CONSTANT
+                # SUBAGENT_STATS_ACTIVITY_GAP-col gap — rather than a variable
+                # fill-to-column pad — is enough to keep the activity column
+                # aligned down the cohort. The activity (tool glyph + verb, no
+                # `└` continuation marker) truncates with the usual ellipsis
+                # when tight. Dimmed like the old line 2.
+                # The gap now carries a '·' separator (' · ' plus trailing pad
+                # to the constant width) rather than bare spaces, matching the
+                # design mock's 'sonnet ·   <activity>'.
+                gap     = SUBAGENT_STATS_ACTIVITY_GAP  # ' · ' separator, no extra padding
+                dot_clr = self.CTX_DIM if is_done else self.LABEL
+                # Only append the separator + activity when the row actually
+                # has room past the stats cluster — a tight side-by-side
+                # column can leave less slack than the separator itself, and
+                # appending unconditionally used to push the row past the
+                # border. The '·' renders even when the activity itself is
+                # blank (a finished row), keeping the column separator
+                # continuous down the cohort.
+                avail_act = target_w - _visible_width(line1)
+                if avail_act >= gap:
+                    act_w    = avail_act - gap
+                    activity = self.subagent_activity(sub.last_activity, cap=max(0, act_w - 3))
+                    if _visible_width(activity) > act_w:
+                        activity = activity[:max(0, act_w - 1)] + ELLIPSIS
+                    line1 = f'{line1} {dot_clr}{MIDDLE_DOT}{self.R} {self.CTX_DIM}{activity}{self.R}'
+                line1 += ' ' * max(0, target_w - _visible_width(line1))
+                # Elbow is already embedded in front_c (between the duration
+                # and the name), so line1 needs no further prefixing here.
+                return line1
 
             # --- line 2: activity-only continuation, no right metrics (D6) ---
             # The snippet grows with the spare width line 2 has (no right
             # cluster lives here), but never past 100 cols before truncating.
-            avail2       = max(0, target_w - 6)  # '   '(3) + └ + '  '(2)
+            # `target_w2`: line 2 is indented by `prefix_w` spaces below (to
+            # sit under line 1's front field), so its OWN content budget is
+            # `target_w` minus that indent — otherwise the indented row would
+            # run `prefix_w` columns past the box.
+            target_w2    = max(1, target_w - prefix_w)
+            avail2       = max(0, target_w2 - 6)  # '   '(3) + └ + '  '(2)
             activity_cap = min(100, avail2)
             activity     = self.subagent_activity(sub.last_activity, cap=activity_cap)
             if _visible_width(activity) > avail2:
@@ -887,63 +1161,101 @@ class Renderer:
                 f'{self.CTX_DIM}{activity}{self.R}'
             )
             left2_w = 6 + _visible_width(activity)
-            pad2    = max(0, target_w - left2_w)
+            pad2    = max(0, target_w2 - left2_w)
             line2   = f'{left2}{" " * pad2}'
 
+            if prefix_w:
+                # Line 1 already carries the elbow inline (between duration
+                # and name); line 2 has no elbow of its own, but indents by
+                # the same width so its continuation glyph lines up under
+                # line 1's front field rather than under column 0.
+                return f'{line1}\n{" " * prefix_w}{line2}'
             return f'{line1}\n{line2}'
 
-        # --- one-line collapse (D6): drops ↑output; marker/type/verb on the
-        # left, model right-anchored into the metric column ---
-        # Only show activity status for running agents; done agents freeze state.
-        if is_done:
-            tool_verb = ''
-        else:
-            kind = sub.last_activity[0]
-            tool_verb = sub.last_activity[1] if kind == 'tool_use' else (
-                '(thinking)' if kind == 'thinking' else
-                '(replying)' if kind == 'text' else ''
-            )
+        # --- one-line collapse (narrow/medium widths): mirrors the wide/tree
+        # reading order — `<time> <elbow> <name> <marker> <model> · <tok>
+        # [· <activity>]` — duration on the LEFT like the tree rows, the
+        # token count in a fixed column straight after the model, and the
+        # activity/log as the LAST (elastic) column, filling whatever slack
+        # remains when there is meaningful room (medium) and dropped
+        # entirely when there isn't (narrow). No hourglass glyph ahead of
+        # the token count and no trailing duration column. The run-state
+        # marker rides in the name/model separator, matching the tree
+        # twoline form: '✓'/'✗' when finished, '↺' on a resumed run, a
+        # plain '·' while running.
+        elbow_n   = f'{self.CTX_DIM}{tree_prefix}{self.R}' if prefix_w else ''
+        dot_n_clr = self.CTX_DIM if is_done else self.LABEL
+        tok_n_clr = self.CTX_DIM if is_done else ctx_clr
+        tok_n     = fmt_tok_fixed(sub.total_input).rjust(5)
+        tok_n_w   = 3 + 5  # ' · ' + fixed 5-wide tok field
 
-        # The model is a fixed-width, right-justified field at the head of the
-        # right cluster so it forms a vertical column with the tokens and
-        # duration (also right-justified) down stacked rows. Reading order:
-        # `{model:>6}  {hourglass} {tok:>5}  {dur:>5}`. Model dims when Done.
-        model_field = short_model.rjust(6)
+        # Cohort alignment (the one-line counterpart of the twoline form's
+        # tree_desc_col / tree_model_w columns): the name and model render as
+        # fixed-width, left-justified fields sized to the cohort's widest
+        # (`oneline_name_w` / `oneline_model_w`), so the marker/model/tok
+        # separators land in the same column down every row. Under width
+        # pressure the FIELD widths shrink — name first (down to a small
+        # floor), then model — identically for every row in the cohort (the
+        # arithmetic uses only cohort-wide inputs), so rows stay
+        # column-aligned and individual names truncate with an ellipsis
+        # rather than one long row drifting its separators.
+        name_field_w  = oneline_name_w or (prefix_w + _visible_width(type_text))
+        model_field_w = oneline_model_w or _visible_width(short_model)
+        over = (_visible_width(dur_s) + 1 + name_field_w + 3 + model_field_w
+                + tok_n_w - target_w)
+        if over > 0:
+            shrink        = min(over, max(0, name_field_w - 8))  # 8: name floor
+            name_field_w -= shrink
+            over         -= shrink
+        if over > 0:
+            model_field_w = max(1, model_field_w - over)
+        avail_type = max(1, name_field_w - prefix_w)
+        if _visible_width(type_text) > avail_type:
+            type_text = type_text[:avail_type - 1] + ELLIPSIS
+        type_text = type_text.ljust(avail_type)
+        if _visible_width(short_model) > model_field_w:
+            model_field = short_model[:max(1, model_field_w - 1)] + ELLIPSIS
+        else:
+            model_field = short_model.ljust(model_field_w)
+
+        if is_done:
+            front_n = f'{done_clr}{dur_s}{self.R} {elbow_n}{done_clr}{ITALIC}{type_text}{self.R}'
+        else:
+            front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{ITALIC}{type_text}{self.R}'
         model_n_clr = self.CTX_DIM if is_done else model_clr
-        tok_n       = fmt_tok(sub.total_input).rjust(6)
-        right_n = (
-            f'{model_n_clr}{model_field}{self.R}'
-            f'  {ctx_clr}{GLYPH_HOURGLASS} {tok_n}{self.R}'
-            f'  {self.CTX}{dur_s}{self.R}'
-        )
-        right_n_w = _visible_width(right_n)
-
         if is_done:
-            left_n = (
-                f'{self.CTX_DIM}{GLYPH_SUBAGENT_DONE}{self.R}  '
-                f'{self.CTX_DIM}{type_text}{self.R}'
-            )
+            mid_n = f'{done_clr}{subagent_marker_glyph(status)}{self.R}'
+        elif is_resumed:
+            mid_n = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R}'
         else:
-            left_n = (
-                f'{c_marker}{BOLD}{GLYPH_SUBAGENT_ROW}{self.R}  '
-                f'{self.SKILLS}{type_text}{self.R}'
-                f'  {self.CTX}{tool_verb}{self.R}'
-            )
-        left_n_w = _visible_width(left_n)
-        # Budget the left segment so the row never overflows the right border:
-        # the bounded right cluster (model + hourglass + tok + dur) stays
-        # intact, and the marker/type/verb run truncates with a middle ellipsis
-        # when it would otherwise push past target_w (reserving a 1-col gap).
-        left_budget = target_w - right_n_w - 1
-        if left_n_w > left_budget:
-            left_n   = _middle_ellipsis(left_n, max(1, left_budget))
-            left_n_w = _visible_width(left_n)
-        # Right-anchor the metric cluster (model + hourglass + tok + dur) flush
-        # to the closing border so the model, tokens and elapsed columns line
-        # up down stacked rows; the slack between the left run and the cluster
-        # is the gap.
-        pad_n = max(1, target_w - left_n_w - right_n_w)
-        return f'{left_n}{" " * pad_n}{right_n}'
+            mid_n = f'{dot_n_clr}{MIDDLE_DOT}{self.R}'
+        front_n += (f' {mid_n} {model_n_clr}{model_field}{self.R}'
+                    f' {dot_n_clr}{MIDDLE_DOT}{self.R} {tok_n_clr}{tok_n}{self.R}')
+        front_n_w = _visible_width(front_n)
+
+        # Never overflow the right border: when even the tok-terminated front
+        # is too wide, it truncates with a middle ellipsis before the
+        # activity is considered.
+        if front_n_w > target_w:
+            front_n   = _middle_ellipsis(front_n, target_w)
+            front_n_w = _visible_width(front_n)
+
+        # Activity/log segment: last column, running agents only, and only
+        # when at least 12 columns of slack remain past the token field — so
+        # narrow rows never show it and medium rows get the full leftover.
+        act_seg   = ''
+        act_seg_w = 0
+        if not is_done:
+            avail_n = target_w - front_n_w - 3  # ' · '
+            if avail_n >= 12:
+                activity = self.subagent_activity(sub.last_activity, cap=avail_n)
+                if _visible_width(activity) > avail_n:
+                    activity = activity[:max(0, avail_n - 1)] + ELLIPSIS
+                if activity:
+                    act_seg   = f' {dot_n_clr}{MIDDLE_DOT}{self.R} {self.CTX_DIM}{activity}{self.R}'
+                    act_seg_w = 3 + _visible_width(activity)
+        pad_n = max(0, target_w - front_n_w - act_seg_w)
+        return f'{front_n}{act_seg}{" " * pad_n}'
 
     def workflow_header(self, run: RunningWorkflow, content_width: int) -> str:
         """Group header for a workflow run.
@@ -1168,8 +1480,8 @@ class Renderer:
     # after every cap is met still feeds the rate/sparkline leader (as before).
     JUSTIFY_PAD_CAP = 4
 
-    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, tok_rate: int, session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False) -> tuple[list[str], tuple[int, int], int, int]:
-        """One content line: tokens │ cost │ rate-and-sparkline.
+    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, tok_rate: int, session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False, lines: tuple[int, int] | None = None) -> tuple[list[str], tuple[int, ...], int, int]:
+        """One content line: tokens │ [lines │] cost │ rate-and-sparkline.
 
         With ``show_day_stats`` (default), session and day figures merge per
         field as ``session/day`` with a paired cache parenthetical. When off,
@@ -1185,11 +1497,24 @@ class Renderer:
         The tokens and cost columns are sized to the *measured* content (floored
         at a realistic-widest budget), so the two ``│`` dividers always land on
         the rendered content's divider column — they never detach from the
-        ┬/┴ elbows above/below. Returns ``([line], (col1, col2), 0, min_width)``:
-        the divider columns for the builder's elbow threading, the dead mark_col
-        (the old 60s tick marker is gone, =0), and ``min_width`` — the smallest
-        box width at which this row fits without overflow, so the builder can
-        fall back to a compact form below it.
+        ┬/┴ elbows above/below.
+
+        ``lines``, when given, is a ``(read, changed)`` session-total pair
+        rendered as a third segment between tokens and cost — but only when
+        the box is wide enough (``box_width >= max(min_width_with_lines,
+        LINES_SEGMENT_MIN_WIDTH)``); otherwise the segment and its ``│``
+        divider are shed entirely and this method returns exactly today's
+        shape. ``TOKENS_COST_MIN_WIDTH`` (the row's own existence gate,
+        checked by the caller) is unaffected by this shed rule — it is
+        computed from the without-segment ``min_width`` only.
+
+        Returns ``([line], vsep_cols, 0, min_width)``: ``vsep_cols`` is
+        ``(col1, col2)`` when the lines segment is shed, or ``(col1, col2,
+        col3)`` when it is included — the divider columns for the builder's
+        elbow threading — the dead mark_col (the old 60s tick marker is gone,
+        =0), and ``min_width`` — the smallest box width at which this row fits
+        without overflow (always the without-segment floor, so the builder's
+        ``tokens_fits`` gate never depends on whether ``lines`` is present).
         """
         day_clr = self.day_cost_colour(day_cost)
         in_active, out_active = TokenRate.recently_active(session_id)
@@ -1235,8 +1560,28 @@ class Renderer:
                           f'{self.BOLDY}{out_icon}{self.R}{self.TOK}{sess_out_s}{self.R}')
             cost_col = f'{self.safe}{ICON_COST}{self.R}  {self.COST}${sess_cost:,.2f}{self.R}'
 
+        def build_lines() -> str:
+            # Mirrors the tokens column's own glyph-pair convention (icon,
+            # bold value, a plain double-space gap before the next glyph
+            # pair) rather than the cost column's " / " separator, since
+            # read/changed are two independent counters (like in/out), not
+            # a session/day pair of the same counter.
+            # ``build_lines`` is only ever invoked where ``lines is not None``
+            # (guarded by the caller), but mypy can't narrow a captured
+            # outer-scope variable across a closure boundary — assert it here
+            # so the tuple-unpack below type-checks honestly.
+            assert lines is not None
+            read, changed = lines
+            # width=0: this is a single, non-cohort row (no cross-row
+            # alignment needed) — see fmt_lines_pair for why the subagent
+            # tree row can't reuse this width policy wholesale.
+            read_s, changed_s = fmt_lines_pair(read, changed)
+            return (f'{self.LABEL}{GLYPH_LINES_READ}  {self.R}{self.TOK}{read_s}{self.R}'
+                    f'{self.LABEL}  {GLYPH_LINES_CHANGED}  {self.R}{self.TOK}{changed_s}{self.R}')
+
         vsep_w        = 4
         vsep_leader_w = 4
+        vsep_lines_w  = 4
         label_w       = 15
 
         content_w = box_width - 3
@@ -1270,6 +1615,17 @@ class Renderer:
         # width. The builder only emits this row when ``box_width >= min_width``.
         min_width = tokens_w + cost_w + vsep_w + vsep_leader_w + rate_label_w + 3
 
+        # The lines segment's own measured width and the with-segment floor.
+        # Included only when the box clears both this floor and the fixed
+        # LINES_SEGMENT_MIN_WIDTH — never at a width where it would overflow,
+        # so ``tokens_fits`` in build_wide (gated on the WITHOUT-segment
+        # min_width, below) is unaffected either way.
+        lines_w = _visible_width(build_lines()) if lines is not None else 0
+        min_width_with_lines = min_width + lines_w + vsep_lines_w
+        include_lines = lines is not None and box_width >= max(min_width_with_lines, LINES_SEGMENT_MIN_WIDTH)
+        if include_lines:
+            inner -= vsep_lines_w  # the lines segment's own vsep, alongside vsep_w/vsep_leader_w above
+
         # Justify breathing room: spend genuine slack as padding *inside* the
         # sections before it flows to the sparkline. ``free`` is the room beyond
         # the tight minimum (min-gap content + min leader); it is exactly the
@@ -1278,6 +1634,12 @@ class Renderer:
         # byte-for-byte the justify-off layout. Slots fill toward their caps via
         # an even round-robin; whatever is consumed shrinks the leader by the
         # same amount, and the remainder still feeds the sparkline.
+        # NOTE: the lines segment (when included) does NOT get a slot here —
+        # it is content-measured only (see w_lines below), same as tokens_col/
+        # cost_col before padding. This is deliberate, not an oversight: giving
+        # it justify breathing room would make its width (and therefore col2/
+        # col3) depend on `justify`, which no other content-measured segment
+        # in this row does.
         cap = self.JUSTIFY_PAD_CAP
         if justify and show_day_stats:
             free = max(0, inner - tokens_w - cost_w - leader_min)
@@ -1329,17 +1691,30 @@ class Renderer:
         w_middle = max(w_middle, tokens_w)
         w_end    = max(w_end, cost_w)
 
+        # The lines segment (when included) is content-measured only, floored
+        # at its own rendered width — same "honest floor" pattern as
+        # w_middle/w_end above, but it never competes for slack: it always
+        # gets exactly its measured width.
+        w_lines = lines_w if include_lines else 0
+
         # Left-justify each column to its (content-floored) width. The trailing pad
         # lands the │ at the divider column col1/col2 regardless of content.
         tokens_col += ' ' * max(0, w_middle - tokens_w)
         cost_col   += ' ' * max(0, w_end   - cost_w)
 
-        leader_w = max(label_w + 1, inner - w_middle - w_end)
+        leader_w = max(label_w + 1, inner - w_middle - w_lines - w_end)
 
-        col1 = w_middle + 5                   # 1-indexed position of vsep │
-        col2 = w_middle + vsep_w + w_end + 5  # 1-indexed position of vsep_leader │
+        col1 = w_middle + 5                                          # 1-indexed position of the tokens│ vsep
+        if include_lines:
+            col2 = col1 + vsep_w + w_lines                           # 1-indexed position of the lines│ vsep
+            col3 = col2 + vsep_lines_w + w_end                       # 1-indexed position of the vsep_leader │
+        else:
+            col2 = w_middle + vsep_w + w_end + 5                     # 1-indexed position of the vsep_leader │ (today's shape)
         vsep        = self.vsep_block(col1, box_width, fill=fill, leader=True)
-        vsep_leader = self.vsep_block(col2, box_width, fill=fill, leader=True)
+        vsep_leader = self.vsep_block(col3 if include_lines else col2, box_width, fill=fill, leader=True)
+        if include_lines:
+            lines_col   = build_lines()
+            vsep_lines  = self.vsep_block(col2, box_width, fill=fill, leader=True)
 
         # The justify leader pad sits between the vsep_leader │ and the rate
         # label; it eats from the leader budget so the sparkline shrinks by the
@@ -1361,7 +1736,15 @@ class Renderer:
                 spark = ' ' * bar_w
             leader = f'{leader_lpad}{rate_label}{spark}'
 
-        return [f'{tokens_col}{vsep}{cost_col}{vsep_leader}{leader}'], (col1, col2), 0, min_width
+        vsep_cols: tuple[int, ...]
+        if include_lines:
+            line = f'{tokens_col}{vsep}{lines_col}{vsep_lines}{cost_col}{vsep_leader}{leader}'
+            vsep_cols = (col1, col2, col3)
+        else:
+            line = f'{tokens_col}{vsep}{cost_col}{vsep_leader}{leader}'
+            vsep_cols = (col1, col2)
+
+        return [line], vsep_cols, 0, min_width
 
     def context_bar(self, fill_ratio: float) -> str:
         ratio = min(max(fill_ratio, 0.0), 1.0)

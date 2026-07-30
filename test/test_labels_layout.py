@@ -14,6 +14,7 @@ from yas.config import Config
 from yas.constants import ICON_LIMIT_5H, ICON_LIMIT_7D
 from yas.info import SessionView
 from yas.info.git import GitInfo
+from yas.info.subagents import RunningSubagent, RunningSubagents
 from yas.info.tasks import Task, TaskList
 from yas.render.text import superscript
 from yas.tokens import TickRecord, TokenLog
@@ -33,8 +34,8 @@ def _tick() -> TickRecord:
     return TickRecord(token_log=TokenLog(), day_cost=0.0, tok_rate=0)
 
 
-def _render(labels: bool) -> list[str]:
-    view = SessionView(_session(), Config(labels=labels))
+def _render(labels: bool, now: float | None = None) -> list[str]:
+    view = SessionView(_session(), Config(labels=labels), now)
     spec = layout.build_wide(view, _tick(), 160, _r)
     return layout.render_layout(spec, _r)
 
@@ -70,13 +71,13 @@ def test_labels_off_has_no_superscripts():
         assert superscript(word) not in blob
 
 
-def test_labels_off_byte_identical_to_default():
+def test_labels_off_byte_identical_to_default(frozen_clock):
     # labels=False (the default) must change nothing: every RowSpec.labels stays
     # empty so render_layout passes an empty tuple into the border methods, and
     # the rendered bytes equal the labels-attribute-absent baseline.
-    assert _render(labels=False) == _render(labels=False)
-    off = _render(labels=False)
-    on  = _render(labels=True)
+    assert _render(labels=False, now=frozen_clock) == _render(labels=False, now=frozen_clock)
+    off = _render(labels=False, now=frozen_clock)
+    on  = _render(labels=True,  now=frozen_clock)
     # The two differ only where captions were overlaid (so they are not equal),
     # but the off render must carry zero superscript glyphs.
     assert off != on
@@ -174,8 +175,14 @@ def _short_labels_view() -> SessionView:
 def test_cost_label_centered_in_its_cell():
     lines = _render_view(_short_labels_view())
     sep, cont = _tok_sep_and_content(lines)
-    bars = [i for i, ch in enumerate(cont) if ch == '│']   # border + 2 vseps
-    cell_center = (bars[1] + bars[2]) / 2                   # cost cell between vseps
+    # border + 2 interior vseps normally, but at this width (200) the lines
+    # read/changed segment is also included (box_width >= LINES_SEGMENT_MIN_WIDTH),
+    # adding a 3rd interior vsep ahead of the cost cell. `bars` always ends with
+    # the row's right border (not a cost-cell vsep), so the cost cell is the pair
+    # immediately preceding it — i.e. the last two INTERIOR vseps — regardless of
+    # how many segments precede them.
+    bars = [i for i, ch in enumerate(cont) if ch == '│']
+    cell_center = (bars[-3] + bars[-2]) / 2                 # cost cell between vseps
     assert abs(_label_center(sep, 'cost') - cell_center) <= 1
 
 
@@ -270,6 +277,24 @@ def test_specs_caption_at_content_start_on_openspec_separator():
     assert sep.index(superscript('specs')) == 2
 
 
+def test_agent_caption_shifted_off_content_start_on_subagent_separator():
+    view = _view(_full_limits_dict())
+    now = time.time()
+    view.__dict__['subagents'] = RunningSubagents([RunningSubagent(
+        agent_type='reviewer', description='review pr', billed_in=1000,
+        output=500, first_timestamp=now - 30, mtime=now - 1,
+        model='claude-sonnet-4-6', cache_read_in=0, total_input=1000,
+        last_activity=('tool_use', 'Bash', {'command': 'ls'}), end_ts=0.0,
+        status='running', run_count=0, resumed=False,
+    )])
+    view.__dict__['read_last_prompt_ts'] = now - 60
+    sep = _caption_line(_render_view(view), 'agent')
+    assert sep, 'agent caption not found'
+    # Column shifted right (~8 cols) off the content start, unlike `plan`/`specs`
+    # which anchor at col 3 (0-indexed 2).
+    assert sep.index(superscript('agent')) == 10
+
+
 def test_section_captions_absent_when_labels_off():
     view = _view(_full_limits_dict(), labels=False)
     view.__dict__['tasks'] = TaskList(
@@ -278,5 +303,5 @@ def test_section_captions_absent_when_labels_off():
     )
     view.__dict__['changes'] = [('demo-change', 3, 5)]
     blob = '\n'.join(strip_ansi(ln) for ln in _render_view(view))
-    for word in ('plan', 'specs', 'subagents', 'workflow'):
+    for word in ('plan', 'specs', 'agent', 'workflow'):
         assert superscript(word) not in blob, word

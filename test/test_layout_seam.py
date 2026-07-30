@@ -96,7 +96,11 @@ def test_tokens_row_session_only_single_line(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_tokens_row_dividers_align_with_separators(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every interior │ in the single tokens line has a matching ┬ on the
-    separator above and ┴ on the separator below at the same visual column."""
+    separator above and ┴ on the separator below at the same visual column.
+
+    At width=160 (>= LINES_SEGMENT_MIN_WIDTH=103) the lines read/changed
+    segment (design.md Decision 8) is included, so there are 3 interior │
+    (lines | cost | rate) instead of the pre-Decision-8 2."""
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
     # A dynamic section below ensures the row below tokens is a (seam) separator,
@@ -109,7 +113,7 @@ def test_tokens_row_dividers_align_with_separators(monkeypatch: pytest.MonkeyPat
 
     last = len(lines[t_idx]) - 1
     interior_bars = [i for i, ch in enumerate(lines[t_idx]) if ch == '│' and 0 < i < last]
-    assert len(interior_bars) == 2, f'expected 2 interior │, got {interior_bars}'
+    assert len(interior_bars) == 3, f'expected 3 interior │, got {interior_bars}'
 
     above, below = lines[t_idx - 1], lines[t_idx + 1]
     for col in interior_bars:
@@ -436,16 +440,21 @@ def _make_tasklist(long_subject: bool = False) -> tasks_mod.TaskList:
 
     With ``long_subject`` the widest task line easily exceeds 45% of the inner
     width at any realistic terminal, so the left column is always capped — which
-    lets the width-driven fallback be exercised deterministically.
+    lets the width-driven fallback be exercised deterministically. The active
+    task's ``active_form`` is lengthened alongside its subject, since that is
+    what the in-progress row actually renders.
     """
     now  = time.time()
+    long = long_subject
     subj = ('a fairly long task subject line wide enough to cap the left column'
-            if long_subject else 'second task here')
+            if long else 'second task here')
+    act  = ('doing a fairly long task wide enough to cap the left column too'
+            if long else 'doing second')
     return tasks_mod.TaskList(
         tasks=[
             tasks_mod.Task(id=1, subject='first task subject', active_form='doing first',
                            status='completed', completed_at=now - 30),
-            tasks_mod.Task(id=2, subject=subj, active_form='doing second',
+            tasks_mod.Task(id=2, subject=subj, active_form=act,
                            status='in_progress', started_at=now - 10),
             tasks_mod.Task(id=3, subject='third pending task', active_form='third',
                            status='pending'),
@@ -547,8 +556,108 @@ def test_side_by_side_falls_back_to_stacked_when_narrow(monkeypatch: pytest.Monk
     # subagent marker row both appear as full-width content.
     from yas.constants import GLYPH_TASKS
     has_task = any(row.kind == 'content' and GLYPH_TASKS in strip_ansi(row.content) for row in spec.rows)
-    has_sub  = any(row.kind == 'content' and strip_ansi(row.content).lstrip().startswith('▶') for row in spec.rows)
+    has_sub  = any(row.kind == 'content' and 'Explore' in strip_ansi(row.content) for row in spec.rows)
     assert has_task and has_sub, 'both sections should render in the stacked fallback'
+
+
+def test_side_by_side_plan_column_capped_in_tree_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tree mode + wide box + a plan longer than the cap: the plan column stops
+    at SUBAGENT_TREE_PLAN_WIDTH (not the old 45%-of-inner even split), so the
+    subagent tree gets the rest."""
+    from helper import strip_ansi
+    from yas.constants import SUBAGENT_TREE_PLAN_WIDTH
+    _both_sections(monkeypatch, long_subject=True)
+
+    width = 300
+    view  = SessionView(_session(), Config(subagent_tree=True))
+    spec  = layout.build_wide(view, _tick(), width, _r)
+
+    combined_idx = _divider_content_idx(spec)
+    assert combined_idx, 'expected a side-by-side block with a divider column'
+    div_cols = {3 + strip_ansi(spec.rows[i].content).index('│') for i in combined_idx}
+    assert len(div_cols) == 1
+    divider_col = div_cols.pop()
+    left_w = divider_col - 4
+    assert left_w == SUBAGENT_TREE_PLAN_WIDTH, f'left_w={left_w}, expected {SUBAGENT_TREE_PLAN_WIDTH}'
+
+
+def test_side_by_side_plan_column_sized_to_content_in_tree_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tree mode + a plan shorter than the cap: the plan column is sized to the
+    longest rendered plan line plus SUBAGENT_TREE_PLAN_PAD — no trailing band of
+    padding before the divider — and every reclaimed column goes to the tree."""
+    from helper import strip_ansi
+    from yas.constants import SUBAGENT_TREE_PLAN_PAD, SUBAGENT_TREE_PLAN_WIDTH
+    _both_sections(monkeypatch, long_subject=False)
+
+    width = 300
+    view  = SessionView(_session(), Config(subagent_tree=True))
+    spec  = layout.build_wide(view, _tick(), width, _r)
+
+    combined_idx = _divider_content_idx(spec)
+    assert combined_idx, 'expected a side-by-side block with a divider column'
+    div_cols = {3 + strip_ansi(spec.rows[i].content).index('│') for i in combined_idx}
+    assert len(div_cols) == 1, f'divider column drifts across rows: {div_cols}'
+    left_w = div_cols.pop() - 4
+
+    longest = layout.plan_content_width(_r.task_row(view.tasks, SUBAGENT_TREE_PLAN_WIDTH))
+    assert longest + SUBAGENT_TREE_PLAN_PAD < SUBAGENT_TREE_PLAN_WIDTH, \
+        'precondition: this plan must be shorter than the cap'
+    assert left_w == longest + SUBAGENT_TREE_PLAN_PAD, \
+        f'left_w={left_w}, expected content width {longest} + {SUBAGENT_TREE_PLAN_PAD}'
+
+
+def test_subagent_tree_plan_width_cap_value() -> None:
+    """The tree-mode plan-column cap is a modest ~13% reduction from its
+    previous 78-col value (78 -> 68), so the subagent side gets more room
+    without truncating the plan column into uselessness."""
+    from yas.constants import SUBAGENT_TREE_PLAN_WIDTH
+    assert SUBAGENT_TREE_PLAN_WIDTH == 68
+
+
+def test_side_by_side_plan_split_unchanged_when_tree_mode_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tree mode off: identical to the pre-existing 45%-of-inner split at the
+    same wide width — byte-identical output either way."""
+    from helper import strip_ansi
+    _both_sections(monkeypatch, long_subject=True)
+
+    width = 300
+    view_default = SessionView(_session(), Config())
+    view_off     = SessionView(_session(), Config(subagent_tree=False))
+    spec_default = layout.build_wide(view_default, _tick(), width, _r)
+    spec_off     = layout.build_wide(view_off, _tick(), width, _r)
+    lines_default = [strip_ansi(ln) for ln in layout.render_layout(spec_default, _r)]
+    lines_off     = [strip_ansi(ln) for ln in layout.render_layout(spec_off, _r)]
+    assert lines_default == lines_off
+
+    combined_idx = _divider_content_idx(spec_default)
+    assert combined_idx, 'expected a side-by-side block with a divider column'
+    div_cols = {3 + strip_ansi(spec_default.rows[i].content).index('│') for i in combined_idx}
+    divider_col = div_cols.pop()
+    left_w = divider_col - 4
+    inner  = width - 4
+    assert left_w == inner * 45 // 100, 'tree mode off must keep the old 45%-of-inner cap'
+
+
+def test_side_by_side_plan_column_degrades_at_narrow_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tree mode on with a plan longer than the ceiling, but the box is too
+    narrow for a SUBAGENT_TREE_PLAN_WIDTH-col plan column: the ceiling falls
+    back to the old 45%-of-inner cap (still side-by-side)."""
+    from helper import strip_ansi
+    from yas.constants import SUBAGENT_TREE_PLAN_WIDTH
+    _both_sections(monkeypatch, long_subject=True)
+
+    width = 140  # inner=136, 45%-cap=61 < SUBAGENT_TREE_PLAN_WIDTH=68
+    inner = width - 4
+    assert inner * 45 // 100 < SUBAGENT_TREE_PLAN_WIDTH, 'precondition: 45% cap must undercut the fixed width here'
+
+    view = SessionView(_session(), Config(subagent_tree=True))
+    spec = layout.build_wide(view, _tick(), width, _r)
+    combined_idx = _divider_content_idx(spec)
+    assert combined_idx, 'expected side-by-side (still enough room at width 140)'
+    div_cols = {3 + strip_ansi(spec.rows[i].content).index('│') for i in combined_idx}
+    divider_col = div_cols.pop()
+    left_w = divider_col - 4
+    assert left_w == inner * 45 // 100, 'must degrade to the 45%-of-inner cap, not the fixed width'
 
 
 def test_tasks_only_renders_full_width_stacked(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -818,8 +927,12 @@ def test_clear_timer_clear_first_in_cell(monkeypatch: pytest.MonkeyPatch) -> Non
     assert plain.index('18:33') < plain.index('13:27')
 
 
-def test_clear_timer_fresh_session_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clear_timer_fresh_session_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, frozen_clock: float,
+) -> None:
     """Fresh session (clear_epoch=None): top content row is byte-identical to the pre-change render."""
+    # frozen_clock pins the rainbow palette, which rolls once a second and would
+    # otherwise colour the two builds differently.
     _silence_dynamic(monkeypatch)
     view_fresh = _view()
     view_fresh.__dict__['now'] = 1_750_000_000.0
@@ -922,6 +1035,61 @@ def test_clear_timer_sheds_entire_cell_on_path_protection(
         assert GLYPH_CLEAR not in ln, 'elapsed cell should be fully shed'
 
 
+# ---------------------------------------------------------------------------
+# Task 7.8 — lines read/changed segment elbow count and TOKENS_COST_MIN_WIDTH
+# gating (design.md Decision 8)
+# ---------------------------------------------------------------------------
+
+def test_tokens_row_three_elbows_at_wide_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At width=140 (>= LINES_SEGMENT_MIN_WIDTH=103) the lines read/changed
+    segment is included, so the tokens/cost separator row threads 3 elbows
+    (3-tuple downs/ups) instead of the pre-change 2."""
+    from helper import strip_ansi
+    _silence_dynamic(monkeypatch)
+    spec = layout.build_wide(_view(), _tick(), 140, _r)
+    # The tokens/cost separator is the separator_dim row immediately above the
+    # first tokens content row (the one carrying the 't/m' rate label).
+    t_idx = _tokens_row_indices(spec)[0]
+    tokens_sep = spec.rows[t_idx - 1]
+    assert tokens_sep.kind == 'separator_dim'
+    assert len(tokens_sep.downs) == 3, f'expected 3 downs at width=140, got {tokens_sep.downs}'
+
+    # And the render itself shows three interior │/┬/┴ triples aligned.
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+    content_line = lines[t_idx]
+    above, below = lines[t_idx - 1], lines[t_idx + 1]
+    last = len(content_line) - 1
+    interior_bars = [i for i, ch in enumerate(content_line) if ch == '│' and 0 < i < last]
+    assert len(interior_bars) == 3, f'expected 3 interior │ at width=140, got {interior_bars}'
+    for col in interior_bars:
+        assert above[col] in ('┬', '┼'), f'no ┬ above at col {col}: {above[col]!r}'
+        assert below[col] in ('┴', '┼'), f'no ┴ below at col {col}: {below[col]!r}'
+
+
+def test_tokens_row_two_elbows_in_85_102_band(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At width=95 (85 <= width < 103) the lines segment is shed: the
+    tokens/cost separator row threads only 2 elbows, identical to before this
+    change."""
+    _silence_dynamic(monkeypatch)
+    spec = layout.build_wide(_view(), _tick(), 95, _r)
+    t_idx = _tokens_row_indices(spec)[0]
+    tokens_sep = spec.rows[t_idx - 1]
+    assert tokens_sep.kind == 'separator_dim'
+    assert len(tokens_sep.downs) == 2, f'expected 2 downs at width=95, got {tokens_sep.downs}'
+
+
+@pytest.mark.parametrize('width', [85, 90, 100, 103, 140])
+def test_tokens_row_present_across_lines_segment_threshold(
+    monkeypatch: pytest.MonkeyPatch, width: int,
+) -> None:
+    """TOKENS_COST_MIN_WIDTH=85 gating is unaffected by the new lines segment:
+    the tokens/cost content row (and hence the full, not compact, context line)
+    is present at every width from 85 up through and past the 103 threshold."""
+    _silence_dynamic(monkeypatch)
+    spec = layout.build_wide(_view(), _tick(), width, _r)
+    assert _tokens_row_indices(spec), f'tokens/cost row missing at width={width}'
+
+
 def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> None:
     """Adding a clear timer does NOT add a new border elbow (single divider unchanged)."""
     _silence_dynamic(monkeypatch)
@@ -945,3 +1113,71 @@ def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> Non
     downs_fresh   = spec_fresh.rows[0].downs
     # Same number of elbows: clear timer shares the existing elapsed divider
     assert len(downs_cleared) == len(downs_fresh)
+
+
+# --- Subagent Tree View column labels ('LOC r/w' anchoring, 'name' offset) ---
+
+def test_tree_labels_loc_slash_stacks_over_data_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 'LOC r/w' header's own '/' must land in the SAME printed column as
+    the '/' in a tree row's '<read> /<changed>' data — not at the field's
+    start like the (session-level) full-word 'LOC read/write' label does."""
+    from helper import strip_ansi
+    _silence_dynamic(monkeypatch)
+    sub = _make_sub()
+    sub.jsonl_path = '/fake/ui.jsonl'
+    monkeypatch.setattr(
+        subagents_mod.RunningSubagents, 'from_session',
+        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
+    )
+
+    view = SessionView(_session(), Config(subagent_tree=True, labels=True))
+    view.__dict__['tool_counts'] = type(
+        'FakeTC', (), {
+            'counts': {}, 'per_agent': {'/fake/ui.jsonl': (381, 239)},
+            'lines_read': 381, 'lines_changed': 239,
+        },
+    )()
+
+    spec = layout.build_wide(view, _tick(), 200, _r)
+    out  = layout.render_layout(spec, _r)
+
+    label_line = next(ln for ln in out if 'ʳᐟʷ' in strip_ansi(ln))
+    data_line  = next(ln for ln in out if 'Explore' in strip_ansi(ln) or 'test desc' in strip_ansi(ln))
+    label_plain = strip_ansi(label_line)
+    data_plain  = strip_ansi(data_line)
+    assert label_plain.index('ᐟ') == data_plain.index('/'), (
+        f"label '/' at {label_plain.index('ᐟ')} != data '/' at {data_plain.index('/')}"
+    )
+
+
+def test_tree_labels_name_shifted_right_of_desc_col_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 'name' header no longer sits flush against the desc column's exact
+    start — it's nudged right so it settles under the actual name text rather
+    than crowding the 'model' label to its left."""
+    _silence_dynamic(monkeypatch)
+    sub = _make_sub()
+    monkeypatch.setattr(
+        subagents_mod.RunningSubagents, 'from_session',
+        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
+    )
+
+    view = SessionView(_session(), Config(subagent_tree=True, labels=True))
+    spec = layout.build_wide(view, _tick(), 200, _r)
+
+    header_row = next(row for row in spec.rows if row.labels and any(lbl == 'name' for lbl, _ in row.labels))
+    name_col  = next(col for lbl, col in header_row.labels if lbl == 'name')
+    desc_col, _, _ = tree_columns_for(view)
+    assert name_col == 3 + desc_col + 2
+
+
+def tree_columns_for(view: SessionView) -> tuple[int, int, int]:
+    """Recompute the same desc/stats/activity anchors `build_wide` used, so
+    the test can assert the label's offset relative to them without
+    hardcoding a width-specific magic number."""
+    from yas.layout import tree_columns, tree_model_width, tree_lines_width, subagent_cluster_width
+    sub_cells = layout.subagent_cells(view.subagents.visible(0, None), True)
+    inner = 200 - 4
+    model_w = tree_model_width(sub_cells)
+    lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)
+    cluster_w = subagent_cluster_width(lines_w)
+    return tree_columns(sub_cells, inner, cluster_full_w=cluster_w, model_w=model_w)

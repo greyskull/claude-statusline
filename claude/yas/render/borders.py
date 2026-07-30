@@ -17,6 +17,7 @@ from yas.constants import (
     BOX_V,
     ELLIPSIS,
     ITALIC,
+    LABEL_ABBREVIATIONS,
     RESET,
 )
 from yas.render.gradient import GradientEngine
@@ -24,31 +25,106 @@ from yas.render.pill import Pill
 from yas.render.text import _visible_width, superscript
 
 
+def _shrink_to_boundary(text: str, run_len: int) -> str | None:
+    """Longest whole-word prefix of `text` (splitting on spaces, so a `/`
+    surrounded by spaces is its own token) that, plus a trailing `ELLIPSIS`,
+    fits within `run_len` visible columns. Returns `None` if not even the
+    first token fits — this is a last-resort shrink, never a mid-word cut.
+    """
+    tokens = text.split(' ')
+    for i in range(len(tokens), 0, -1):
+        prefix = ' '.join(tokens[:i])
+        cand = superscript(prefix) + ELLIPSIS
+        if len(cand) <= run_len:
+            return cand
+    return None
+
+
+def _fit_label(text: str, run_len: int) -> str | None:
+    """Best renderable form of `text` that fits in `run_len` columns, or
+    `None` if the label should be dropped. Tried in order:
+
+    1. The label in full (no shrink needed).
+    2. A caller-recognised abbreviation (`LABEL_ABBREVIATIONS`), in full.
+    3. A word/separator-boundary-safe shrink of the abbreviation (if one
+       exists) or, failing that, of the original text — a shortened prefix
+       plus `ELLIPSIS`, built only from whole tokens so it never cuts a word
+       in half.
+    4. Dropped — no readable form fits this run.
+    """
+    sup = superscript(text)
+    if len(sup) <= run_len:
+        return sup
+    abbrev = LABEL_ABBREVIATIONS.get(text, '')
+    if abbrev:
+        sup_abbrev = superscript(abbrev)
+        if len(sup_abbrev) <= run_len:
+            return sup_abbrev
+        shrunk = _shrink_to_boundary(abbrev, run_len)
+        if shrunk is not None:
+            return shrunk
+    return _shrink_to_boundary(text, run_len)
+
+
 def _overlay_labels(chars: list[str], fills: list[bool], labels: tuple[tuple[str, int], ...]) -> None:
     """Overlay superscript labels onto fill-only columns of a 0-indexed buffer.
 
-    Each label is `(text, start_col)` with `start_col` 1-indexed. Glyphs are
-    written left-to-right from the anchor across contiguous fill columns only,
-    truncating at the first non-fill column and dropping entirely if the anchor
-    is not a fill column. Writes in place, never changing buffer length, so
-    elbows / corners / session id / pill columns are never disturbed.
+    Each label is `(text, start_col)` with `start_col` 1-indexed — the column
+    it names, not a fixed print position. Elbows, corners, session id, and
+    pill columns are never fill, so they split the border into runs of
+    contiguous fill columns that a label can never cross into or overwrite.
 
-    A column a label writes is itself marked non-fill, so a later label in the
-    same call cannot overwrite an earlier one: a colliding label truncates (or
-    drops, when its anchor is already taken) rather than garbling into it.
-    Labels are processed in the given order, so anchors should be left-to-right.
+    A label whose anchor doesn't sit in a fill run is dropped outright (its
+    named column carries no border dash to write on). Otherwise, resolving a
+    label happens in two independent steps:
+
+    - **Fit** (`_fit_label`): pick the best renderable form of the label —
+      full text, a caller-supplied abbreviation, or a whole-word-boundary
+      shrink of either — that fits within the anchor's *containing* fill
+      run, or drop the label if nothing readable fits. This never produces a
+      mid-word fragment: every candidate is either the complete label/
+      abbreviation or a prefix built from whole tokens plus a trailing
+      `ELLIPSIS` marker.
+    - **Place**: if the fitted text is longer than would remain from the
+      anchor to the run's end, shift the write position left (never past the
+      run's start, and never past the anchor itself, so the label always
+      still covers the column it names) just far enough for the whole thing
+      to land inside the run. A label that already fits at its anchor is
+      never shifted.
+
+    A column a label writes is itself marked non-fill, so a later label in
+    the same call is confined to whatever run remains — it shrinks, shifts,
+    or drops against an already-placed label exactly as it would against an
+    elbow. Labels are processed in the given order, so anchors should be
+    left-to-right. Placement is a pure function of the run's fixed boundaries
+    and the label's own text, so it is deterministic and never jitters as
+    surrounding widths change by one column.
     """
     n = len(chars)
     for text, start_col in labels:
-        glyphs = superscript(text)
-        col = start_col
-        for g in glyphs:
-            idx = col - 1
-            if idx < 0 or idx >= n or not fills[idx]:
-                break
-            chars[idx] = g
-            fills[idx] = False  # claim the column so later labels yield to it
-            col += 1
+        idx = start_col - 1
+        if idx < 0 or idx >= n or not fills[idx]:
+            continue  # anchor itself isn't on a fill column -> drop
+        # Contiguous fill run containing the anchor.
+        run_start = idx
+        while run_start - 1 >= 0 and fills[run_start - 1]:
+            run_start -= 1
+        run_end = idx
+        while run_end + 1 < n and fills[run_end + 1]:
+            run_end += 1
+        run_len = run_end - run_start + 1
+        out = _fit_label(text, run_len)
+        if out is None:
+            continue  # nothing readable fits this run; drop it
+        length = len(out)
+        # Shift left just enough to fit, never past the run's start and
+        # never past the anchor (the label must still cover its column).
+        start = min(idx, run_end - length + 1)
+        start = max(start, run_start)
+        for offset, g in enumerate(out):
+            i = start + offset
+            chars[i] = g
+            fills[i] = False  # claim the column so later labels yield to it
 
 
 class BorderRenderer:

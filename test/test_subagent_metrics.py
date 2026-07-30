@@ -1,6 +1,4 @@
-import pytest
-
-from yas.render.metrics import subagent_avg_tpm, subagent_share
+from yas.render.metrics import subagent_avg_tpm
 
 
 class TestSubagentAvgTpm:
@@ -55,31 +53,6 @@ class TestSubagentAvgTpm:
         assert result is not None
 
 
-class TestSubagentShare:
-    def test_normal_case(self) -> None:
-        result = subagent_share(sub_inout=300, session_inout=1000)
-        assert result == pytest.approx(0.3)
-
-    def test_shares_sum_to_one(self) -> None:
-        # main_inout=500, sub1_inout=300, sub2_inout=200; session_inout=1000
-        session_inout = 1000
-        main_inout = 500
-        sub1_inout = 300
-        sub2_inout = 200
-
-        main_share = subagent_share(main_inout, session_inout)
-        sub1_share = subagent_share(sub1_inout, session_inout)
-        sub2_share = subagent_share(sub2_inout, session_inout)
-
-        assert main_share is not None
-        assert sub1_share is not None
-        assert sub2_share is not None
-        assert main_share + sub1_share + sub2_share == pytest.approx(1.0)
-
-    def test_returns_none_when_session_inout_zero(self) -> None:
-        result = subagent_share(sub_inout=300, session_inout=0)
-        assert result is None
-
-    def test_returns_none_when_session_inout_negative(self) -> None:
-        result = subagent_share(sub_inout=300, session_inout=-1)
-        assert result is None
+# `subagent_share` and its `TestSubagentShare` coverage were removed along
+# with the `(N.N%)` session-share suffix on the subagent row's token field —
+# see CONTEXT.md "Session Share %" for the historical record of the term.

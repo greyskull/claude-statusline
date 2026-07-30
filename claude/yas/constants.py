@@ -15,6 +15,9 @@ DEFAULT_TOKEN_WINDOW = 60.0
 DEFAULT_THEME        = 'claude-dark'
 DEFAULT_SHOW_DAY_STATS = True
 DEFAULT_SHOW_TOOL_USES = False
+# Subagent tree view: parent/child rows drawn with ├/└ branch prefixes.
+# Off by default so the flat cohort rendering is byte-identical unless enabled.
+DEFAULT_SUBAGENT_TREE  = False
 DEFAULT_JUSTIFY        = False
 DEFAULT_LABELS         = False
 # Context-state word (ported from Dumbometer, MIT). Opt-in: off by default so
@@ -35,6 +38,22 @@ TWO_COL_WF_WIDTH = 120
 # Set under DEFAULT_MAX_WIDTH=140 so the two-column layout is actually
 # reachable in a default-config wide terminal.
 TWO_COL_SUBAGENT_WIDTH = 120
+# When the wide layout's checklist/subagents side-by-side split is in tree
+# mode (cfg.subagent_tree), the plan/task-list column is fixed at this width
+# instead of the usual 45%-of-inner cap, so the subagent tree gets the rest
+# of a wide box instead of being starved by an even split. Still clamped to
+# the 45%-of-inner ceiling on narrow terminals so it degrades to the old
+# behavior when the box is too small to justify a fixed-width left column.
+# 68 (down from an earlier 78) hands the subagent side ~10 more columns on
+# typical wide boxes while still leaving the plan column readable. It is now a
+# *ceiling* rather than a fixed size: the column is sized to the longest
+# rendered plan line plus SUBAGENT_TREE_PLAN_PAD, so a short plan hands its
+# slack to the subagent tree instead of rendering a band of trailing padding.
+SUBAGENT_TREE_PLAN_WIDTH = 68
+# Trailing pad, in cells, between the longest plan line and the column divider
+# in the tree-mode side-by-side split. `zip_columns` already puts one space on
+# each side of the `│`, so this is the extra breathing room on top of that.
+SUBAGENT_TREE_PLAN_PAD = 1
 # Floor for the wide layout's three-segment tokens │ cost │ rate row. Below this
 # the row cannot hold both columns at full size plus the rate/spark leader, so
 # build_wide drops it for the compact context line instead of overflowing the
@@ -43,6 +62,11 @@ TWO_COL_SUBAGENT_WIDTH = 120
 # realistic-widest floor (the wide layout owns box >= MEDIUM_WIDTH=80, and the
 # row first fits around box 84-85 for typical 6-7 digit token magnitudes).
 TOKENS_COST_MIN_WIDTH = 85
+# Floor for the wide layout's four-segment tokens │ lines │ cost │ rate row.
+# This constant gates ONLY the lines segment; TOKENS_COST_MIN_WIDTH must stay
+# at 85 because bumping it would regress every 85–103-column terminal into the
+# compact context line (losing the cost/rate row entirely, not just the lines).
+LINES_SEGMENT_MIN_WIDTH = 103
 
 # Minimum gap between the narrow tasks-header's left cluster (glyph + done/total)
 # and its right-anchored active-task timer. The timer is flush to the content
@@ -82,10 +106,12 @@ class BarChars:
     EMPTY  = '░'
 
 
-RESET  = '\033[0m'
-BOLD   = '\033[1m'
-FAINT  = '\033[2m'
-ITALIC = '\033[3m'
+RESET   = '\033[0m'
+BOLD    = '\033[1m'
+FAINT   = '\033[2m'
+ITALIC  = '\033[3m'
+STRIKE  = '\033[9m'   # SGR strikethrough on  (finished-subagent task description)
+UNSTRIKE = '\033[29m'  # SGR strikethrough off
 
 # Tools excluded from the per-tool tool_use counts row: todo/UI-plumbing tools,
 # not "work". `Task` is deliberately NOT in this set — it represents a subagent
@@ -95,6 +121,7 @@ META_EXCLUDE_TOOLS = frozenset({'TodoWrite', 'ExitPlanMode', 'AskUserQuestion'})
 # Plain-ASCII caption for the tool-counts separator. The label overlay applies
 # superscript() at render time, so no raw superscript glyphs live in source.
 TOOL_COUNTS_LABEL = 'tools main/sub'
+LINES_LABEL = 'LOC read/write'
 
 CLR_GREY_DIM   = '\033[38;5;244m'
 CLR_GREY_DARK  = '\033[38;5;238m'
@@ -128,13 +155,18 @@ GLYPH_BURN_FAST     = '\uef76' # nf-cod-zap         (shown when the burn rate is
 GLYPH_BURN_SLOW     = '\uf490' # nf-oct-flame       (shown when the burn rate is _not_ too fast)
 GLYPH_FOLDER        = '\uef85' # nf-custom folder   (path row)
 GLYPH_SUBAGENT      = '\uf135' # nf-fa-tasks        (subagent list)
-GLYPH_SUBAGENT_ROW  = '\u25b6' # U+25B6             (per-row Running Subagent marker)
-GLYPH_SUBAGENT_DONE = '\u2713' # U+2713             (Done subagent row marker)
+GLYPH_SUBAGENT_ROW    = '\u25b6' # U+25B6             (per-row Running Subagent marker)
+GLYPH_SUBAGENT_DONE   = '\u2713' # U+2713             (Completed subagent row marker)
+GLYPH_SUBAGENT_ENDED  = '\u2717' # U+2717             (Killed/Stopped subagent row marker \u2014 "ended early by intent")
+GLYPH_SUBAGENT_FAILED = '!' # U+0021 '!'         (Failed subagent row marker \u2014 ended by error)
+GLYPH_SUBAGENT_RESUME = '\u21ba' # U+21BA             (Resumed-running subagent row marker, replaces GLYPH_SUBAGENT_ROW)
 GLYPH_PLUGINS       = '\uf1e6' # nf-fa-plug         (plugins label)
 GLYPH_HELPER        = '\uf4cd' # nf-mdi-star_circle (5h rate-limit helper)
 ICON_TOK_RATE       = '\U000f18a7'  # nf-md gauge         (t/m rate label)
 GLYPH_MODEL         = '\U000f08b9' # nf-md-monitor-dashboard
 GLYPH_THINKING      = '\U000f1a53' # nf-md-brain
+GLYPH_LINES_READ    = '\uf441'  # nf-oct-eye
+GLYPH_LINES_CHANGED = '\uf448'  # nf-oct-pencil
 GLYPH_TASKS         = '\U000f08a8'  # nf-md-clipboard-check-outline (Task Row marker)
 GLYPH_TASK_PENDING  = '\ue640'      # nf-fa-circle_o          (pending task)
 GLYPH_TASK_ACTIVE   = '\U000f0117'  # nf-md-arrow_right_thick (in_progress task)
@@ -204,6 +236,16 @@ GLYPH_IN        = '\u2208'  # U+2208 element-of (path/branch separator)
 GLYPH_UNLIMITED = '\u221e'  # U+221E infinity (unlimited rate limit)
 SPARK_RAMP      = '\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588'  # U+2581..U+2588 sparkline density ramp
 
+# Section-header column labels (render/borders.py `_overlay_labels`) that have
+# a shorter, still-readable form for when their anchor's border run is too
+# short for the full word. Tried before falling back to a whole-word-boundary
+# ellipsis shrink of the original text, and well before a label is dropped.
+LABEL_ABBREVIATIONS: dict[str, str] = {
+    'LOC read/write':     'LOC r/w',
+    'output sess/day':    'out sess/day',
+    'input sess/day':     'in sess/day',
+}
+
 # ASCII fallbacks for the non-ASCII glyphs above. Used by ascii render mode
 # (Config.ascii_mode / YAS_ASCII_MODE) to keep the statusline legible in
 # terminals without a Nerd Font. This table now covers EVERY non-ASCII char the
@@ -227,6 +269,8 @@ ASCII_GLYPHS: dict[str, str] = {
     GLYPH_SKILLS:       '&',
     GLYPH_PLUGINS:      '%',
     GLYPH_HELPER:       '*',
+    GLYPH_LINES_READ:   'R',
+    GLYPH_LINES_CHANGED: 'W',
     GLYPH_TRASH:        '-',
     GLYPH_RENAMED:      '>',
     GLYPH_REPLYING:     ':',
@@ -251,13 +295,25 @@ ASCII_GLYPHS: dict[str, str] = {
     BOX_ARC_TR:         '+',
     BOX_ARC_BR:         '+',
     BOX_ARC_BL:         '+',
-    GLYPH_CONTINUATION: '+',
-    GLYPH_WF_SUMMARY:   '+',
+    # GLYPH_CONTINUATION and GLYPH_WF_SUMMARY share the same U+2514 codepoint
+    # ('└') — both draw the same elbow shape (line-2 activity continuation /
+    # workflow-run summary / Subagent Tree View last-child prefix, the latter
+    # a raw literal in `layout.subagent_cells` since it's plain box-drawing,
+    # not a PUA icon). Ascii mode collapses this codepoint to a single 'L'
+    # for all three, and treats the tree's mid-sibling '├' the same way (no
+    # sibling/last-child distinction ascii-side) — rather than the '+' a
+    # generic box-corner would suggest. '├' needs its own entry since it has
+    # no other constant.
+    GLYPH_CONTINUATION: 'L',
+    GLYPH_WF_SUMMARY:   'L',
+    '├':                'L',  # ├ BOX DRAWINGS LIGHT VERTICAL AND RIGHT
     GLYPH_WF_DIVIDER:   ':',
     # Markers / arrows.
     WF_PHASE_DOT:       '.',
     GLYPH_SUBAGENT_ROW: '>',
     GLYPH_SUBAGENT_DONE:'v',
+    GLYPH_SUBAGENT_ENDED: 'x',
+    GLYPH_SUBAGENT_RESUME: '>',
     GLYPH_WF_HEADER:    '>',
     GLYPH_WF_CURRENT:   '>',
     GLYPH_CONFIG_WARN:  '!',
@@ -320,6 +376,8 @@ UNICODE_PUA: dict[str, str] = {
     GLYPH_SKILLS:       '◆',  # skills
     GLYPH_PLUGINS:      '⌁',  # plug
     GLYPH_HELPER:       '★',  # star-circle
+    GLYPH_LINES_READ:   '⌖',  # eye (read marker)
+    GLYPH_LINES_CHANGED: '✎',  # pencil (changed marker)
     GLYPH_TRASH:        '⌫',  # trash-can
     GLYPH_RENAMED:      '⇄',  # file-move
     GLYPH_REPLYING:     '»',  # message
@@ -386,6 +444,71 @@ WORKFLOW_RUN_CAP          = 2
 # the layout builders keep the most recent (latest-started) rows and drop the
 # older overflow. Matches WORKFLOW_AGENT_CAP so both sections cap identically.
 SUBAGENT_DISPLAY_CAP      = 6
+
+# A terminal (completed/killed/stopped/failed) subagent row is retained for at
+# most this many seconds after its end_ts before it drops from the cohort
+# entirely, independent of the display-cap eviction below (see
+# layout.select_visible_cohort).
+SUBAGENT_RETENTION_SECONDS = 120
+
+# Tree-single rows: the description/activity text columns are now the
+# ELASTIC side of the layout — they truncate first as the terminal narrows,
+# and the lines/share%/tok stats cluster is protected (it sheds only once the
+# description is already at its floor; see layout.tree_columns and
+# Renderer.subagent_row's "anchored" branch). SUBAGENT_DESC_FLOOR is that
+# floor: just enough for a recognisable truncated prefix plus the ellipsis
+# glyph, not a guarantee to pad every row up to. The column otherwise grows
+# to `min(cohort's longest actual description, available width)` — measured
+# per cohort by `layout.tree_desc_content_width` — so a wide terminal never
+# leaves a description artificially truncated OR padded out with a dead
+# gutter before the stats cluster.
+#
+# Replaces the old SUBAGENT_DESC_MIN_WIDTH (a hard 70-col guarantee, raised
+# from 45 as part of an earlier rebalance) now that the shed priority is
+# inverted: a large hard minimum doesn't make sense once description is the
+# first thing to give ground under width pressure rather than the last.
+SUBAGENT_DESC_FLOOR            = 16
+# Widest the agent-name (type) column may grow in subagent rows — a longer
+# label truncates with an ellipsis so one pathological agent type can't push
+# the model/description columns off the row.
+SUBAGENT_NAME_MAX              = 50
+# Constant gap (visible cols) between the stats/model cluster and the
+# activity snippet in tree-single rows, once the model label is padded to the
+# cohort's widest model width (see renderer.Renderer.subagent_row). Exactly
+# the ' · ' separator rendered in the gap — no extra padding.
+SUBAGENT_STATS_ACTIVITY_GAP    = 3
+
+# Four-state subagent lifecycle: 'running' (live), 'completed' (normal finish),
+# 'killed'/'stopped' (ended early by intent — same glyph, see
+# subagent_marker_glyph), 'failed' (ended by error). `RunningSubagent.status`
+# is the source of truth once populated; these helpers fall back to the
+# original end_ts-only binary (running/completed) for any object that doesn't
+# carry the attribute yet, so callers never need an isinstance/hasattr guard.
+def subagent_status(sub: object) -> str:
+    """Resolve a subagent's lifecycle state ('running'/'completed'/'killed'/
+    'stopped'/'failed'), defaulting to the end_ts binary when `.status` is
+    absent."""
+    status = getattr(sub, 'status', None)
+    if status:
+        return str(status)
+    return 'completed' if getattr(sub, 'end_ts', 0.0) > 0 else 'running'
+
+
+def subagent_is_terminal(status: str) -> bool:
+    """True for any non-running lifecycle state."""
+    return status != 'running'
+
+
+def subagent_marker_glyph(status: str) -> str:
+    """The single-glyph row marker for a lifecycle state ('' while running —
+    the caller supplies the live ▶/↺ marker itself since that also depends on
+    resume state)."""
+    return {
+        'completed': GLYPH_SUBAGENT_DONE,
+        'killed':    GLYPH_SUBAGENT_ENDED,
+        'stopped':   GLYPH_SUBAGENT_ENDED,
+        'failed':    GLYPH_SUBAGENT_FAILED,
+    }.get(status, '')
 
 # Maximum lines to scan from the head of a transcript when searching for a
 # /clear marker. Keeps the lookup O(1) even on large transcripts.

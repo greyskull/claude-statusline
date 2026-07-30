@@ -2,37 +2,40 @@
 
 ## Purpose
 
-Define the field set and layout of an individual subagent row: the two-line form (duration-first line 1 with a right-aligned `share% · tok · model` cluster and an activity-continuation line 2), the shedding order under width pressure, and the one-line collapse form. The t/m rate and ↑output fields are removed from both forms.
-
+Define the field set and layout of an individual subagent row: the two-line form (duration-first line 1 with a right-aligned `<lines> · <N> · <model>` cluster and an activity-continuation line 2), the shedding order under width pressure, and the one-line collapse form. The t/m rate, ↑output, and session-share% fields are removed from all forms.
 ## Requirements
-
 ### Requirement: Two-line row field set
 
-A subagent rendered in two-line form SHALL place the elapsed duration at the front of line 1, followed by the agent type, a `·` separator, and the description. Line 1 SHALL end with a right-aligned cluster of `share% · tok · model`. Line 2 SHALL show only the activity continuation (`└` + activity glyph + tool/verb), with no right-aligned metrics. The t/m rate and ↑output fields SHALL NOT appear in either line.
+A subagent rendered in two-line form SHALL place the elapsed duration at the front of line 1, followed by the agent type, a `·` separator, and the description. Line 1 SHALL end with a right-aligned cluster of `<lines> · <N> · <model>`. Line 2 SHALL show only the activity continuation (`└` + activity glyph + tool/verb), with no right-aligned metrics. The t/m rate, ↑output, and session-share% fields SHALL NOT appear in either line.
 
 #### Scenario: Two-line row renders duration-first with the line-1 cluster
 
 - **WHEN** a subagent is rendered in two-line form with room for all fields
-- **THEN** line 1 reads `<dur> <type> · <description>` with a right-aligned `share% · tok · model` cluster, and line 2 reads `└ <glyph> <Tool[arg]>`
+- **THEN** line 1 reads `<dur> <type> · <description>` with a right-aligned `<lines> · <N> · <model>` cluster, and line 2 reads `└ <glyph> <Tool[arg]>`
 
-#### Scenario: No t/m rate or output token field
+#### Scenario: No t/m rate, output token, or share% field
 
 - **WHEN** any subagent row is rendered
-- **THEN** neither the t/m rate field nor the ↑output field appears
+- **THEN** neither the t/m rate field, the ↑output field, nor a session-share `(N.N%)` suffix appears
 
 ### Requirement: Line-1 cluster shedding
 
-When line 1 lacks room for the full `share% · tok · model` cluster, the description SHALL truncate first. If the cluster still does not fit, fields SHALL shed in order: share% first, then tok. The model and the front duration SHALL always be retained.
+When line 1 lacks room for the full `<lines> · <N> · <model>` cluster, the description SHALL truncate first. If the cluster still does not fit, fields SHALL shed in order: the lines field first, then the `<N>` token count. The model and the front duration SHALL always be retained.
 
 #### Scenario: Description truncates before the cluster sheds
 
 - **WHEN** line 1 is too wide for the full description plus cluster
 - **THEN** the description truncates with an ellipsis while the full cluster is retained
 
-#### Scenario: Cluster sheds share% then tok under width pressure
+#### Scenario: Cluster sheds lines, then tok, under width pressure
 
 - **WHEN** the truncated description plus full cluster still exceeds the width
-- **THEN** share% is dropped first, then tok, while model and the front duration remain
+- **THEN** the lines field is dropped first, then the `<N>` token count, while model and the front duration remain
+
+#### Scenario: Narrow widths behave as before the lines field existed
+
+- **WHEN** the width is tight enough that the lines field is shed
+- **THEN** the remaining cluster is byte-identical to the pre-change cluster at that width
 
 ### Requirement: One-line collapse form
 
@@ -106,3 +109,36 @@ is applied.
 
 - **WHEN** the latest assistant message's selected block is a `thinking` block
 - **THEN** the activity continuation shows the thinking indicator
+
+### Requirement: Line-1 lines field
+
+The line-1 stats cluster SHALL carry a lines field showing the subagent's own
+`lines_read` and `lines_changed`, each humanised in the same form as the tok field
+(for example `1.2k`), rendered as a tight `<read> / <changed>` ratio — a
+space on both sides of the `/`, with no icon on either side. This no-icon
+notation was adopted (commit ad10872) in place of an earlier per-figure-glyph
+form specifically because per-figure icons cost extra width the crowded
+subagent cohort display could not spare. The field SHALL be fixed-width in the
+`tree_single` cluster so the constant activity gap after the cluster lands at
+the same absolute column down the cohort. The field's read and changed sides
+SHALL shed independently: a subagent that only wrote renders a blank (not `0`)
+on the read side while still showing the changed side, and vice versa, with
+each blank occupying exactly the width the populated value would have. The
+field renders as blank padding of the full field width, not `0`, when the
+subagent has neither read nor changed anything.
+
+#### Scenario: Field shows the subagent's own figures
+
+- **WHEN** a subagent has read 1,200 lines and changed 30
+- **THEN** its row's lines field shows `1.2k /30`
+
+#### Scenario: Field is blank when idle
+
+- **WHEN** a subagent has read 0 lines and changed 0 lines
+- **THEN** the field renders as spaces and the cluster's total width is unchanged
+
+#### Scenario: Cluster width stays deterministic across the cohort
+
+- **WHEN** several subagent rows with differing figures render in tree mode
+- **THEN** every row's activity column begins at the same absolute column
+
