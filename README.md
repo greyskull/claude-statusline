@@ -89,7 +89,11 @@ aliases when both are set — the aliases keep working but are deprecated.
 | `context_labels` | `YAS_CONTEXT_LABELS` | — | `[context].labels` | `Smart,Coasting,Foggy,Cooked,Dumb` |
 | `context_thresholds` | `YAS_CONTEXT_THRESHOLDS` | — | `[context].thresholds` | `25,50,70,90` |
 | `show_render_time` | `YAS_SHOW_RENDER_TIME` | — | `[layout].show_render_time` | `false` |
-| `show_tool_uses` | `YAS_SHOW_TOOL_USES` | — | `[layout].show_tool_uses` | `true` |
+| `show_tool_uses` | `YAS_SHOW_TOOL_USES` | — | `[layout].show_tool_uses` | `false` |
+| `labels` | `YAS_LABELS` | — | `[layout].labels` | `false` |
+| `justify` | `YAS_JUSTIFY` | — | `[layout].justify` | `false` |
+| `subagent_tree` | `YAS_SUBAGENT_TREE` | — | `[layout].subagent_tree` | `false` |
+| `show_day_stats` | `YAS_SHOW_DAY_STATS` | — | `[tokens].show_day_stats` | `true` |
 
 #### Valid values
 
@@ -109,6 +113,10 @@ aliases when both are set — the aliases keep working but are deprecated.
 - **`full_width`** — when `true`, makes the box fill the terminal and ignore `max_width`.
 - **`show_render_time`** — when `true`, annotates the bottom-right border with the previous run's wall-clock render time (e.g. `…47.2ms──╯`). Off by default; each run shows the prior run's timing, so it is blank on a session's first render.
 - **`show_tool_uses`** — when `true`, adds a row (wide layout only) under the tokens/cost band, listing per-tool `tool_use` counts.
+- **`labels`** — when `true`, paints small superscript field captions into the border/separator rows (wide layout only). **Note:** this is a different knob from `[context].labels`, which is the five-word state list — see [Context state word](#context-state-word). The two share a key name but live in different sections and take different types.
+- **`justify`** — when `true`, aligns fields into columns instead of packing them left (wide layout only).
+- **`subagent_tree`** — when `true`, renders subagents as a tree instead of the flat two-row display.
+- **`show_day_stats`** — when `true` (the default), shows today's cumulative token and cost totals alongside the session's, as `session/day` pairs. **Note:** this key lives under **`[tokens]`**, not `[layout]`, unlike the other display toggles.
 - **CLI flags** — `--theme NAME` / `--bg-shift DIR` also accept the `--theme=NAME` / `--bg-shift=DIR` form. Pass them in the `statusLine.command` of your `~/.claude/settings.json`.
 - **Legacy theme file** — `~/.claude/statusline-theme` (contents = a theme name) still works as the lowest-priority theme fallback, below `[appearance].theme`.
 
