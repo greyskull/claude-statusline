@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'ops'))
 NOW = 1_000_000.0  # arbitrary fixed epoch
 
 LIVENESS  = RunningSubagents.LIVENESS_WINDOW_SECONDS     # 30
-GRACE     = RunningSubagents.COHORT_GRACE_SECONDS         # 20
+GRACE     = RunningSubagents.COHORT_GRACE_SECONDS         # 120
 JANITOR   = RunningSubagents.JANITOR_HORIZON_SECONDS      # 60
 ABANDONED = RunningSubagents.ABANDONED_HORIZON_SECONDS    # 1800
 LINGER    = RunningSubagents.FINISHED_LINGER_SECONDS      # 120
@@ -205,7 +205,7 @@ def test_all_done_within_grace_returns_candidates() -> None:
     assert sub in result
 
 
-def test_clean_retire_at_20s() -> None:
+def test_clean_retire_past_grace() -> None:
     '''All-Done cohort retires once the last end_ts exceeds the grace window.'''
     last_prompt_ts = NOW - 30.0
     sub = _sub(first_timestamp=NOW - 25.0, mtime=NOW - 25.0, end_ts=NOW - (GRACE + 1))
@@ -320,6 +320,26 @@ def test_finished_linger_matches_layout_retention() -> None:
     """The info-layer linger must not retire a row before the layout's own
     retention horizon would — they are deliberately the same 120 s."""
     assert LINGER == SUBAGENT_RETENTION_SECONDS
+
+
+def test_cohort_grace_matches_finished_linger() -> None:
+    """COHORT_GRACE_SECONDS and FINISHED_LINGER_SECONDS are deliberately the
+    same 120 s window. _retired() picks exactly one of the two per candidate
+    (never both), so raising one does not compound with the other into a
+    longer effective visibility window."""
+    assert GRACE == LINGER
+
+
+def test_all_done_cohort_visible_at_120s_not_240s() -> None:
+    """Regression: an all-Done cohort must retire at COHORT_GRACE_SECONDS
+    (120 s), not at COHORT_GRACE_SECONDS + FINISHED_LINGER_SECONDS (240 s).
+    The two horizons are a select (all_done ? GRACE : LINGER), not a sum."""
+    last_prompt_ts = NOW - 130.0
+    sub = _sub(first_timestamp=NOW - 125.0, mtime=NOW - 125.0, end_ts=NOW - (GRACE - 1))
+    assert _cohort(sub).visible(NOW, last_prompt_ts) == [sub]
+
+    long_gone = _sub(first_timestamp=NOW - 125.0, mtime=NOW - 125.0, end_ts=NOW - (GRACE + LINGER - 1))
+    assert _cohort(long_gone).visible(NOW, last_prompt_ts) == []
 
 
 def test_janitor_not_triggered_if_one_member_wrote_recently() -> None:
@@ -481,8 +501,8 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
     end_ts = sub.end_ts
 
     # Drive that real Done agent through visible(): because it IS Done, it is
-    # governed by the COHORT_GRACE_SECONDS clean-retire window, not the 60 s
-    # janitor sweep that applies to active agents.
+    # governed by the COHORT_GRACE_SECONDS clean-retire window, not the
+    # janitor sweep / abandoned-horizon that applies to active agents.
 
     # Within grace (just retired this turn): still visible (eligible for the
     # dimmed Done treatment).
@@ -497,13 +517,15 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
     last_prompt_ts = sub.first_timestamp - 1.0  # agent started this turn
     assert cohort.subagents[0] in cohort.visible(now_in_grace, last_prompt_ts)
 
-    # Past the grace window: the all-Done cohort clean-retires (NOT lingering
-    # active waiting for the 60 s janitor sweep).
+    # Past the grace window: the all-Done cohort clean-retires (governed by
+    # COHORT_GRACE_SECONDS, not the ABANDONED_HORIZON_SECONDS that would
+    # apply to a still-running/end_ts==0 candidate).
     now_past_grace = end_ts + (GRACE + 1)
     assert cohort.visible(now_past_grace, last_prompt_ts) == []
-    # Sanity: it retired strictly before the 60 s janitor horizon, proving it
-    # was treated as Done rather than as an active/dirty agent.
-    assert (GRACE + 1) < JANITOR
+    # Sanity: it retired strictly before the abandoned-horizon, proving it
+    # was treated as Done (fast grace-window retire) rather than as an
+    # active/still-running agent (which would survive far longer).
+    assert (GRACE + 1) < ABANDONED
 
 
 # ---------------------------------------------------------------------------

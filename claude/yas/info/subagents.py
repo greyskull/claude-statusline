@@ -726,8 +726,12 @@ class RunningSubagents:
     def __repr__(self) -> str:
         return f'RunningSubagents(subagents={self.subagents!r})'
 
-    # Cohort grace: seconds after the last end_ts before a fully-Done section retires
-    COHORT_GRACE_SECONDS = 20
+    # Cohort grace: seconds after the last end_ts before a fully-Done section
+    # retires. Matches FINISHED_LINGER_SECONDS (and constants.
+    # SUBAGENT_RETENTION_SECONDS at the layout layer) so a fully-done cohort
+    # doesn't retire on a shorter horizon than a lingering member of a still-
+    # dirty cohort would.
+    COHORT_GRACE_SECONDS = 120
     # Janitor horizon: total-silence threshold to sweep a dirty cohort (no end_turn);
     # also the recency-window fallback when no prompt-marker is available
     JANITOR_HORIZON_SECONDS = 60
@@ -968,7 +972,7 @@ class RunningSubagents:
 
         After computing candidates, retirement rules apply:
         - If all candidates are Done (end_ts > 0): hide once
-          now - max(end_ts) > COHORT_GRACE_SECONDS (20 s clean-retire).
+          now - max(end_ts) > COHORT_GRACE_SECONDS (120 s clean-retire).
         - Otherwise (dirty cohort): hide once every member's transcript has
           been silent for JANITOR_HORIZON_SECONDS (60 s janitor sweep).
         '''
@@ -1005,10 +1009,14 @@ class RunningSubagents:
 
         def _retired(sub: RunningSubagent) -> bool:
             if sub.end_ts > 0:
-                # Done member: a fully-clean cohort retires fast
-                # (COHORT_GRACE_SECONDS); a done member sitting inside a
+                # Done member: a fully-clean cohort retires on
+                # COHORT_GRACE_SECONDS; a done member sitting inside a
                 # still-dirty cohort lingers for FINISHED_LINGER_SECONDS so it
                 # doesn't vanish mid-turn while a sibling is still working.
+                # The two constants are equal by design (both 120s, matching
+                # the layout layer's SUBAGENT_RETENTION_SECONDS) but this is
+                # a select, not a sum: a candidate never accumulates both
+                # horizons, so raising one doesn't compound with the other.
                 horizon = self.COHORT_GRACE_SECONDS if all_done else self.FINISHED_LINGER_SECONDS
                 return now - sub.end_ts > horizon
             # Still-running (end_ts == 0): no terminal signal at all, so
