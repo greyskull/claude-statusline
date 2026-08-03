@@ -38,7 +38,14 @@ git -C "$yas_root" worktree add -q "$wt" main
 trap 'git -C "$yas_root" worktree remove --force "$wt" >/dev/null 2>&1 || true' EXIT
 
 render() { # <tree-dir> <scenario> <env> <out-png>
-  ( cd "$1" && env $3 DEMO_ONLY="$2" make demo/img >/dev/null 2>&1 ) && cp "$1/demo/$2.png" "$4"
+  ( cd "$1" && env $3 DEMO_ONLY="$2" make demo/img >/dev/null 2>&1 ) || return 1
+  if [ -f "$1/demo/$2.png" ]; then
+    cp "$1/demo/$2.png" "$4"
+  elif [ -f "$1/demo/subagents/$2.png" ]; then
+    cp "$1/demo/subagents/$2.png" "$4"
+  else
+    return 1
+  fi
 }
 
 rows=()

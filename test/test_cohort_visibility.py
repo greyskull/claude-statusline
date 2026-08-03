@@ -18,7 +18,9 @@ lifecycle state (completed/killed/stopped/resumed) — this guard exists so a
 future edit that trims/reorders those rows (or changes the cap/trim logic)
 fails loudly instead of silently dropping a marker.
 '''
+import datetime
 import json
+import os
 import re
 import sys
 import tempfile
@@ -29,6 +31,7 @@ from yas.constants import (
     GLYPH_SUBAGENT_ENDED,
     GLYPH_SUBAGENT_RESUME,
     SUBAGENT_DISPLAY_CAP,
+    SUBAGENT_RETENTION_SECONDS,
     subagent_marker_glyph,
 )
 from yas.info.subagents import RunningSubagent, RunningSubagents
@@ -39,9 +42,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'ops'))
 NOW = 1_000_000.0  # arbitrary fixed epoch
 
 LIVENESS  = RunningSubagents.LIVENESS_WINDOW_SECONDS     # 30
-GRACE     = RunningSubagents.COHORT_GRACE_SECONDS         # 20
+GRACE     = RunningSubagents.COHORT_GRACE_SECONDS         # 120
 JANITOR   = RunningSubagents.JANITOR_HORIZON_SECONDS      # 60
 ABANDONED = RunningSubagents.ABANDONED_HORIZON_SECONDS    # 1800
+LINGER    = RunningSubagents.FINISHED_LINGER_SECONDS      # 120
 
 
 def _sub(
@@ -50,6 +54,8 @@ def _sub(
     mtime: float           = NOW - 5.0,
     end_ts: float          = 0.0,
     description: str       = 'test-agent',
+    agent_id: str          = '',
+    parent_id: str         = '',
 ) -> RunningSubagent:
     return RunningSubagent(
         agent_type      = 'Explore',
@@ -59,6 +65,8 @@ def _sub(
         first_timestamp = first_timestamp,
         mtime           = mtime,
         end_ts          = end_ts,
+        agent_id        = agent_id,
+        parent_id       = parent_id,
     )
 
 
@@ -103,6 +111,88 @@ def test_running_agent_always_shown() -> None:
     assert sub in result
 
 
+class TestSupervisingParentVisibility:
+    '''A parent blocked waiting on children writes nothing but is still alive.'''
+
+    def test_silent_parent_with_live_descendant_stays_visible(self) -> None:
+        # setup: parent last wrote well outside the liveness window, its child 2 s ago
+        last_prompt_ts = NOW - 10.0
+        parent = _sub(
+            first_timestamp = NOW - 600.0,
+            mtime           = NOW - (LIVENESS + 120),
+            agent_id        = 'agent-parent',
+        )
+        child = _sub(
+            first_timestamp = NOW - 300.0,
+            mtime           = NOW - 2.0,
+            agent_id        = 'agent-child',
+            parent_id       = 'parent',
+        )
+
+        # run
+        result = _cohort(parent, child).visible(NOW, last_prompt_ts)
+
+        # expected
+        expected = [parent, child]
+
+        # assert
+        assert result == expected
+
+    def test_silent_grandparent_kept_through_the_whole_chain(self) -> None:
+        # setup
+        last_prompt_ts = NOW - 10.0
+        silent_mtime = NOW - (LIVENESS + 120)
+        gran = _sub(first_timestamp=NOW - 900.0, mtime=silent_mtime, agent_id='agent-gran')
+        parent = _sub(
+            first_timestamp = NOW - 600.0,
+            mtime           = silent_mtime,
+            agent_id        = 'agent-parent',
+            parent_id       = 'gran',
+        )
+        child = _sub(
+            first_timestamp = NOW - 300.0,
+            mtime           = NOW - 2.0,
+            agent_id        = 'agent-child',
+            parent_id       = 'parent',
+        )
+
+        # run
+        result = _cohort(gran, parent, child).visible(NOW, last_prompt_ts)
+
+        # expected
+        expected = [gran, parent, child]
+
+        # assert
+        assert result == expected
+
+    def test_silent_parent_dropped_when_descendant_also_silent(self) -> None:
+        # setup: nothing in the branch is writing, so the normal windows apply
+        last_prompt_ts = NOW - 10.0
+        silent_mtime = NOW - (LIVENESS + 120)
+        parent = _sub(
+            first_timestamp = NOW - 600.0,
+            mtime           = silent_mtime,
+            end_ts          = NOW - 300.0,
+            agent_id        = 'agent-parent',
+        )
+        child = _sub(
+            first_timestamp = NOW - 300.0,
+            mtime           = silent_mtime,
+            end_ts          = NOW - 200.0,
+            agent_id        = 'agent-child',
+            parent_id       = 'parent',
+        )
+
+        # run
+        result = _cohort(parent, child).visible(NOW, last_prompt_ts)
+
+        # expected
+        expected: list[RunningSubagent] = []
+
+        # assert
+        assert result == expected
+
+
 # ---------------------------------------------------------------------------
 # Cohort retirement
 # ---------------------------------------------------------------------------
@@ -115,7 +205,7 @@ def test_all_done_within_grace_returns_candidates() -> None:
     assert sub in result
 
 
-def test_clean_retire_at_20s() -> None:
+def test_clean_retire_past_grace() -> None:
     '''All-Done cohort retires once the last end_ts exceeds the grace window.'''
     last_prompt_ts = NOW - 30.0
     sub = _sub(first_timestamp=NOW - 25.0, mtime=NOW - 25.0, end_ts=NOW - (GRACE + 1))
@@ -178,6 +268,78 @@ def test_dirty_cohort_mixed_horizons() -> None:
     # done_ish is past its own horizon but running is not past ABANDONED yet.
     result = _cohort(done_ish, running).visible(NOW, last_prompt_ts)
     assert running in result
+
+
+def test_per_member_retirement_drops_only_long_dead_sibling() -> None:
+    '''Regression: one still-live sibling must not keep a long-dead,
+    never-notified cohort member visible forever. Each candidate retires
+    independently once IT crosses its own horizon, not the cohort's `all()`.
+    '''
+    last_prompt_ts = NOW - 5.0
+    long_dead = _sub(
+        first_timestamp=NOW - 3.0, mtime=NOW - (ABANDONED + 1), end_ts=0.0,
+        description='long-dead-no-notification',
+    )
+    live = _sub(
+        first_timestamp=NOW - 3.0, mtime=NOW - 2.0, end_ts=0.0,
+        description='live',
+    )
+    result = _cohort(long_dead, live).visible(NOW, last_prompt_ts)
+    assert live in result
+    assert long_dead not in result
+
+
+def test_finished_member_still_visible_at_119s() -> None:
+    """A finished member of a dirty cohort lingers for the full 2 minutes."""
+    last_prompt_ts = NOW - 5.0
+    finished = _sub(first_timestamp=NOW - 4.0, mtime=NOW - 119.0, end_ts=NOW - 119.0,
+                    description='finished')
+    live     = _sub(first_timestamp=NOW - 3.0, mtime=NOW - 2.0, end_ts=0.0,
+                    description='live')
+
+    result = _cohort(finished, live).visible(NOW, last_prompt_ts)
+
+    assert finished in result
+
+
+def test_finished_member_retired_at_121s() -> None:
+    """One second past the linger window the finished member drops out."""
+    last_prompt_ts = NOW - 5.0
+    finished = _sub(first_timestamp=NOW - 4.0, mtime=NOW - 121.0, end_ts=NOW - 121.0,
+                    description='finished')
+    live     = _sub(first_timestamp=NOW - 3.0, mtime=NOW - 2.0, end_ts=0.0,
+                    description='live')
+
+    result = _cohort(finished, live).visible(NOW, last_prompt_ts)
+
+    assert finished not in result
+    assert live in result
+
+
+def test_finished_linger_matches_layout_retention() -> None:
+    """The info-layer linger must not retire a row before the layout's own
+    retention horizon would — they are deliberately the same 120 s."""
+    assert LINGER == SUBAGENT_RETENTION_SECONDS
+
+
+def test_cohort_grace_matches_finished_linger() -> None:
+    """COHORT_GRACE_SECONDS and FINISHED_LINGER_SECONDS are deliberately the
+    same 120 s window. _retired() picks exactly one of the two per candidate
+    (never both), so raising one does not compound with the other into a
+    longer effective visibility window."""
+    assert GRACE == LINGER
+
+
+def test_all_done_cohort_visible_at_120s_not_240s() -> None:
+    """Regression: an all-Done cohort must retire at COHORT_GRACE_SECONDS
+    (120 s), not at COHORT_GRACE_SECONDS + FINISHED_LINGER_SECONDS (240 s).
+    The two horizons are a select (all_done ? GRACE : LINGER), not a sum."""
+    last_prompt_ts = NOW - 130.0
+    sub = _sub(first_timestamp=NOW - 125.0, mtime=NOW - 125.0, end_ts=NOW - (GRACE - 1))
+    assert _cohort(sub).visible(NOW, last_prompt_ts) == [sub]
+
+    long_gone = _sub(first_timestamp=NOW - 125.0, mtime=NOW - 125.0, end_ts=NOW - (GRACE + LINGER - 1))
+    assert _cohort(long_gone).visible(NOW, last_prompt_ts) == []
 
 
 def test_janitor_not_triggered_if_one_member_wrote_recently() -> None:
@@ -323,6 +485,13 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
         ),
     }) + '\n')
 
+    # Keep the transcript's mtime at/behind the notification: a later write
+    # would (correctly) invalidate the terminal signal as stale.
+    notif_epoch = datetime.datetime(
+        2026, 5, 22, 17, 50, 30, tzinfo=datetime.timezone.utc,
+    ).timestamp()
+    os.utime(jsonl, (notif_epoch, notif_epoch))
+
     parsed = RunningSubagents.from_session(_SESSION_ID, _PROJECT_DIR)
     assert len(parsed.subagents) == 1
     sub = parsed.subagents[0]
@@ -332,8 +501,8 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
     end_ts = sub.end_ts
 
     # Drive that real Done agent through visible(): because it IS Done, it is
-    # governed by the COHORT_GRACE_SECONDS clean-retire window, not the 60 s
-    # janitor sweep that applies to active agents.
+    # governed by the COHORT_GRACE_SECONDS clean-retire window, not the
+    # janitor sweep / abandoned-horizon that applies to active agents.
 
     # Within grace (just retired this turn): still visible (eligible for the
     # dimmed Done treatment).
@@ -348,13 +517,15 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
     last_prompt_ts = sub.first_timestamp - 1.0  # agent started this turn
     assert cohort.subagents[0] in cohort.visible(now_in_grace, last_prompt_ts)
 
-    # Past the grace window: the all-Done cohort clean-retires (NOT lingering
-    # active waiting for the 60 s janitor sweep).
+    # Past the grace window: the all-Done cohort clean-retires (governed by
+    # COHORT_GRACE_SECONDS, not the ABANDONED_HORIZON_SECONDS that would
+    # apply to a still-running/end_ts==0 candidate).
     now_past_grace = end_ts + (GRACE + 1)
     assert cohort.visible(now_past_grace, last_prompt_ts) == []
-    # Sanity: it retired strictly before the 60 s janitor horizon, proving it
-    # was treated as Done rather than as an active/dirty agent.
-    assert (GRACE + 1) < JANITOR
+    # Sanity: it retired strictly before the abandoned-horizon, proving it
+    # was treated as Done (fast grace-window retire) rather than as an
+    # active/still-running agent (which would survive far longer).
+    assert (GRACE + 1) < ABANDONED
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +575,7 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 def test_tree_states_scenario_shows_four_states(tmp_path: Path) -> None:
     '''All four subagent lifecycle markers carried by the scenario must be
     present in the rendered output: ✓ completed, ✗ killed, ✗ stopped, and
-    ↺ resumed with its ×2 suffix (the scenario has no plain-running root — it
+    ↺ resumed (the scenario has no plain-running root — it
     is 4 flat subagents, one per state).
     '''
     with tempfile.TemporaryDirectory() as td:
@@ -415,7 +586,7 @@ def test_tree_states_scenario_shows_four_states(tmp_path: Path) -> None:
         'completed marker (✓)':      subagent_marker_glyph('completed') == GLYPH_SUBAGENT_DONE and GLYPH_SUBAGENT_DONE in plain,
         'killed marker (✗)':         subagent_marker_glyph('killed') == GLYPH_SUBAGENT_ENDED and GLYPH_SUBAGENT_ENDED in plain,
         'stopped marker (✗)':        subagent_marker_glyph('stopped') == GLYPH_SUBAGENT_ENDED and plain.count(GLYPH_SUBAGENT_ENDED) >= 2,
-        'resumed marker (↺) with ×2': GLYPH_SUBAGENT_RESUME in plain and '×2' in plain,
+        'resumed marker (↺)':        GLYPH_SUBAGENT_RESUME in plain,
     }
     missing = [name for name, present in checks.items() if not present]
     assert not missing, (

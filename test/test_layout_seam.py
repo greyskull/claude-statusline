@@ -569,7 +569,7 @@ def test_side_by_side_plan_column_capped_in_tree_mode(monkeypatch: pytest.Monkey
     _both_sections(monkeypatch, long_subject=True)
 
     width = 300
-    view  = SessionView(_session(), Config(subagent_tree=True))
+    view  = SessionView(_session(), Config())
     spec  = layout.build_wide(view, _tick(), width, _r)
 
     combined_idx = _divider_content_idx(spec)
@@ -590,7 +590,7 @@ def test_side_by_side_plan_column_sized_to_content_in_tree_mode(monkeypatch: pyt
     _both_sections(monkeypatch, long_subject=False)
 
     width = 300
-    view  = SessionView(_session(), Config(subagent_tree=True))
+    view  = SessionView(_session(), Config())
     spec  = layout.build_wide(view, _tick(), width, _r)
 
     combined_idx = _divider_content_idx(spec)
@@ -614,30 +614,6 @@ def test_subagent_tree_plan_width_cap_value() -> None:
     assert SUBAGENT_TREE_PLAN_WIDTH == 68
 
 
-def test_side_by_side_plan_split_unchanged_when_tree_mode_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tree mode off: identical to the pre-existing 45%-of-inner split at the
-    same wide width — byte-identical output either way."""
-    from helper import strip_ansi
-    _both_sections(monkeypatch, long_subject=True)
-
-    width = 300
-    view_default = SessionView(_session(), Config())
-    view_off     = SessionView(_session(), Config(subagent_tree=False))
-    spec_default = layout.build_wide(view_default, _tick(), width, _r)
-    spec_off     = layout.build_wide(view_off, _tick(), width, _r)
-    lines_default = [strip_ansi(ln) for ln in layout.render_layout(spec_default, _r)]
-    lines_off     = [strip_ansi(ln) for ln in layout.render_layout(spec_off, _r)]
-    assert lines_default == lines_off
-
-    combined_idx = _divider_content_idx(spec_default)
-    assert combined_idx, 'expected a side-by-side block with a divider column'
-    div_cols = {3 + strip_ansi(spec_default.rows[i].content).index('│') for i in combined_idx}
-    divider_col = div_cols.pop()
-    left_w = divider_col - 4
-    inner  = width - 4
-    assert left_w == inner * 45 // 100, 'tree mode off must keep the old 45%-of-inner cap'
-
-
 def test_side_by_side_plan_column_degrades_at_narrow_width(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tree mode on with a plan longer than the ceiling, but the box is too
     narrow for a SUBAGENT_TREE_PLAN_WIDTH-col plan column: the ceiling falls
@@ -650,7 +626,7 @@ def test_side_by_side_plan_column_degrades_at_narrow_width(monkeypatch: pytest.M
     inner = width - 4
     assert inner * 45 // 100 < SUBAGENT_TREE_PLAN_WIDTH, 'precondition: 45% cap must undercut the fixed width here'
 
-    view = SessionView(_session(), Config(subagent_tree=True))
+    view = SessionView(_session(), Config())
     spec = layout.build_wide(view, _tick(), width, _r)
     combined_idx = _divider_content_idx(spec)
     assert combined_idx, 'expected side-by-side (still enough room at width 140)'
@@ -1115,12 +1091,12 @@ def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(downs_cleared) == len(downs_fresh)
 
 
-# --- Subagent Tree View column labels ('LOC r/w' anchoring, 'name' offset) ---
+# --- Subagent Tree View column labels ('loc r/w' anchoring, 'name' offset) ---
 
 def test_tree_labels_loc_slash_stacks_over_data_slash(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 'LOC r/w' header's own '/' must land in the SAME printed column as
+    """The 'loc r/w' header's own '/' must land in the SAME printed column as
     the '/' in a tree row's '<read> /<changed>' data — not at the field's
-    start like the (session-level) full-word 'LOC read/write' label does."""
+    start like the (session-level) full-word 'loc read/write' label does."""
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
     sub = _make_sub()
@@ -1130,7 +1106,7 @@ def test_tree_labels_loc_slash_stacks_over_data_slash(monkeypatch: pytest.Monkey
         classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
     )
 
-    view = SessionView(_session(), Config(subagent_tree=True, labels=True))
+    view = SessionView(_session(), Config(labels=True))
     view.__dict__['tool_counts'] = type(
         'FakeTC', (), {
             'counts': {}, 'per_agent': {'/fake/ui.jsonl': (381, 239)},
@@ -1161,7 +1137,7 @@ def test_tree_labels_name_shifted_right_of_desc_col_start(monkeypatch: pytest.Mo
         classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
     )
 
-    view = SessionView(_session(), Config(subagent_tree=True, labels=True))
+    view = SessionView(_session(), Config(labels=True))
     spec = layout.build_wide(view, _tick(), 200, _r)
 
     header_row = next(row for row in spec.rows if row.labels and any(lbl == 'name' for lbl, _ in row.labels))
@@ -1175,7 +1151,7 @@ def tree_columns_for(view: SessionView) -> tuple[int, int, int]:
     the test can assert the label's offset relative to them without
     hardcoding a width-specific magic number."""
     from yas.layout import tree_columns, tree_model_width, tree_lines_width, subagent_cluster_width
-    sub_cells = layout.subagent_cells(view.subagents.visible(0, None), True)
+    sub_cells = layout.subagent_cells(view.subagents.visible(0, None))
     inner = 200 - 4
     model_w = tree_model_width(sub_cells)
     lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)

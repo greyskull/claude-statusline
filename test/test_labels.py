@@ -9,7 +9,7 @@ LABEL_VOCAB = [
     'changes', 'input sess/day', 'cache sess/day',
     'output sess/day', 'cost sess/day',
     'plan', 'agent', 'specs', 'workflow',
-    'name', 'model', 'LOC read/write', 'LOC r/w', 'log',
+    'name', 'model', 'loc read/write', 'loc r/w', 'log',
 ]
 
 

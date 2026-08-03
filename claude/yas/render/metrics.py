@@ -50,11 +50,16 @@ def subagent_dur_str(sub: object, now: float) -> str:
     exactly the tree-mode misalignment this guards.
     """
     status = subagent_status(sub)
+    # run_start_ts anchors on the CURRENT run, not the agent's original spawn:
+    # a resumed agent (warm-agent SendMessage) appends further runs to the
+    # same transcript, so first_timestamp alone would span every prior run
+    # plus all idle time between them. run_start_ts == first_timestamp for a
+    # never-resumed agent, so this is a no-op change in the common case.
+    run_start = getattr(sub, 'run_start_ts', 0.0) or sub.first_timestamp  # type: ignore[attr-defined]
     if subagent_is_terminal(status):
-        dur = max(0.0, sub.end_ts - sub.first_timestamp)  # type: ignore[attr-defined]
+        dur = max(0.0, sub.end_ts - run_start)  # type: ignore[attr-defined]
     else:
-        first_ts = sub.first_timestamp  # type: ignore[attr-defined]
-        dur = max(0.0, now - first_ts) if first_ts > 0 else 0.0
+        dur = max(0.0, now - run_start) if run_start > 0 else 0.0
     total_s = int(dur)
     minutes, seconds = divmod(total_s, 60)
     if minutes >= 60:
@@ -66,19 +71,21 @@ def subagent_dur_str(sub: object, now: float) -> str:
 
 
 def subagent_type_label(sub: object) -> str:
-    """The agent-type text a subagent row displays, including the ``×N``
-    resume suffix on a live resumed run.
+    """The agent-type text a subagent row displays.
 
     Pulled out (like `subagent_dur_str`) so callers that reserve column
     width for the name field — `layout.oneline_name_width` — measure the
     SAME string `Renderer.subagent_row` renders.
+
+    The label used to carry a ``×N`` run-count suffix on a resumed run. It is
+    gone: `run_count` counts <task-notification> records, and the stall
+    watchdog emits spurious `failed` notifications for merely-slow agents, so
+    the number inflated for agents that were never restarted. The `↺` marker
+    (rendered from the same `resumed` state in `Renderer.subagent_row`) still
+    flags that a run was resumed — only the misleading count is dropped. The
+    underlying `run_count`/`resumed` fields are untouched.
     """
-    label     = getattr(sub, 'agent_type', '') or '?'
-    run_count = getattr(sub, 'run_count', 0)
-    is_done   = subagent_is_terminal(subagent_status(sub))
-    if not is_done and (getattr(sub, 'resumed', False) or run_count >= 1):
-        label = f'{label} ×{run_count + 1}'
-    return label
+    return getattr(sub, 'agent_type', '') or '?'
 
 
 def burndown_delta(
@@ -126,7 +133,7 @@ def subagent_cluster_field_offsets(
     two fields that remain here.
 
     Single source of truth for that layout so the agent header's
-    'LOC r/w'/'log' labels (built in `layout.py`)
+    'loc r/w'/'log' labels (built in `layout.py`)
     can anchor over the SAME columns the data rows use, instead of a
     hardcoded guess that drifts the moment `lines_w` changes per cohort.
     ``tok_w=5`` is `fmt_tok_fixed`'s own guaranteed max width (3 significant
