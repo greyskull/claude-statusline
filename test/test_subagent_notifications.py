@@ -10,8 +10,10 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from helper import iso_ts
-from yas.info.subagents import RunningSubagents
+from yas.info.subagents import RunningSubagents, _parse_iso_to_epoch
 
 
 SESSION_ID = 'sess-notif'
@@ -254,6 +256,272 @@ def test_resumed_flag_true_when_transcript_postdates_last_notification(tmp_home:
     sub = _get(result, 'agent-r2')
     assert sub.run_count == 1
     assert sub.resumed is True
+
+
+# ---------------------------------------------------------------------------
+# run_start_ts: the per-run duration anchor (subagent_dur_str's fix). All
+# timestamps are derived from the fixture's own `now`, never hardcoded ISO
+# literals — a hardcoded literal paired with a real st_mtime makes the
+# transcript look written days after the terminal signal, which
+# RunningSubagents (correctly) treats as stale. Expected values round-trip
+# through iso_ts/_parse_iso_to_epoch so millisecond-truncation in iso_ts
+# never causes a spurious float mismatch.
+# ---------------------------------------------------------------------------
+
+def test_run_start_ts_anchors_on_resume_boundary_transcript_line(tmp_home: Path) -> None:
+    # Real repro shape: original spawn long ago, one notification, then the
+    # transcript is reopened (warm-agent SendMessage) and a fresh assistant
+    # line lands well after the notification. run_start_ts must be THAT
+    # line's timestamp, not the notification ts and not the original spawn.
+    now = time.time()
+    notif_epoch = now - 3600
+    original_spawn = notif_epoch - 3600
+    resume_line_epoch = notif_epoch + 8.6 * 60  # the actual resume-run write
+    sdir = _subagents_dir(tmp_home)
+    sdir.mkdir(parents=True, exist_ok=True)
+    meta = sdir / 'agent-r5.meta.json'
+    meta.write_text(json.dumps({'agentType': 'Explore', 'description': 'find X'}))
+    jsonl = sdir / 'agent-r5.jsonl'
+    jsonl.write_text(
+        json.dumps({
+            'type': 'assistant',
+            'timestamp': iso_ts(original_spawn),
+            'message': {'id': 'msg-0', 'model': 'claude-x', 'usage': {}},
+        }) + '\n'
+        + json.dumps({
+            'type': 'assistant',
+            'timestamp': iso_ts(resume_line_epoch),
+            'message': {'id': 'msg-1', 'model': 'claude-x', 'usage': {}},
+        }) + '\n'
+    )
+    os.utime(jsonl, (resume_line_epoch, resume_line_epoch))
+    _write_session_jsonl(tmp_home, [
+        _queue_operation_line('r5', 'toolu_r5', 'completed', iso_ts(notif_epoch)),
+    ])
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-r5')
+    assert sub.resumed is True
+    assert sub.run_start_ts == _parse_iso_to_epoch(iso_ts(resume_line_epoch))
+    # Original spawn is still preserved separately for cohort membership/sort.
+    assert sub.first_timestamp == _parse_iso_to_epoch(iso_ts(original_spawn))
+
+
+def test_run_start_ts_falls_back_to_notif_ts_when_no_later_line_found(tmp_home: Path) -> None:
+    # Resumed (mtime postdates notif_ts) but no transcript line with a
+    # timestamp later than notif_ts could be pinpointed (e.g. the stub
+    # transcript here carries no timestamp at all) — falls back to notif_ts.
+    now = time.time()
+    notif_epoch = now - 3600
+    later = notif_epoch + 8.6 * 60
+    sdir = _subagents_dir(tmp_home)
+    _write_agent(sdir, 'agent-r6', mtime=later)
+    _write_session_jsonl(tmp_home, [
+        _queue_operation_line('r6', 'toolu_r6', 'completed', iso_ts(notif_epoch)),
+    ])
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-r6')
+    assert sub.resumed is True
+    assert sub.run_start_ts == _parse_iso_to_epoch(iso_ts(notif_epoch))
+
+
+def test_run_start_ts_equals_first_timestamp_when_never_resumed(tmp_home: Path) -> None:
+    now = time.time()
+    notif_epoch = now - 100
+    sdir = _subagents_dir(tmp_home)
+    _write_agent(sdir, 'agent-c9', mtime=notif_epoch - 50)
+    _write_session_jsonl(tmp_home, [
+        _queue_operation_line('c9', 'toolu_c9', 'completed', iso_ts(notif_epoch)),
+    ])
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-c9')
+    assert sub.resumed is False
+    assert sub.run_start_ts == sub.first_timestamp
+
+
+def test_run_start_ts_terminal_resumed_uses_second_to_last_notification(tmp_home: Path) -> None:
+    # Resumed agent finishes: the LATEST notification (notif2) is the END of
+    # the displayed run, so run_start_ts must anchor on the FIRST transcript
+    # line after the PREVIOUS notification (notif1) — anchoring on notif2
+    # itself (the old, buggy behaviour) would collapse run_start_ts onto
+    # end_ts and render a multi-minute run as '0:00'.
+    now = time.time()
+    notif1_epoch = now - 3600
+    notif2_epoch = notif1_epoch + 300  # 5 min later, the finish
+    run2_line_epoch = notif1_epoch + 90  # 1.5 min after notif1, the SECOND run's first write
+    original_spawn = notif1_epoch - 3600
+    sdir = _subagents_dir(tmp_home)
+    sdir.mkdir(parents=True, exist_ok=True)
+    meta = sdir / 'agent-r7.meta.json'
+    meta.write_text(json.dumps({'agentType': 'Explore', 'description': 'find X'}))
+    jsonl = sdir / 'agent-r7.jsonl'
+    jsonl.write_text(
+        json.dumps({
+            'type': 'assistant',
+            'timestamp': iso_ts(original_spawn),
+            'message': {'id': 'msg-0', 'model': 'claude-x', 'usage': {}},
+        }) + '\n'
+        + json.dumps({
+            'type': 'assistant',
+            'timestamp': iso_ts(run2_line_epoch),
+            'message': {'id': 'msg-1', 'model': 'claude-x', 'usage': {}},
+        }) + '\n'
+    )
+    # mtime lands within TERMINAL_SKEW_SECONDS of the LATEST notification —
+    # the agent is genuinely finished, not still running.
+    mtime = notif2_epoch + 0.01
+    os.utime(jsonl, (mtime, mtime))
+    _write_session_jsonl(tmp_home, [
+        _queue_operation_line('r7', 'toolu_r7', 'completed', iso_ts(notif1_epoch)),
+        _queue_operation_line('r7', 'toolu_r7_b', 'completed', iso_ts(notif2_epoch)),
+    ])
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-r7')
+    assert sub.status == 'completed'
+    assert sub.run_count == 2
+    assert sub.resumed is True
+    assert sub.end_ts == _parse_iso_to_epoch(iso_ts(notif2_epoch))
+    assert sub.run_start_ts == _parse_iso_to_epoch(iso_ts(run2_line_epoch))
+    duration = sub.end_ts - sub.run_start_ts
+    assert duration == pytest.approx(notif2_epoch - run2_line_epoch, abs=0.01)
+
+
+def test_run_start_ts_terminal_resumed_never_collapses_to_zero(tmp_home: Path) -> None:
+    # Regression guard: even without a transcript line to pinpoint the exact
+    # resume write (a stub transcript, no timestamped lines), the PREVIOUS
+    # notification (not the latest one) must be the fallback anchor, so
+    # run_start_ts can never land within a whisker of end_ts for a finished,
+    # resumed, multi-notification agent.
+    now = time.time()
+    notif1_epoch = now - 3600
+    notif2_epoch = notif1_epoch + 300
+    sdir = _subagents_dir(tmp_home)
+    mtime = notif2_epoch + 0.01
+    _write_agent(sdir, 'agent-r8', mtime=mtime)  # stub transcript, no timestamped lines
+    _write_session_jsonl(tmp_home, [
+        _queue_operation_line('r8', 'toolu_r8', 'completed', iso_ts(notif1_epoch)),
+        _queue_operation_line('r8', 'toolu_r8_b', 'completed', iso_ts(notif2_epoch)),
+    ])
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-r8')
+    assert sub.run_count == 2
+    assert sub.end_ts == _parse_iso_to_epoch(iso_ts(notif2_epoch))
+    # Falls back to the PREVIOUS notification, not the latest one.
+    assert sub.run_start_ts == _parse_iso_to_epoch(iso_ts(notif1_epoch))
+    assert sub.end_ts - sub.run_start_ts == pytest.approx(300.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Notification dedup: every logical <task-notification> is written TWICE in
+# real transcripts (a "queue-operation" record and a "user" record for the
+# SAME task-id/tool-use-id, ~20-25ms apart) — confirmed against a real
+# session. Left un-deduped, run_count doubles (mislabeling never-resumed
+# agents as resumed) and the terminal-resumed run_start_ts bracket anchors on
+# the queue-operation twin of the SAME notification instead of one run
+# earlier, collapsing duration to ~0:00. See _dedupe_notifications.
+# ---------------------------------------------------------------------------
+
+def test_duplicate_pair_does_not_double_run_count(tmp_home: Path) -> None:
+    # One real run notified as a queue-operation/user PAIR, 20ms apart — must
+    # count as run_count == 1, and NOT look resumed.
+    now = time.time()
+    notif_epoch = now - 300
+    # mtime matches the LATER (deduped) notification's own round-tripped
+    # timestamp exactly, not a raw float sum, so iso_ts's millisecond
+    # truncation can never leave mtime a hair past notif_ts and spuriously
+    # flip `resumed` via the mtime > notif_ts comparison.
+    later_notif_ts = _parse_iso_to_epoch(iso_ts(notif_epoch + 0.02))
+    sdir = _subagents_dir(tmp_home)
+    _write_agent(sdir, 'agent-dup1', mtime=later_notif_ts)
+    _write_session_jsonl(tmp_home, [
+        _queue_operation_line('dup1', 'toolu_dup1', 'completed', iso_ts(notif_epoch)),
+        _user_record_line('dup1', 'toolu_dup1', 'completed', iso_ts(notif_epoch + 0.02)),
+    ])
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-dup1')
+    assert sub.run_count == 1
+    assert sub.resumed is False
+    assert sub.status == 'completed'
+
+
+def test_duplicate_pairs_across_two_real_runs_count_as_two(tmp_home: Path) -> None:
+    # Two real runs, each notified as a pair (4 raw records total) — must
+    # dedupe to run_count == 2, and the bracket (prev_ts) must land on the
+    # FIRST run's own pair, not the twin of the second run's own notification.
+    now = time.time()
+    run1_q = now - 3600
+    run1_u = run1_q + 0.02
+    run2_q = run1_q + 16 * 60  # ~16 min later, a real resume gap
+    run2_u = run2_q + 0.02
+    original_spawn = run1_q - 3600
+    second_run_line = run1_u + 400  # first write of the SECOND run, well after run1's own pair
+    sdir = _subagents_dir(tmp_home)
+    sdir.mkdir(parents=True, exist_ok=True)
+    meta = sdir / 'agent-dup2.meta.json'
+    meta.write_text(json.dumps({'agentType': 'Explore', 'description': 'find X'}))
+    jsonl = sdir / 'agent-dup2.jsonl'
+    jsonl.write_text(
+        json.dumps({
+            'type': 'assistant',
+            'timestamp': iso_ts(original_spawn),
+            'message': {'id': 'msg-0', 'model': 'claude-x', 'usage': {}},
+        }) + '\n'
+        + json.dumps({
+            'type': 'assistant',
+            'timestamp': iso_ts(second_run_line),
+            'message': {'id': 'msg-1', 'model': 'claude-x', 'usage': {}},
+        }) + '\n'
+    )
+    mtime = run2_u + 0.02
+    os.utime(jsonl, (mtime, mtime))
+    _write_session_jsonl(tmp_home, [
+        _queue_operation_line('dup2', 'toolu_dup2a', 'completed', iso_ts(run1_q)),
+        _user_record_line('dup2', 'toolu_dup2a', 'completed', iso_ts(run1_u)),
+        _queue_operation_line('dup2', 'toolu_dup2b', 'completed', iso_ts(run2_q)),
+        _user_record_line('dup2', 'toolu_dup2b', 'completed', iso_ts(run2_u)),
+    ])
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-dup2')
+    assert sub.run_count == 2  # NOT 4 (raw record count)
+    assert sub.resumed is True
+    assert sub.status == 'completed'
+    assert sub.end_ts == _parse_iso_to_epoch(iso_ts(run2_u))
+    # The bracket must land on run1's own notification (the "user" twin, the
+    # later of run1's pair), NOT on the "queue-operation" twin of run2's own
+    # notification (which sits only 20ms before end_ts and would collapse
+    # duration to ~0).
+    assert sub.run_start_ts == _parse_iso_to_epoch(iso_ts(second_run_line))
+    duration = sub.end_ts - sub.run_start_ts
+    assert duration > 60  # comfortably not the ~0.02s a doubled-count bug would produce
+    assert duration == pytest.approx(run2_u - second_run_line, abs=0.01)
+
+
+def test_real_audiovis_shaped_repro_analysis_agent_ten_records_five_runs(tmp_home: Path) -> None:
+    # Mirrors the exact shape found in a real 'analysis' agent: 10 raw
+    # notification records (5 queue-operation/user pairs) for one task-id.
+    # Regression guard for the specific "×9 ↺" / '0:00' symptom.
+    now = time.time()
+    gaps = [0, 20 * 60, 33 * 60, 43 * 60, 60 * 60]  # ~20/13/10/17 min apart
+    pairs = [(now - 3600 + g, now - 3600 + g + 0.023) for g in gaps]
+    lines = []
+    for q_ts, u_ts in pairs:
+        lines.append(_queue_operation_line('analysis1', 'toolu_analysis1', 'completed', iso_ts(q_ts)))
+        lines.append(_user_record_line('analysis1', 'toolu_analysis1', 'completed', iso_ts(u_ts)))
+    sdir = _subagents_dir(tmp_home)
+    _write_agent(sdir, 'agent-analysis1', mtime=pairs[-1][1] + 0.02)
+    _write_session_jsonl(tmp_home, lines)
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
+    sub = _get(result, 'agent-analysis1')
+    assert sub.run_count == 5  # NOT 10
+    assert sub.resumed is True
+    assert sub.status == 'completed'
+    assert sub.end_ts == _parse_iso_to_epoch(iso_ts(pairs[-1][1]))
+    # No transcript line to pinpoint (stub transcript) -> falls back to the
+    # PREVIOUS real notification's ts (pair #4's "user" record), not pair
+    # #5's own queue-operation twin.
+    assert sub.run_start_ts == _parse_iso_to_epoch(iso_ts(pairs[-2][1]))
+    duration = sub.end_ts - sub.run_start_ts
+    assert duration == pytest.approx(pairs[-1][1] - pairs[-2][1], abs=0.01)
+    assert duration > 60  # not the ~0.023s a doubled-count bug would produce
 
 
 # ---------------------------------------------------------------------------

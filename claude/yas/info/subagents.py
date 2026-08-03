@@ -284,24 +284,82 @@ def _tail_read_tool_results(path: Path) -> dict[str, tuple[str, float]]:
     return results
 
 
+# Every logical <task-notification> is written TWICE to the transcript, ~20-25ms
+# apart: once as a "queue-operation" record (no uuid) and once as a "user"
+# record (has a uuid) carrying the identical <task-notification> block for the
+# same task-id/tool-use-id (confirmed against real session data: 26
+# queue-operation + matching user records, paired ~20-25ms apart, for the same
+# task-ids). Left un-deduped, every notification is double-counted: run_count
+# comes out at 2x the real run count, which both mislabels a never-resumed
+# agent as resumed (run_count > 1) and — worse — makes a terminal-resumed
+# run_start_ts bracket anchor on the queue-operation twin of the SAME
+# notification (a ~20ms window) instead of one run earlier, collapsing a
+# finished, resumed agent's duration to ~0:00. A timestamp-window dedupe
+# (rather than filtering on record `type`) is used as the discriminator: it
+# doesn't require trusting an inferred, undocumented record-shape distinction
+# (this module already tracks two known notification record shapes — see
+# _extract_notifications — and doesn't carry the record `type` into
+# _Notification at all), and it is naturally robust to the notification's two
+# twins landing in EITHER the top-level session .jsonl or a
+# subagents/agent-*.jsonl (or split across both) since dedup runs on the
+# merged by-task-id list after both sources are absorbed. 1.0 second is
+# comfortably above the observed ~20-25ms twin gap and comfortably below any
+# realistic distinct-run gap (observed real runs are minutes apart).
+NOTIF_DEDUPE_WINDOW_SECONDS = 1.0
+
+
+def _dedupe_notifications(notes: list['_Notification']) -> list['_Notification']:
+    '''Collapse same-task-id notifications written within
+    NOTIF_DEDUPE_WINDOW_SECONDS of each other into one logical notification,
+    keeping the LATER twin (matches the real "user" record — the actual
+    transcript entry with a uuid — arriving after its "queue-operation"
+    counterpart). Input need not be sorted; output is ts-ascending.
+    '''
+    if len(notes) <= 1:
+        return list(notes)
+    ordered = sorted(notes, key=lambda n: n.ts)
+    deduped = [ordered[0]]
+    for note in ordered[1:]:
+        if note.ts - deduped[-1].ts <= NOTIF_DEDUPE_WINDOW_SECONDS:
+            deduped[-1] = note
+        else:
+            deduped.append(note)
+    return deduped
+
+
 class _NotifLookup(NamedTuple):
-    '''Aggregated notification state for one task-id: latest status/ts, total occurrence count.'''
+    '''Aggregated notification state for one task-id: latest status/ts, the
+    PREVIOUS notification's ts (0.0 if there is none), and total occurrence
+    count.
+
+    ``prev_ts`` exists for the terminal-and-resumed run_start_ts case: the
+    run being DISPLAYED for a finished, resumed agent is bracketed by the
+    second-to-last notification (its start) and the last one (its end) — the
+    last notification alone collapses the anchor onto the end, understating
+    duration to ~0. See ``RunningSubagents.from_session``.
+    '''
     status:       str
     ts:           float
+    prev_ts:      float
     notif_count:  int
 
 
 def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dict[str, _NotifLookup]:
-    '''Build a ``{task_id: _NotifLookup(status, ts, count)}`` map for one session tree.
+    '''Build a ``{task_id: _NotifLookup(status, ts, prev_ts, count)}`` map for one session tree.
 
     Scans the top-level session ``.jsonl`` AND every ``subagents/agent-*.jsonl``
     — a nested agent's completion notification lands in its PARENT AGENT's own
     transcript, not necessarily in the top-level session file, so every
     transcript in the tree must be scanned. Aggregates every
-    ``<task-notification>`` seen per task-id: the occurrence with the latest
-    timestamp decides ``status``/``ts`` (so a later re-notification of a
-    resumed agent wins), and ``count`` is the total number of notifications
-    observed for that task-id (a resumed agent notifies more than once).
+    ``<task-notification>`` seen per task-id, first deduping the
+    queue-operation/user twin pair each logical notification is written as
+    (see ``_dedupe_notifications``/``NOTIF_DEDUPE_WINDOW_SECONDS``): the
+    occurrence with the latest timestamp decides ``status``/``ts`` (so a
+    later re-notification of a resumed agent wins), the occurrence with the
+    SECOND-latest timestamp (if any) gives ``prev_ts``, and ``count`` is the
+    number of DISTINCT (deduped) notifications observed for that task-id —
+    the real run count, not the raw record count (a resumed agent notifies
+    more than once).
     '''
     by_task: dict[str, list[_Notification]] = {}
 
@@ -321,18 +379,34 @@ def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dic
 
     result: dict[str, _NotifLookup] = {}
     for task_id, notes in by_task.items():
-        latest = max(notes, key=lambda n: n.ts)
-        result[task_id] = _NotifLookup(status=latest.status, ts=latest.ts, notif_count=len(notes))
+        by_ts   = _dedupe_notifications(notes)
+        latest  = by_ts[-1]
+        prev_ts = by_ts[-2].ts if len(by_ts) >= 2 else 0.0
+        result[task_id] = _NotifLookup(
+            status=latest.status, ts=latest.ts, prev_ts=prev_ts, notif_count=len(by_ts),
+        )
     return result
 
 
-def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float]:
+def parse_transcript(
+    jsonl: Path, resume_after: float = 0.0,
+) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float]:
     """Parse one agent-*.jsonl transcript into the subagent metric tuple.
 
     Module-level so the workflow cohort reader (info/workflows.py) can call the
     identical token/activity/Done logic without duplicating it. Returns
-    ``(billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts)``.
-    Never raises; an unreadable transcript yields zeroes.
+    ``(billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts,
+    run_start_ts)``.
+
+    ``resume_after``, when positive, is the caller's resume-boundary timestamp
+    (typically the last-seen ``<task-notification>`` before the run being
+    displayed). When given, ``run_start_ts`` in the return is the timestamp of
+    the FIRST transcript line that postdates it — the true start of the
+    current run for a resumed agent — found in the same single streaming pass
+    used for everything else here (never a second whole-file re-read).
+    ``run_start_ts`` is ``0.0`` when ``resume_after`` is ``0.0`` (not asked
+    for) or no later line was found (caller falls back to ``resume_after``
+    itself). Never raises; an unreadable transcript yields zeroes.
     """
     seen: set[str] = set()
     # Usage is keyed by message id with last-line-wins: streaming re-writes
@@ -342,6 +416,7 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     # the first partial snapshot and undercounts output tokens.
     usage_by_id: dict[str, tuple[int, int, int]] = {}
     first_ts     = 0.0
+    run_start_ts = 0.0
     end_ts       = 0.0
     model        = ''
     last_activity: tuple[str, str, dict[str, object]] = ('', '', {})
@@ -357,12 +432,22 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     try:
         with jsonl.open('r', errors='ignore') as fh:
             for ln in fh:
-                if first_ts == 0.0 and '"timestamp"' in ln:
+                # Timestamp scan: keep reading timestamped lines past the
+                # first one only while resume_after was supplied and its
+                # run_start_ts boundary hasn't been found yet, so a
+                # never-resumed caller (resume_after == 0.0) pays no extra
+                # cost beyond the original single-timestamp check.
+                need_run_start = resume_after > 0.0 and run_start_ts == 0.0
+                if ('"timestamp"' in ln) and (first_ts == 0.0 or need_run_start):
                     try:
                         d = json.loads(ln)
-                        ts = d.get('timestamp', '')
-                        if ts:
-                            first_ts = _parse_iso_to_epoch(ts)
+                        ts_raw = d.get('timestamp', '')
+                        if ts_raw:
+                            parsed = _parse_iso_to_epoch(ts_raw)
+                            if first_ts == 0.0:
+                                first_ts = parsed
+                            if need_run_start and parsed > resume_after:
+                                run_start_ts = parsed
                     except (ValueError, TypeError):
                         pass
                 if '"usage"' not in ln or '"assistant"' not in ln:
@@ -478,7 +563,7 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     # not prose pattern-matching) for callers that still consult it (e.g.
     # info/workflows.py), but RunningSubagent.end_ts is overwritten from the
     # notification map, never from this heuristic.
-    return billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts
+    return billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, run_start_ts
 
 
 def _build_tree_index(
@@ -633,7 +718,7 @@ class RunningSubagent:
         'agent_type', 'description', 'billed_in', 'output', 'first_timestamp',
         'model', 'cache_read_in', 'total_input', 'last_activity', 'end_ts',
         'mtime', 'agent_id', 'jsonl_path', 'parent_id', 'spawn_depth',
-        'status', 'run_count', 'is_fork', 'resumed',
+        'status', 'run_count', 'is_fork', 'resumed', 'run_start_ts',
     )
 
     def __init__(
@@ -657,6 +742,7 @@ class RunningSubagent:
         run_count:       int = 0,      # <task-notification> occurrences seen for this agent; 0 while never finished
         is_fork:         bool = False,  # meta.json "isFork" (equivalently agentType == "fork")
         resumed:         bool = False,  # a later notification/activity postdates the last-seen notification
+        run_start_ts:    float | None = None,  # start of the CURRENT run; see subagent_dur_str
     ) -> None:
         self.agent_type      = agent_type
         self.description      = description
@@ -677,6 +763,11 @@ class RunningSubagent:
         self.run_count        = run_count
         self.is_fork          = is_fork
         self.resumed          = resumed
+        # Per-run start anchor for duration display: the start of the CURRENT
+        # run, not the agent's original spawn. Equals first_timestamp when
+        # unset (never-resumed agents, and callers like info/workflows.py
+        # that don't track resumption at all) — see subagent_dur_str.
+        self.run_start_ts     = run_start_ts if run_start_ts is not None else first_timestamp
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RunningSubagent):
@@ -690,6 +781,7 @@ class RunningSubagent:
             self.last_activity, self.end_ts, self.mtime, self.agent_id,
             self.jsonl_path, self.parent_id, self.spawn_depth,
             self.status, self.run_count, self.is_fork, self.resumed,
+            self.run_start_ts,
         )
 
     __hash__ = None  # type: ignore[assignment]
@@ -707,7 +799,7 @@ class RunningSubagent:
                 f'agent_id={self.agent_id!r}, jsonl_path={self.jsonl_path!r}, '
                 f'parent_id={self.parent_id!r}, spawn_depth={self.spawn_depth}, '
                 f'status={self.status!r}, run_count={self.run_count}, is_fork={self.is_fork}, '
-                f'resumed={self.resumed})')
+                f'resumed={self.resumed}, run_start_ts={self.run_start_ts})')
 
 
 class RunningSubagents:
@@ -827,11 +919,6 @@ class RunningSubagents:
                 except OSError:
                     continue
 
-                billed_in, cache_read_in, output, first_ts, model, last_activity, transcript_end_ts = \
-                    cls._parse_transcript(jsonl)
-                if meta_model:
-                    model = meta_model
-
                 # Authoritative status, checked in priority order:
                 #
                 # Tier 1 (preferred): the SPAWNING transcript's own tool_result
@@ -844,10 +931,22 @@ class RunningSubagents:
                 # subagent-completion-signals investigation), so anything else
                 # falls through to the tiers below rather than risk a false
                 # positive.
-                status      = 'running'
-                run_count   = 0
-                notif_ts    = 0.0
-                end_ts      = 0.0
+                #
+                # Tiers 1 and 2 are resolved BEFORE the transcript parse below
+                # (moved up from their old post-parse position) so notif_ts/
+                # prev_notif_ts are available to pick the parse's resume-
+                # boundary argument — letting the same streaming pass locate
+                # run_start_ts instead of a second whole-file re-read. Tier 3
+                # (below the parse call) still needs the parse's own
+                # transcript_end_ts and is unaffected by this reordering: it
+                # only ever fires when tiers 1/2 left status=='running', in
+                # which case boundary_ts is computed from that same 'running'
+                # state either way.
+                status        = 'running'
+                run_count     = 0
+                notif_ts      = 0.0
+                prev_notif_ts = 0.0
+                end_ts        = 0.0
                 if tool_use_id and parent_jsonl.is_file():
                     tool_result = _tail_read_tool_results(parent_jsonl).get(tool_use_id)
                     if tool_result is not None and tool_result[0] == 'completed':
@@ -863,8 +962,9 @@ class RunningSubagents:
                 task_id = jsonl.stem.removeprefix('agent-')
                 lookup = notif_map.get(task_id) or notif_map.get(jsonl.stem)
                 if lookup is not None:
-                    run_count = lookup.notif_count
-                    notif_ts  = lookup.ts
+                    run_count     = lookup.notif_count
+                    notif_ts      = lookup.ts
+                    prev_notif_ts = lookup.prev_ts
                     raw_status = lookup.status
                     if status == 'running' and raw_status in _TERMINAL_STATUSES:
                         status = raw_status
@@ -873,6 +973,65 @@ class RunningSubagents:
                 # kept being written after the last-seen notification (a
                 # resumed agent appends more turns to the same jsonl).
                 resumed = run_count > 1 or (notif_ts > 0 and mtime > notif_ts)
+
+                # Terminal-signal invalidation, moved up from its original
+                # post-tier-3 position: it depends only on mtime (already
+                # stat'd above) and end_ts as tiers 1/2 left it, never on the
+                # transcript parse below, and tier 3 (below the parse call)
+                # only ever assigns end_ts = mtime exactly when it fires — so
+                # `mtime - end_ts` is trivially 0 there and this check is
+                # unconditionally a no-op for it either way. Evaluating it
+                # here lets boundary_ts (below) see the FINAL running/
+                # terminal verdict before the transcript is even parsed, so a
+                # stale terminal notification whose transcript kept being
+                # written doesn't collapse run_start_ts onto the notification
+                # instead of the live resume boundary. A terminal signal is
+                # only believable while the transcript agrees with it: a
+                # stall watchdog can emit <status>failed</status> for an
+                # agent that is in fact still working, and a transcript write
+                # postdating the signal by more than the skew tolerance
+                # proves it outlived the signal. `resumed` is computed above
+                # and deliberately survives this.
+                if end_ts > 0 and mtime - end_ts > cls.TERMINAL_SKEW_SECONDS:
+                    status = 'running'
+                    end_ts = 0.0
+
+                # Per-run start boundary for duration display (subagent_dur_str),
+                # resolved from tiers 1/2 + the invalidation verdict above
+                # (tier 3 below never changes this pick: it only ever fires
+                # when status is STILL 'running' here, i.e. no notification
+                # matched at all, so boundary_ts is 0.0 in that branch either
+                # way):
+                #  - still running (no terminal signal, or one just
+                #    invalidated above): the run in progress started right
+                #    after the LATEST notification (the end of the previous
+                #    run) — or, if never notified, there's no notification
+                #    boundary at all (0.0 -> first_timestamp below).
+                #  - finished with more than one notification seen: the
+                #    DISPLAYED run is bracketed by the SECOND-TO-LAST
+                #    notification (its start) and the last one (its end,
+                #    already end_ts) — anchoring on the latest notification
+                #    here would collapse run_start_ts onto end_ts itself
+                #    (~0:00 duration on a real multi-minute run).
+                #  - finished with at most one notification: no resume
+                #    bracket exists; 0.0 -> first_timestamp below.
+                if status == 'running':
+                    boundary_ts = notif_ts
+                elif run_count > 1:
+                    boundary_ts = prev_notif_ts if prev_notif_ts > 0 else notif_ts
+                else:
+                    boundary_ts = 0.0
+
+                billed_in, cache_read_in, output, first_ts, model, last_activity, transcript_end_ts, parsed_run_start = (
+                    cls._parse_transcript(jsonl, boundary_ts)
+                )
+                if meta_model:
+                    model = meta_model
+
+                run_start_ts = (
+                    (parsed_run_start if parsed_run_start > 0 else boundary_ts)
+                    if boundary_ts > 0 else first_ts
+                )
 
                 # Tier 3 (last resort): lost-notification staleness fallback.
                 # Neither tier 1 nor tier 2 ever fired — an upstream
@@ -889,19 +1048,6 @@ class RunningSubagents:
                 if status == 'running' and transcript_end_ts > 0 and now - mtime > cls.ABANDONED_HORIZON_SECONDS:
                     status = 'completed'
                     end_ts = mtime
-
-                # Terminal-signal invalidation, applied AFTER every tier so no
-                # tier can re-stamp it: a terminal signal is only believable
-                # while the transcript agrees with it. A stall watchdog can
-                # emit <status>failed</status> for an agent that is in fact
-                # still working; the stamp then retires a live agent and
-                # re-roots its children. A transcript write postdating the
-                # signal by more than the skew tolerance proves the agent
-                # outlived it, so drop the stamp and let it render live again.
-                # `resumed` is computed above and deliberately survives this.
-                if end_ts > 0 and mtime - end_ts > cls.TERMINAL_SKEW_SECONDS:
-                    status = 'running'
-                    end_ts = 0.0
 
                 subagents.append(RunningSubagent(
                     agent_type      = agent_type,
@@ -923,6 +1069,7 @@ class RunningSubagents:
                     run_count       = run_count,
                     is_fork         = is_fork,
                     resumed         = resumed,
+                    run_start_ts    = run_start_ts,
                 ))
         except OSError:
             pass
@@ -1028,7 +1175,9 @@ class RunningSubagents:
         return [sub for sub in candidates if not _retired(sub)]
 
     @staticmethod
-    def _parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float]:
+    def _parse_transcript(
+        jsonl: Path, resume_after: float = 0.0,
+    ) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float]:
         # Thin delegator to the module-level parse_transcript, kept so existing
         # callers/tests referencing RunningSubagents._parse_transcript still work.
-        return parse_transcript(jsonl)
+        return parse_transcript(jsonl, resume_after)

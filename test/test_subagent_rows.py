@@ -48,6 +48,7 @@ def _make_sub(
     status: str | None = None,
     run_count: int = 0,
     resumed: bool = False,
+    run_start_ts: float | None = None,
 ) -> RunningSubagent:
     now = time.time()
     if first_timestamp is None:
@@ -73,6 +74,10 @@ def _make_sub(
         status          = status,
         run_count       = run_count,
         resumed         = resumed,
+        # None -> RunningSubagent's own default (equals first_timestamp), so
+        # every existing caller that doesn't pass this keeps exercising the
+        # "no distinct resume boundary tracked" path unchanged.
+        run_start_ts    = run_start_ts,
     )
 
 
@@ -504,13 +509,32 @@ def test_one_line_resumed_keeps_live_styling_not_dim() -> None:
     assert _r.SKILLS in line
 
 
-def test_one_line_resumed_elapsed_continues_from_original_spawn() -> None:
-    # Elapsed time is computed from first_timestamp regardless of resume —
-    # a resumed agent's duration is NOT reset by the resume.
+def test_one_line_resumed_elapsed_uses_first_timestamp_when_run_start_unset() -> None:
+    # RENAMED (was test_one_line_resumed_elapsed_continues_from_original_spawn):
+    # `_make_sub` leaves `run_start_ts` unset, so it defaults to
+    # `first_timestamp` (the "no resume boundary tracked" case) regardless of
+    # the `resumed`/`run_count` flags passed here. Kept, renamed, to cover
+    # exactly that default-anchor fallback rather than imply it exercises the
+    # real resume-boundary math (see info/subagents.py's `run_start_ts`
+    # computation in `from_session` for that).
     sub = _make_sub(status='running', run_count=1, resumed=True,
                     first_timestamp=time.time() - 90)
     out = strip_ansi(_one(sub))
     assert '1:30' in out
+
+
+def test_one_line_resumed_elapsed_uses_run_start_ts_when_set() -> None:
+    # The real resume-boundary case: run_start_ts distinct from
+    # first_timestamp must win — this is the row-rendering-level regression
+    # guard for the fix (info/subagents.py's from_session covers the actual
+    # boundary computation; this only checks subagent_row wires run_start_ts
+    # through subagent_dur_str correctly).
+    now = time.time()
+    sub = _make_sub(status='running', run_count=1, resumed=True,
+                    first_timestamp=now - 65 * 60, run_start_ts=now - 90)
+    out = strip_ansi(_one(sub))
+    assert '1:30' in out
+    assert '1:05:' not in out
 
 
 def test_two_line_resumed_shows_resume_glyph_in_tree_column() -> None:

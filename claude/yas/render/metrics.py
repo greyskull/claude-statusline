@@ -50,11 +50,16 @@ def subagent_dur_str(sub: object, now: float) -> str:
     exactly the tree-mode misalignment this guards.
     """
     status = subagent_status(sub)
+    # run_start_ts anchors on the CURRENT run, not the agent's original spawn:
+    # a resumed agent (warm-agent SendMessage) appends further runs to the
+    # same transcript, so first_timestamp alone would span every prior run
+    # plus all idle time between them. run_start_ts == first_timestamp for a
+    # never-resumed agent, so this is a no-op change in the common case.
+    run_start = getattr(sub, 'run_start_ts', 0.0) or sub.first_timestamp  # type: ignore[attr-defined]
     if subagent_is_terminal(status):
-        dur = max(0.0, sub.end_ts - sub.first_timestamp)  # type: ignore[attr-defined]
+        dur = max(0.0, sub.end_ts - run_start)  # type: ignore[attr-defined]
     else:
-        first_ts = sub.first_timestamp  # type: ignore[attr-defined]
-        dur = max(0.0, now - first_ts) if first_ts > 0 else 0.0
+        dur = max(0.0, now - run_start) if run_start > 0 else 0.0
     total_s = int(dur)
     minutes, seconds = divmod(total_s, 60)
     if minutes >= 60:
