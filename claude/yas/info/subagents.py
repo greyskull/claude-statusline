@@ -609,10 +609,18 @@ def cap_tree_groups(subs: list[RunningSubagent], cap: int) -> list[RunningSubage
         # (e.g. one root plus more live children than fit). Trim within it
         # instead of dropping it wholesale: keep the root, plus the
         # most-recently-active cap - 1 descendants, in original order.
+        # Live members outrank finished ones here regardless of recency: a
+        # finished row lingering out its retention window must never displace
+        # a still-running sibling. Among equals, most-recently-active wins,
+        # which for finished members is oldest-finished-evicted-first.
         root, *descendants = ordered[0]
         keep_ids = {
             id(sub) for sub in
-            sorted(descendants, key=lambda sub: sub.mtime, reverse=True)[:cap - 1]
+            sorted(
+                descendants,
+                key=lambda sub: (sub.end_ts == 0, sub.mtime if sub.end_ts == 0 else sub.end_ts),
+                reverse=True,
+            )[:cap - 1]
         }
         trimmed = [root] + [sub for sub in descendants if id(sub) in keep_ids]
         return trimmed
@@ -731,6 +739,13 @@ class RunningSubagents:
     ABANDONED_HORIZON_SECONDS = 1800
     # Liveness window: silence threshold for "still writing" vs "idle/done" (straggler keep)
     LIVENESS_WINDOW_SECONDS = 30
+    # Finished-member linger: how long a Done member of a still-dirty cohort
+    # stays visible after its end_ts. Matches constants.SUBAGENT_RETENTION_SECONDS
+    # so the info layer no longer retires a finished row an entire minute before
+    # the layout's own retention horizon would. It is a MAXIMUM, not a
+    # guarantee — cap_tree_groups still evicts finished rows early (oldest
+    # end_ts first) whenever live members need the room.
+    FINISHED_LINGER_SECONDS = 120
     # Terminal-signal skew: how far a transcript write may postdate a terminal
     # status/end_ts and still be attributed to clock skew between the writer of
     # the signal and the writer of the transcript. Beyond it, the write is
@@ -992,9 +1007,9 @@ class RunningSubagents:
             if sub.end_ts > 0:
                 # Done member: a fully-clean cohort retires fast
                 # (COHORT_GRACE_SECONDS); a done member sitting inside a
-                # still-dirty cohort gets the longer janitor horizon so it
+                # still-dirty cohort lingers for FINISHED_LINGER_SECONDS so it
                 # doesn't vanish mid-turn while a sibling is still working.
-                horizon = self.COHORT_GRACE_SECONDS if all_done else self.JANITOR_HORIZON_SECONDS
+                horizon = self.COHORT_GRACE_SECONDS if all_done else self.FINISHED_LINGER_SECONDS
                 return now - sub.end_ts > horizon
             # Still-running (end_ts == 0): no terminal signal at all, so
             # silence alone under an hour is not evidence it is dead -- it

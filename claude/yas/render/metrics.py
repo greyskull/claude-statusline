@@ -66,19 +66,21 @@ def subagent_dur_str(sub: object, now: float) -> str:
 
 
 def subagent_type_label(sub: object) -> str:
-    """The agent-type text a subagent row displays, including the ``×N``
-    resume suffix on a live resumed run.
+    """The agent-type text a subagent row displays.
 
     Pulled out (like `subagent_dur_str`) so callers that reserve column
     width for the name field — `layout.oneline_name_width` — measure the
     SAME string `Renderer.subagent_row` renders.
+
+    The label used to carry a ``×N`` run-count suffix on a resumed run. It is
+    gone: `run_count` counts <task-notification> records, and the stall
+    watchdog emits spurious `failed` notifications for merely-slow agents, so
+    the number inflated for agents that were never restarted. The `↺` marker
+    (rendered from the same `resumed` state in `Renderer.subagent_row`) still
+    flags that a run was resumed — only the misleading count is dropped. The
+    underlying `run_count`/`resumed` fields are untouched.
     """
-    label     = getattr(sub, 'agent_type', '') or '?'
-    run_count = getattr(sub, 'run_count', 0)
-    is_done   = subagent_is_terminal(subagent_status(sub))
-    if not is_done and (getattr(sub, 'resumed', False) or run_count >= 1):
-        label = f'{label} ×{run_count + 1}'
-    return label
+    return getattr(sub, 'agent_type', '') or '?'
 
 
 def burndown_delta(

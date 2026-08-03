@@ -31,6 +31,7 @@ from yas.constants import (
     GLYPH_SUBAGENT_ENDED,
     GLYPH_SUBAGENT_RESUME,
     SUBAGENT_DISPLAY_CAP,
+    SUBAGENT_RETENTION_SECONDS,
     subagent_marker_glyph,
 )
 from yas.info.subagents import RunningSubagent, RunningSubagents
@@ -44,6 +45,7 @@ LIVENESS  = RunningSubagents.LIVENESS_WINDOW_SECONDS     # 30
 GRACE     = RunningSubagents.COHORT_GRACE_SECONDS         # 20
 JANITOR   = RunningSubagents.JANITOR_HORIZON_SECONDS      # 60
 ABANDONED = RunningSubagents.ABANDONED_HORIZON_SECONDS    # 1800
+LINGER    = RunningSubagents.FINISHED_LINGER_SECONDS      # 120
 
 
 def _sub(
@@ -287,6 +289,39 @@ def test_per_member_retirement_drops_only_long_dead_sibling() -> None:
     assert long_dead not in result
 
 
+def test_finished_member_still_visible_at_119s() -> None:
+    """A finished member of a dirty cohort lingers for the full 2 minutes."""
+    last_prompt_ts = NOW - 5.0
+    finished = _sub(first_timestamp=NOW - 4.0, mtime=NOW - 119.0, end_ts=NOW - 119.0,
+                    description='finished')
+    live     = _sub(first_timestamp=NOW - 3.0, mtime=NOW - 2.0, end_ts=0.0,
+                    description='live')
+
+    result = _cohort(finished, live).visible(NOW, last_prompt_ts)
+
+    assert finished in result
+
+
+def test_finished_member_retired_at_121s() -> None:
+    """One second past the linger window the finished member drops out."""
+    last_prompt_ts = NOW - 5.0
+    finished = _sub(first_timestamp=NOW - 4.0, mtime=NOW - 121.0, end_ts=NOW - 121.0,
+                    description='finished')
+    live     = _sub(first_timestamp=NOW - 3.0, mtime=NOW - 2.0, end_ts=0.0,
+                    description='live')
+
+    result = _cohort(finished, live).visible(NOW, last_prompt_ts)
+
+    assert finished not in result
+    assert live in result
+
+
+def test_finished_linger_matches_layout_retention() -> None:
+    """The info-layer linger must not retire a row before the layout's own
+    retention horizon would — they are deliberately the same 120 s."""
+    assert LINGER == SUBAGENT_RETENTION_SECONDS
+
+
 def test_janitor_not_triggered_if_one_member_wrote_recently() -> None:
     '''Dirty cohort is kept if at least one transcript was recently updated.'''
     last_prompt_ts = NOW - 30.0
@@ -518,7 +553,7 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 def test_tree_states_scenario_shows_four_states(tmp_path: Path) -> None:
     '''All four subagent lifecycle markers carried by the scenario must be
     present in the rendered output: ✓ completed, ✗ killed, ✗ stopped, and
-    ↺ resumed with its ×2 suffix (the scenario has no plain-running root — it
+    ↺ resumed (the scenario has no plain-running root — it
     is 4 flat subagents, one per state).
     '''
     with tempfile.TemporaryDirectory() as td:
@@ -529,7 +564,7 @@ def test_tree_states_scenario_shows_four_states(tmp_path: Path) -> None:
         'completed marker (✓)':      subagent_marker_glyph('completed') == GLYPH_SUBAGENT_DONE and GLYPH_SUBAGENT_DONE in plain,
         'killed marker (✗)':         subagent_marker_glyph('killed') == GLYPH_SUBAGENT_ENDED and GLYPH_SUBAGENT_ENDED in plain,
         'stopped marker (✗)':        subagent_marker_glyph('stopped') == GLYPH_SUBAGENT_ENDED and plain.count(GLYPH_SUBAGENT_ENDED) >= 2,
-        'resumed marker (↺) with ×2': GLYPH_SUBAGENT_RESUME in plain and '×2' in plain,
+        'resumed marker (↺)':        GLYPH_SUBAGENT_RESUME in plain,
     }
     missing = [name for name, present in checks.items() if not present]
     assert not missing, (
