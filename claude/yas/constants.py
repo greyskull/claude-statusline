@@ -113,7 +113,7 @@ META_EXCLUDE_TOOLS = frozenset({'TodoWrite', 'ExitPlanMode', 'AskUserQuestion'})
 # Plain-ASCII caption for the tool-counts separator. The label overlay applies
 # superscript() at render time, so no raw superscript glyphs live in source.
 TOOL_COUNTS_LABEL = 'tools main/sub'
-LINES_LABEL = 'LOC read/write'
+LINES_LABEL = 'loc read/write'
 
 CLR_GREY_DIM   = '\033[38;5;244m'
 CLR_GREY_DARK  = '\033[38;5;238m'
@@ -232,7 +232,7 @@ SPARK_RAMP      = '\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588'  # U+2581..
 # short for the full word. Tried before falling back to a whole-word-boundary
 # ellipsis shrink of the original text, and well before a label is dropped.
 LABEL_ABBREVIATIONS: dict[str, str] = {
-    'LOC read/write':     'LOC r/w',
+    'loc read/write':     'loc r/w',
     'output sess/day':    'out sess/day',
     'input sess/day':     'in sess/day',
 }

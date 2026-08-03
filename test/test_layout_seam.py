@@ -1091,12 +1091,12 @@ def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(downs_cleared) == len(downs_fresh)
 
 
-# --- Subagent Tree View column labels ('LOC r/w' anchoring, 'name' offset) ---
+# --- Subagent Tree View column labels ('loc r/w' anchoring, 'name' offset) ---
 
 def test_tree_labels_loc_slash_stacks_over_data_slash(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 'LOC r/w' header's own '/' must land in the SAME printed column as
+    """The 'loc r/w' header's own '/' must land in the SAME printed column as
     the '/' in a tree row's '<read> /<changed>' data — not at the field's
-    start like the (session-level) full-word 'LOC read/write' label does."""
+    start like the (session-level) full-word 'loc read/write' label does."""
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
     sub = _make_sub()

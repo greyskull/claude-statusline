@@ -1253,7 +1253,7 @@ def build_wide(
             # Overlay column labels on the section header (the
             # `separator_dim` row just appended above): 'name' over the
             # desc column, 'model' over the front-embedded model
-            # field, 'tokens' over the tok field, 'LOC r/w' over the lines
+            # field, 'tokens' over the tok field, 'loc r/w' over the lines
             # column, 'log' over the activity column. Derived from the SAME
             # anchors and field-offset math the rows themselves use
             # (desc_col/stats_col_v/activity_col plus
@@ -1280,8 +1280,8 @@ def build_wide(
                 # widths alone — the tok field's own padding shifts
                 # this by a column the naive arithmetic misses), the
                 # '/' lands at `lines_off + lines_w` inside the stats
-                # cluster. 'LOC r/w' has its own '/' at index 5
-                # ('L','O','C',' ','r','/'), so anchoring the label
+                # cluster. 'loc r/w' has its own '/' at index 5
+                # ('l','o','c',' ','r','/'), so anchoring the label
                 # there — rather than at the field's start like the
                 # full-word form — keeps the two '/'s stacked
                 # regardless of the cohort's measured `lines_w`.
@@ -1294,12 +1294,12 @@ def build_wide(
                     ('name', 3 + desc_col + 2),
                     ('model', 3 + model_col),
                     # 'tokens' (not the full word) — the tok field's 5-wide
-                    # column sits close enough to 'LOC r/w' that the full
+                    # column sits close enough to 'loc r/w' that the full
                     # word collides with it and gets dropped by the label
                     # overlay's run-based fitting; the short form fits its
-                    # own run without stealing 'LOC r/w's.
+                    # own run without stealing 'loc r/w's.
                     ('tok', tok_col),
-                    ('LOC r/w', loc_col),
+                    ('loc r/w', loc_col),
                     ('log', 3 + activity_col),
                 ])
             name_w = oneline_name_width(sub_cells)
