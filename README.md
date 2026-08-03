@@ -92,7 +92,6 @@ aliases when both are set — the aliases keep working but are deprecated.
 | `show_tool_uses` | `YAS_SHOW_TOOL_USES` | — | `[layout].show_tool_uses` | `false` |
 | `labels` | `YAS_LABELS` | — | `[layout].labels` | `false` |
 | `justify` | `YAS_JUSTIFY` | — | `[layout].justify` | `false` |
-| `subagent_tree` | `YAS_SUBAGENT_TREE` | — | `[layout].subagent_tree` | `false` |
 | `show_day_stats` | `YAS_SHOW_DAY_STATS` | — | `[tokens].show_day_stats` | `true` |
 
 #### Valid values
@@ -115,7 +114,6 @@ aliases when both are set — the aliases keep working but are deprecated.
 - **`show_tool_uses`** — when `true`, adds a row (wide layout only) under the tokens/cost band, listing per-tool `tool_use` counts.
 - **`labels`** — when `true`, paints small superscript field captions into the border/separator rows (wide layout only). **Note:** this is a different knob from `[context].labels`, which is the five-word state list — see [Context state word](#context-state-word). The two share a key name but live in different sections and take different types.
 - **`justify`** — when `true`, aligns fields into columns instead of packing them left (wide layout only).
-- **`subagent_tree`** — when `true`, renders subagents as a tree instead of the flat two-row display.
 - **`show_day_stats`** — when `true` (the default), shows today's cumulative token and cost totals alongside the session's, as `session/day` pairs. **Note:** this key lives under **`[tokens]`**, not `[layout]`, unlike the other display toggles.
 - **CLI flags** — `--theme NAME` / `--bg-shift DIR` also accept the `--theme=NAME` / `--bg-shift=DIR` form. Pass them in the `statusLine.command` of your `~/.claude/settings.json`.
 - **Legacy theme file** — `~/.claude/statusline-theme` (contents = a theme name) still works as the lowest-priority theme fallback, below `[appearance].theme`.
