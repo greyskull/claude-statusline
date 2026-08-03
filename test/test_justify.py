@@ -42,6 +42,10 @@ def _tick() -> TickRecord:
 
 
 def _silence_dynamic(monkeypatch: pytest.MonkeyPatch) -> None:
+    # rainbow_step() is wall-clock-based by default, so two renders inside one
+    # test straddle a second boundary ~3-5% of the time and pick adjacent
+    # palette entries — enough to break a byte-for-byte comparison. Pin it.
+    monkeypatch.setenv('YAS_RAINBOW_STEP', '0')
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
                         classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[])))
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
