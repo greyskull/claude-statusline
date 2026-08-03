@@ -1007,9 +1007,11 @@ class Renderer:
             # The type/name text greys via CTX_DIM when finished, same as the
             # model field below — only the ✓/✗ status marker keeps done_clr
             # (green/alert) so pass-vs-fail stays visually distinguishable.
-            # The duration field itself keeps done_clr (unchanged styling).
+            # The duration/elapsed field greys with the text: a finished
+            # agent's timer is frozen, so keeping it in a live colour read as
+            # if it were still ticking.
             if is_done:
-                front_c = f'{done_clr}{dur_s}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
+                front_c = f'{self.CTX_DIM}{dur_s}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
             else:
                 front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
             if tree_single:
@@ -1223,7 +1225,10 @@ class Renderer:
             model_field = short_model.ljust(model_field_w)
 
         if is_done:
-            front_n = f'{done_clr}{dur_s}{self.R} {elbow_n}{done_clr}{ITALIC}{type_text}{self.R}'
+            # Frozen timer and name/type both grey, same as the twoline tree
+            # form above; the ✓/✗ marker below is the only field that keeps
+            # done_clr, so pass-vs-fail stays readable.
+            front_n = f'{self.CTX_DIM}{dur_s}{self.R} {elbow_n}{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
         else:
             front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{ITALIC}{type_text}{self.R}'
         model_n_clr = self.CTX_DIM if is_done else model_clr

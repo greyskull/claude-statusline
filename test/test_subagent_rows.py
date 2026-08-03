@@ -20,6 +20,7 @@ from yas.constants import (
 )
 from yas.info import SessionView
 from yas.info.subagents import RunningSubagent
+from yas.render.metrics import subagent_dur_str
 from yas.render.text import _visible_width, fmt_tok, fmt_tok_fixed
 from yas.tokens import TickRecord, TokenLog
 from helper import strip_ansi
@@ -380,6 +381,44 @@ def test_done_two_line_duration_does_not_tick() -> None:
     time.sleep(0.05)
     line1_b, _ = _two(sub)
     assert strip_ansi(line1_a) == strip_ansi(line1_b)
+
+
+def test_done_two_line_duration_is_greyed() -> None:
+    # A finished agent's timer is frozen, so it greys with the type/name text
+    # rather than keeping the live/done accent colour. Only the ✓/✗ marker
+    # keeps done_clr.
+    sub   = _make_done_sub()
+    dur_s = subagent_dur_str(sub, time.time())
+    line1, _ = _two(sub)
+    assert f'{_r.CTX_DIM}{dur_s}' in line1
+    assert f'{_r.safe}{dur_s}' not in line1
+
+
+def test_running_two_line_duration_keeps_live_colour() -> None:
+    sub   = _make_sub()
+    dur_s = subagent_dur_str(sub, time.time())
+    line1, _ = _two(sub)
+    assert f'{_r.CTX}{dur_s}' in line1
+
+
+def test_done_one_line_duration_is_greyed() -> None:
+    sub   = _make_done_sub()
+    dur_s = subagent_dur_str(sub, time.time())
+    line  = _one(sub)
+    assert f'{_r.CTX_DIM}{dur_s}' in line
+    assert f'{_r.safe}{dur_s}' not in line
+
+
+def test_done_one_line_name_is_greyed() -> None:
+    # The italic name/type field greys too, matching the twoline tree form.
+    line = _one(_make_done_sub())
+    assert f'{_r.CTX_DIM}{ITALIC}' in line
+    assert f'{_r.safe}{ITALIC}' not in line
+
+
+def test_running_one_line_name_keeps_live_styling() -> None:
+    line = _one(_make_sub())
+    assert f'{_r.SKILLS}{ITALIC}' in line
 
 
 def test_done_two_line_no_marker() -> None:
