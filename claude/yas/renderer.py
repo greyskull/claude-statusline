@@ -208,6 +208,12 @@ def _best_fit_cluster(
     return cluster
 
 
+def _is_pua(ch: str) -> bool:
+    """True if `ch` is a Nerd Font Private Use Area codepoint."""
+    cp = ord(ch)
+    return 0xE000 <= cp <= 0xF8FF or 0xF0000 <= cp <= 0xFFFFD
+
+
 def _strike_activity(activity: str) -> str:
     """Strike an activity segment's text, leaving its leading PUA glyph plain.
 
@@ -216,13 +222,19 @@ def _strike_activity(activity: str) -> str:
     trailing space is wrapped. Call this AFTER any ellipsis truncation — the
     callers slice the raw string, and slicing an escape-bearing one would cut
     a sequence in half and let the strike bleed into the next column.
+
+    If there's no space (e.g. the glyph got truncated down to nothing but
+    itself), still never strike a leading PUA glyph — strike everything
+    after it instead of falling back to striking the whole string.
     """
     if not activity:
         return ''
     glyph, sep, text = activity.partition(' ')
-    if not sep:
-        return strike(activity)
-    return f'{glyph}{sep}{strike(text)}'
+    if sep:
+        return f'{glyph}{sep}{strike(text)}'
+    if _is_pua(activity[0]):
+        return f'{activity[0]}{strike(activity[1:])}'
+    return strike(activity)
 
 
 # ---------------------------------------------------------------------------

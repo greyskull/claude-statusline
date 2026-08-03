@@ -1830,6 +1830,13 @@ def test_lines_field_uses_the_log_column_grey() -> None:
 
 
 def test_lines_field_grey_composes_with_the_finished_strikethrough() -> None:
+    # The lines field is CTX_DIM in BOTH run states — that alone predates the
+    # strikethrough feature and asserting it on the done row only wouldn't
+    # detect a regression (the finished path was already CTX_DIM before
+    # strikethrough existed). What's new is that strike layers on top of the
+    # SAME colour rather than the field going conditionally-coloured again;
+    # asserting both branches together is what makes a regression back to
+    # `d if is_done else white_brt`-style conditional colouring fail here.
     done = _make_done_sub()
     live = _make_sub()
     kw   = dict(twoline=True, tree_single=True, tree_prefix='├ ',
@@ -1841,6 +1848,12 @@ def test_lines_field_grey_composes_with_the_finished_strikethrough() -> None:
     # Colour opens, strike opens and closes inside it, then the row's reset —
     # no bleed — and the colour codes are zero-width either way.
     assert f'{_r.CTX_DIM}{STRIKE}1.20K{UNSTRIKE}' in done_line
+    # The live row carries the SAME grey with no strike at all — if the
+    # colour ever regressed to being conditional on run state again, this
+    # branch would go back to white_brt and this assertion would catch it.
+    assert f'{_r.CTX_DIM}1.20K' in live_line
+    assert STRIKE not in live_line and UNSTRIKE not in live_line
+    assert _r.white_brt not in live_line
     assert _visible_width(done_line) == _visible_width(live_line) == 156
 
 
@@ -1969,6 +1982,22 @@ def test_done_row_strikethrough_is_always_terminated() -> None:
     # No dangling SGR 9 past the last terminator — nothing can bleed into the
     # next cell or the row below.
     assert line1.rindex(UNSTRIKE) > line1.rindex(STRIKE)
+
+
+def test_strike_activity_never_strikes_a_leading_pua_glyph_without_a_space() -> None:
+    # `_strike_activity` normally splits on the glyph's trailing space, but a
+    # no-space activity (e.g. the glyph alone, or a glyph glued straight to
+    # text with no separator) must still leave the leading PUA glyph plain —
+    # falling back to striking the WHOLE string would rule through the icon.
+    glyph = GLYPH_REPLYING
+    struck = renderer_mod._strike_activity(f'{glyph}nospace')
+
+    assert struck.startswith(glyph)
+    assert not struck.startswith(f'{STRIKE}{glyph}')
+    assert f'{STRIKE}nospace{UNSTRIKE}' in struck
+
+    # Plain text with no glyph at all still gets struck in full.
+    assert renderer_mod._strike_activity('plaintext') == renderer_mod.strike('plaintext')
 
 
 def test_strikethrough_is_absent_from_a_running_row() -> None:
