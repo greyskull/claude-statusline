@@ -672,6 +672,152 @@ def test_structured_output_null_stop_reason_detects_done(tmp_home: Path) -> None
     assert sub.end_ts == 0.0
 
 
+# ---------------------------------------------------------------------------
+# Tier 1: toolUseResult signal in the spawning transcript. Preferred over
+# <task-notification> -- fires even when no notification was ever emitted.
+# ---------------------------------------------------------------------------
+
+def _write_agent_with_tool_use_id(
+    subagents_dir: Path,
+    agent_id: str,
+    tool_use_id: str,
+    *,
+    agent_type: str  = 'Explore',
+    description: str = 'find X',
+    jsonl_lines: list[str] | None = None,
+    mtime: float | None = None,
+) -> tuple[Path, Path]:
+    '''Like _write_agent, but the meta.json also carries toolUseId, the join
+    key for the tier-1 toolUseResult lookup in the spawning transcript.'''
+    subagents_dir.mkdir(parents=True, exist_ok=True)
+    meta = subagents_dir / f'{agent_id}.meta.json'
+    meta.write_text(json.dumps({
+        'agentType': agent_type, 'description': description, 'toolUseId': tool_use_id,
+    }))
+    jsonl = subagents_dir / f'{agent_id}.jsonl'
+    lines = jsonl_lines if jsonl_lines is not None else ['{"event": "start"}\n']
+    jsonl.write_text(''.join(lines))
+    if mtime is not None:
+        os.utime(jsonl, (mtime, mtime))
+    return meta, jsonl
+
+
+def _tool_result_line(tool_use_id: str, status: str, timestamp: str) -> str:
+    '''A top-level session-transcript record carrying the toolUseResult
+    sibling field the way Claude Code core writes it for a resolved
+    Agent/Task tool call.'''
+    d = {
+        'type': 'user',
+        'timestamp': timestamp,
+        'message': {
+            'content': [{'type': 'tool_result', 'tool_use_id': tool_use_id, 'content': []}],
+        },
+        'toolUseResult': {'status': status, 'timestamp': timestamp},
+    }
+    return json.dumps(d) + '\n'
+
+
+def test_tool_use_result_marks_done_without_any_notification(tmp_home: Path) -> None:
+    '''An agent with no <task-notification> anywhere, but whose spawning
+    transcript's tool_result carries toolUseResult.status == "completed", is
+    treated as done via the tier-1 signal.
+    '''
+    now = time.time()
+    sdir = _subagents_dir(tmp_home)
+    _write_agent_with_tool_use_id(
+        sdir, 'agent-tier1', 'toolu_abc123',
+        jsonl_lines=[_assistant_line('m1', output_tokens=5)],
+        mtime=now - 5.0,
+    )
+    session_jsonl = tmp_home / '.claude' / 'projects' / f'-{PROJECT_SLUG}' / f'{SESSION_ID}.jsonl'
+    session_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    session_jsonl.write_text(_tool_result_line('toolu_abc123', 'completed', '2026-05-22T18:00:00.000Z'))
+
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR, now=now)
+    sub = result.subagents[0]
+    assert sub.status == 'completed'
+    assert sub.is_done
+    assert sub.end_ts > 0
+
+
+def test_tool_use_result_non_completed_status_stays_running(tmp_home: Path) -> None:
+    '''An unconfirmed (non-"completed") toolUseResult status is not trusted
+    on its own -- the agent stays "running" pending a real terminal signal.
+    '''
+    now = time.time()
+    sdir = _subagents_dir(tmp_home)
+    _write_agent_with_tool_use_id(
+        sdir, 'agent-tier1-pending', 'toolu_def456',
+        jsonl_lines=[_assistant_line('m1', output_tokens=5)],
+        mtime=now - 5.0,
+    )
+    session_jsonl = tmp_home / '.claude' / 'projects' / f'-{PROJECT_SLUG}' / f'{SESSION_ID}.jsonl'
+    session_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    session_jsonl.write_text(_tool_result_line('toolu_def456', 'in_progress', '2026-05-22T18:00:00.000Z'))
+
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR, now=now)
+    sub = result.subagents[0]
+    assert sub.status == 'running'
+    assert not sub.is_done
+
+
+# ---------------------------------------------------------------------------
+# Lost-notification fallback: terminal stop_reason + long silence + no
+# <task-notification> ever received. Gated on BOTH a terminal stop_reason AND
+# staleness past ABANDONED_HORIZON_SECONDS -- neither alone is sufficient, to
+# avoid reintroducing the reverted end_turn-only false positive (see the NOTE
+# in parse_transcript and the other tests in this file that assert end_turn
+# alone leaves end_ts == 0.0).
+# ---------------------------------------------------------------------------
+
+def test_lost_notification_fallback_marks_done_past_abandoned_horizon(tmp_home: Path) -> None:
+    '''An agent whose transcript ends in stop_reason: end_turn, with no
+    <task-notification> ever received, and silent well past
+    ABANDONED_HORIZON_SECONDS, is treated as done via the staleness fallback.
+    '''
+    now = time.time()
+    end_turn_ts = '2026-05-22T18:00:00.000Z'
+    stale_mtime = now - RunningSubagents.ABANDONED_HORIZON_SECONDS - 1
+    sdir = _subagents_dir(tmp_home)
+    _write_agent(
+        sdir, 'agent-lost-notif',
+        jsonl_lines=[
+            _assistant_line_full('m1', 'end_turn', output_tokens=5, timestamp=end_turn_ts),
+        ],
+        mtime=stale_mtime,
+    )
+
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR, now=now)
+    sub = result.subagents[0]
+    assert sub.status == 'completed'
+    assert sub.end_ts == stale_mtime
+    assert sub.is_done
+
+
+def test_terminal_stop_reason_but_fresh_mtime_stays_running(tmp_home: Path) -> None:
+    '''An agent with a terminal stop_reason but a transcript still within
+    ABANDONED_HORIZON_SECONDS is NOT treated as done by the fallback -- it
+    keeps waiting for the real <task-notification> (no false positive).
+    '''
+    now = time.time()
+    end_turn_ts = '2026-05-22T18:00:00.000Z'
+    fresh_mtime = now - (RunningSubagents.ABANDONED_HORIZON_SECONDS - 5)
+    sdir = _subagents_dir(tmp_home)
+    _write_agent(
+        sdir, 'agent-fresh-end-turn',
+        jsonl_lines=[
+            _assistant_line_full('m1', 'end_turn', output_tokens=5, timestamp=end_turn_ts),
+        ],
+        mtime=fresh_mtime,
+    )
+
+    result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR, now=now)
+    sub = result.subagents[0]
+    assert sub.status == 'running'
+    assert sub.end_ts == 0.0
+    assert not sub.is_done
+
+
 def test_structured_output_duplicate_message_detects_done(tmp_home: Path) -> None:
     # Same deleted heuristic, exercised with a re-streamed duplicate message
     # id. Still must stay "running" absent a <task-notification>.

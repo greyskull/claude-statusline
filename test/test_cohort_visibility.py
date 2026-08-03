@@ -180,6 +180,25 @@ def test_dirty_cohort_mixed_horizons() -> None:
     assert running in result
 
 
+def test_per_member_retirement_drops_only_long_dead_sibling() -> None:
+    '''Regression: one still-live sibling must not keep a long-dead,
+    never-notified cohort member visible forever. Each candidate retires
+    independently once IT crosses its own horizon, not the cohort's `all()`.
+    '''
+    last_prompt_ts = NOW - 5.0
+    long_dead = _sub(
+        first_timestamp=NOW - 3.0, mtime=NOW - (ABANDONED + 1), end_ts=0.0,
+        description='long-dead-no-notification',
+    )
+    live = _sub(
+        first_timestamp=NOW - 3.0, mtime=NOW - 2.0, end_ts=0.0,
+        description='live',
+    )
+    result = _cohort(long_dead, live).visible(NOW, last_prompt_ts)
+    assert live in result
+    assert long_dead not in result
+
+
 def test_janitor_not_triggered_if_one_member_wrote_recently() -> None:
     '''Dirty cohort is kept if at least one transcript was recently updated.'''
     last_prompt_ts = NOW - 30.0

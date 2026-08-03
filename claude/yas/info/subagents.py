@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -180,6 +181,107 @@ def _tail_read_notifications(path: Path) -> list[_Notification]:
 
     _notif_tail_cache[key] = _TailCacheEntry(st.st_mtime, st.st_size, new_offset, notifications)
     return notifications
+
+
+class _ToolResultCacheEntry(NamedTuple):
+    '''One cached tail-read state for toolUseResult scanning: (mtime, size,
+    byte-offset consumed, tool_use_id -> (status, ts) map found so far).'''
+    mtime:   float
+    size:    int
+    offset:  int
+    results: dict[str, tuple[str, float]]
+
+
+# Tail-read cache for toolUseResult scanning, keyed by absolute path string.
+# Same rationale as _notif_tail_cache: transcripts only grow, so re-scanning
+# whole files on every render would be too slow.
+_tool_result_tail_cache: dict[str, _ToolResultCacheEntry] = {}
+
+
+def _extract_tool_results(line: str) -> list[tuple[str, str, float]]:
+    '''Extract zero or more (tool_use_id, status, ts) triples from one JSONL line.
+
+    Looks for a top-level ``toolUseResult`` field — a sibling of ``message``,
+    not nested inside it — on a ``type: "user"`` record whose
+    ``message.content`` carries the matching ``tool_result`` block. This is
+    written by Claude Code core itself for every resolved Agent/Task tool
+    call, independent of whether a ``<task-notification>`` was ever emitted.
+    See the subagent-completion-signals investigation for the confirmed shape.
+    '''
+    out: list[tuple[str, str, float]] = []
+    try:
+        d = json.loads(line)
+    except (ValueError, TypeError):
+        return out
+    if not isinstance(d, dict) or d.get('type') != 'user':
+        return out
+    tur = d.get('toolUseResult')
+    if not isinstance(tur, dict):
+        return out
+    status = tur.get('status')
+    if not isinstance(status, str) or not status:
+        return out
+    msg = d.get('message')
+    content = msg.get('content') if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return out
+    ts_raw = d.get('timestamp') or tur.get('timestamp') or ''
+    ts = _parse_iso_to_epoch(str(ts_raw)) if ts_raw else 0.0
+    for item in content:
+        if isinstance(item, dict) and item.get('type') == 'tool_result':
+            tool_use_id = str(item.get('tool_use_id', '') or '')
+            if tool_use_id:
+                out.append((tool_use_id, status, ts))
+    return out
+
+
+def _tail_read_tool_results(path: Path) -> dict[str, tuple[str, float]]:
+    '''Read new tool_use_id -> (status, ts) pairs from path's toolUseResult
+    sibling fields since it was last seen.
+
+    Same tail-cache shape as _tail_read_notifications: an unchanged (mtime,
+    size) pair skips all I/O; a changed file is read only from the previously
+    recorded byte offset onward, never re-parsing the whole transcript.
+    '''
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        cached = _tool_result_tail_cache.get(key)
+        return cached.results if cached else {}
+
+    cached = _tool_result_tail_cache.get(key)
+    if cached is not None and cached.mtime == st.st_mtime and cached.size == st.st_size:
+        return cached.results
+
+    reusable    = cached is not None and cached.size <= st.st_size
+    prev_offset = cached.offset if reusable and cached is not None else 0
+    results     = dict(cached.results) if reusable and cached is not None else {}
+
+    try:
+        with path.open('rb') as fh:
+            fh.seek(prev_offset)
+            chunk = fh.read()
+    except OSError:
+        _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, prev_offset, results)
+        return results
+
+    last_nl = chunk.rfind(b'\n')
+    if last_nl == -1:
+        # No complete line has arrived since the last read; leave the offset
+        # put so the still-growing partial line is re-read whole next time.
+        _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, prev_offset, results)
+        return results
+
+    new_offset = prev_offset + last_nl + 1
+    for raw_line in chunk[:last_nl].split(b'\n'):
+        if b'"toolUseResult"' not in raw_line:
+            continue
+        for tool_use_id, status, ts in _extract_tool_results(raw_line.decode('utf-8', errors='ignore')):
+            results[tool_use_id] = (status, ts)
+
+    _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, new_offset, results)
+    return results
 
 
 class _NotifLookup(NamedTuple):
@@ -633,9 +735,13 @@ class RunningSubagents:
     STALE_SECONDS = LIVENESS_WINDOW_SECONDS
 
     @classmethod
-    def from_session(cls, session_id: str, project_dir: str) -> RunningSubagents:
+    def from_session(cls, session_id: str, project_dir: str, now: float | None = None) -> RunningSubagents:
         if not session_id or not project_dir:
             return cls()
+        # now is injectable for tests; defaults to wall-clock time so the
+        # ABANDONED_HORIZON_SECONDS fallback below is deterministic under test.
+        if now is None:
+            now = time.time()
         # Match Claude Code's projects/ dir convention: replace every non-
         # alphanumeric character with '-'. Works on both Unix
         # ('/home/user/my-project' -> '-home-user-my-project') and Windows
@@ -664,6 +770,7 @@ class RunningSubagents:
                 spawn_depth = 0
                 is_fork = False
                 meta_model = ''
+                tool_use_id = ''
                 try:
                     data = json.loads(meta.read_text())
                     agent_type = _sanitize(data.get('agentType', '') or '')
@@ -676,8 +783,17 @@ class RunningSubagents:
                     spawn_depth = int(raw_depth) if isinstance(raw_depth, (int, float)) else 0
                     is_fork = bool(data.get('isFork', False)) or agent_type == 'fork'
                     meta_model = str(data.get('model', '') or '')
+                    # toolUseId names the Agent/Task tool_use that spawned this
+                    # agent — the join key for the tier-1 toolUseResult signal
+                    # below (found in the spawning transcript's tool_result).
+                    tool_use_id = str(data.get('toolUseId', '') or '')
                 except Exception:
                     continue
+                # The spawning transcript: top-level session file when there's
+                # no parentAgentId, else the parent agent's own transcript
+                # (a nested spawn's tool_result lands in ITS spawner's file,
+                # same locality rule <task-notification> scanning documents).
+                parent_jsonl = subagents_dir / f'agent-{parent_id}.jsonl' if parent_id else session_jsonl
 
                 jsonl = meta.with_suffix('').with_suffix('.jsonl')
                 if not jsonl.is_file():
@@ -687,31 +803,68 @@ class RunningSubagents:
                 except OSError:
                     continue
 
-                billed_in, cache_read_in, output, first_ts, model, last_activity, _ = cls._parse_transcript(jsonl)
+                billed_in, cache_read_in, output, first_ts, model, last_activity, transcript_end_ts = \
+                    cls._parse_transcript(jsonl)
                 if meta_model:
                     model = meta_model
 
-                # Authoritative status: an unrecognised or missing notification
-                # NEVER means done — only a known terminal status, from the
-                # LATEST notification seen, does. run_count/resumed surface the
-                # same-task-id-notifies-more-than-once resume case (bias rule
-                # + resume detection — never inferred from transcript prose).
+                # Authoritative status, checked in priority order:
+                #
+                # Tier 1 (preferred): the SPAWNING transcript's own tool_result
+                # record for the Agent/Task tool_use that created this agent —
+                # a structured `toolUseResult.status` field written by Claude
+                # Code core itself, not agent-authored prose. It fires even
+                # when no <task-notification> was ever emitted. Only a
+                # confirmed 'completed' status is trusted here; other values
+                # haven't been observed in the wild yet (see the
+                # subagent-completion-signals investigation), so anything else
+                # falls through to the tiers below rather than risk a false
+                # positive.
+                status      = 'running'
+                run_count   = 0
+                notif_ts    = 0.0
+                end_ts      = 0.0
+                if tool_use_id and parent_jsonl.is_file():
+                    tool_result = _tail_read_tool_results(parent_jsonl).get(tool_use_id)
+                    if tool_result is not None and tool_result[0] == 'completed':
+                        status = 'completed'
+                        end_ts = tool_result[1] if tool_result[1] > 0 else mtime
+
+                # Tier 2: <task-notification> scan. Always consulted for
+                # run_count/resumed bookkeeping (a same-task-id notifying more
+                # than once is the resume signal, independent of tier 1), but
+                # only overrides `status` while tier 1 hasn't already resolved
+                # it — an unrecognised or missing notification NEVER means
+                # done on its own (bias rule).
                 task_id = jsonl.stem.removeprefix('agent-')
                 lookup = notif_map.get(task_id) or notif_map.get(jsonl.stem)
-                status    = 'running'
-                run_count = 0
-                notif_ts  = 0.0
                 if lookup is not None:
                     run_count = lookup.notif_count
                     notif_ts  = lookup.ts
                     raw_status = lookup.status
-                    if raw_status in _TERMINAL_STATUSES:
+                    if status == 'running' and raw_status in _TERMINAL_STATUSES:
                         status = raw_status
+                        end_ts = notif_ts
                 # Resumed: more than one notification seen, or the transcript
                 # kept being written after the last-seen notification (a
                 # resumed agent appends more turns to the same jsonl).
                 resumed = run_count > 1 or (notif_ts > 0 and mtime > notif_ts)
-                end_ts = notif_ts if status != 'running' else 0.0
+
+                # Tier 3 (last resort): lost-notification staleness fallback.
+                # Neither tier 1 nor tier 2 ever fired — an upstream
+                # event-emission gap — but the agent's own last assistant line
+                # already carries a terminal stop_reason (end_turn, via
+                # parse_transcript's transcript_end_ts) AND the transcript has
+                # gone silent for the full ABANDONED_HORIZON_SECONDS — the same
+                # long horizon visible() already uses to sweep orphaned
+                # end_ts==0 members. Gating on both conditions (not stop_reason
+                # alone) is what keeps this from reintroducing the reverted
+                # end_turn-only false positive described in parse_transcript's
+                # NOTE: a normal fast-finishing agent is still well within the
+                # horizon and keeps waiting for a real tier-1/tier-2 signal.
+                if status == 'running' and transcript_end_ts > 0 and now - mtime > cls.ABANDONED_HORIZON_SECONDS:
+                    status = 'completed'
+                    end_ts = mtime
 
                 subagents.append(RunningSubagent(
                     agent_type      = agent_type,
@@ -777,28 +930,29 @@ class RunningSubagents:
         if not candidates:
             return []
 
-        # Retirement logic (Task 3.3)
-        if all(sub.end_ts > 0 for sub in candidates):
-            # Fully-Done cohort: retire once the grace window expires
-            if now - max(sub.end_ts for sub in candidates) > self.COHORT_GRACE_SECONDS:
-                return []
-        else:
-            # Dirty cohort: janitor sweep when every member has gone silent
-            # long enough to be real evidence of abandonment. A member with a
-            # terminal status but no clean end_turn still only needs
-            # JANITOR_HORIZON_SECONDS silence; a still-running member
-            # (end_ts == 0) has no terminal signal at all, so silence alone
-            # under an hour is not evidence it is dead -- it may just be mid
-            # long-tool-call or extended thinking. Require the much longer
-            # ABANDONED_HORIZON_SECONDS before sweeping those.
-            def _retired(sub: RunningSubagent) -> bool:
-                horizon = self.JANITOR_HORIZON_SECONDS if sub.end_ts > 0 else self.ABANDONED_HORIZON_SECONDS
-                return now - sub.mtime > horizon
+        # Retirement logic (Task 3.3), applied per member — not all-or-
+        # nothing. A single still-active sibling in the same turn-scoped
+        # cohort must not keep a long-finished member visible forever; each
+        # candidate is independently dropped once IT satisfies the horizon
+        # for its own state. Aggregate counts ("N active") that read
+        # visible() see the smaller live set as a result, which is correct.
+        all_done = all(sub.end_ts > 0 for sub in candidates)
 
-            if all(_retired(sub) for sub in candidates):
-                return []
+        def _retired(sub: RunningSubagent) -> bool:
+            if sub.end_ts > 0:
+                # Done member: a fully-clean cohort retires fast
+                # (COHORT_GRACE_SECONDS); a done member sitting inside a
+                # still-dirty cohort gets the longer janitor horizon so it
+                # doesn't vanish mid-turn while a sibling is still working.
+                horizon = self.COHORT_GRACE_SECONDS if all_done else self.JANITOR_HORIZON_SECONDS
+                return now - sub.end_ts > horizon
+            # Still-running (end_ts == 0): no terminal signal at all, so
+            # silence alone under an hour is not evidence it is dead -- it
+            # may just be mid long-tool-call or extended thinking. Require
+            # the much longer ABANDONED_HORIZON_SECONDS before sweeping.
+            return now - sub.mtime > self.ABANDONED_HORIZON_SECONDS
 
-        return candidates
+        return [sub for sub in candidates if not _retired(sub)]
 
     @staticmethod
     def _parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float]:
