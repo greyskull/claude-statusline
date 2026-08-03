@@ -20,16 +20,25 @@
 # labels = false       # bool; wide layout only — paint small superscript section
 #                      #   labels into the border/separator rows above each value
 #                      #   (clear/session, 5h/remain/used, input/cache/output, …).
-#                      #   env: YAS_LABELS
+#                      #   NOTE: distinct from [context].labels below, which is the
+#                      #   five-word state list. Same key name, different section,
+#                      #   different type. env: YAS_LABELS
+# justify = false      # bool; wide layout only — align fields into columns instead
+#                      #   of packing them left. env: YAS_JUSTIFY
 # show_render_time = false  # bool; annotate the bottom-right border with the previous
 #                           #   run's wall-clock render time (e.g. …47.2ms──╯). Blank on
 #                           #   a session's first render. env: YAS_SHOW_RENDER_TIME
 # show_tool_uses = false    # bool; wide layout only — show the per-tool tool_use
 #                           #   counts row below the tokens/cost rows. env: YAS_SHOW_TOOL_USES
+# subagent_tree = false     # bool; render subagents as a tree instead of the flat
+#                           #   two-row display. env: YAS_SUBAGENT_TREE
 
 # [tokens]
 # soft_limit = 150000   # int > 0; tokens; context-fill bar / % threshold. Raise for 1M-context models.
 # token_window = 60     # number > 0; seconds; rolling window for the token throughput (t/m) rate
+# show_day_stats = true # bool; show today's cumulative token/cost totals alongside the
+#                       #   session's, as session/day pairs. NOTE: this display toggle
+#                       #   lives under [tokens], not [layout]. env: YAS_SHOW_DAY_STATS
 #
 # Per-model soft_limit overrides. `match` is a case-insensitive plain substring
 # (no glob/regex) tested against the model id and display name. The LONGEST
@@ -43,16 +52,22 @@
 # ]
 
 # [appearance]
-# theme = "claude-dark"  # one of: claude-dark, claude-light, catppuccin-latte, catppuccin-mocha
+# theme = "claude-dark"  # one of 14 built-in themes; unknown or unset falls back to
+#                        #   claude-dark.
+#                        #   Dark:  claude-dark, catppuccin-mocha, dracula, gruvbox-dark,
+#                        #          nord, one-dark, solarized-dark, tokyo-night, palenight
+#                        #   Light: claude-light, catppuccin-latte, gruvbox-light,
+#                        #          one-light, solarized-light
 # bg_shift = "warm"      # warm or cool; direction of the model-row gradient shift
 
 # [appearance.glyphs]
 # mode picks the richest glyph representation your terminal can display. All
-# three modes preserve the box's column geometry. (env: YAS_GLYPH_MODE,
+# four modes preserve the box's column geometry. (env: YAS_GLYPH_MODE,
 # CLI: --glyph-mode)
 #   nerdfont — (default) display every glyph as-is. Full fidelity; needs a Nerd Font.
 #   ascii    — replace every non-ASCII glyph with a width-1 ASCII equivalent. Maximum compatibility.
 #   unicode  — replace only Nerd Font PUA icons with non-PUA Unicode; keep box/block/arrow glyphs. For good-Unicode-but-no-Nerd-Font terminals.
+#   github   — GitHub-paste-safe: fold every glyph a browser renders double-wide to a width-1, EAW-narrow/ASCII stand-in, so a render stays column-aligned in a GitHub markdown code block.
 # mode = "nerdfont"
 #
 # single_width folds double-width chars (wide emoji, CJK) in dynamic content to
@@ -69,4 +84,6 @@
 # context bar. (env: YAS_CONTEXT_STATE / YAS_CONTEXT_LABELS / YAS_CONTEXT_THRESHOLDS)
 # state = false
 # labels = ["Smart", "Coasting", "Foggy", "Cooked", "Dumb"]  # exactly 5 non-empty words
+#                                                            # NOTE: this is [context].labels,
+#                                                            # NOT [layout].labels above.
 # thresholds = [25, 50, 70, 90]                              # exactly 4 ascending ints, 1..99
