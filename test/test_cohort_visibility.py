@@ -18,7 +18,9 @@ lifecycle state (completed/killed/stopped/resumed) — this guard exists so a
 future edit that trims/reorders those rows (or changes the cap/trim logic)
 fails loudly instead of silently dropping a marker.
 '''
+import datetime
 import json
+import os
 import re
 import sys
 import tempfile
@@ -50,6 +52,8 @@ def _sub(
     mtime: float           = NOW - 5.0,
     end_ts: float          = 0.0,
     description: str       = 'test-agent',
+    agent_id: str          = '',
+    parent_id: str         = '',
 ) -> RunningSubagent:
     return RunningSubagent(
         agent_type      = 'Explore',
@@ -59,6 +63,8 @@ def _sub(
         first_timestamp = first_timestamp,
         mtime           = mtime,
         end_ts          = end_ts,
+        agent_id        = agent_id,
+        parent_id       = parent_id,
     )
 
 
@@ -101,6 +107,88 @@ def test_running_agent_always_shown() -> None:
     sub = _sub(first_timestamp=NOW - 3.0, mtime=NOW - 2.0, end_ts=0.0)
     result = _cohort(sub).visible(NOW, last_prompt_ts)
     assert sub in result
+
+
+class TestSupervisingParentVisibility:
+    '''A parent blocked waiting on children writes nothing but is still alive.'''
+
+    def test_silent_parent_with_live_descendant_stays_visible(self) -> None:
+        # setup: parent last wrote well outside the liveness window, its child 2 s ago
+        last_prompt_ts = NOW - 10.0
+        parent = _sub(
+            first_timestamp = NOW - 600.0,
+            mtime           = NOW - (LIVENESS + 120),
+            agent_id        = 'agent-parent',
+        )
+        child = _sub(
+            first_timestamp = NOW - 300.0,
+            mtime           = NOW - 2.0,
+            agent_id        = 'agent-child',
+            parent_id       = 'parent',
+        )
+
+        # run
+        result = _cohort(parent, child).visible(NOW, last_prompt_ts)
+
+        # expected
+        expected = [parent, child]
+
+        # assert
+        assert result == expected
+
+    def test_silent_grandparent_kept_through_the_whole_chain(self) -> None:
+        # setup
+        last_prompt_ts = NOW - 10.0
+        silent_mtime = NOW - (LIVENESS + 120)
+        gran = _sub(first_timestamp=NOW - 900.0, mtime=silent_mtime, agent_id='agent-gran')
+        parent = _sub(
+            first_timestamp = NOW - 600.0,
+            mtime           = silent_mtime,
+            agent_id        = 'agent-parent',
+            parent_id       = 'gran',
+        )
+        child = _sub(
+            first_timestamp = NOW - 300.0,
+            mtime           = NOW - 2.0,
+            agent_id        = 'agent-child',
+            parent_id       = 'parent',
+        )
+
+        # run
+        result = _cohort(gran, parent, child).visible(NOW, last_prompt_ts)
+
+        # expected
+        expected = [gran, parent, child]
+
+        # assert
+        assert result == expected
+
+    def test_silent_parent_dropped_when_descendant_also_silent(self) -> None:
+        # setup: nothing in the branch is writing, so the normal windows apply
+        last_prompt_ts = NOW - 10.0
+        silent_mtime = NOW - (LIVENESS + 120)
+        parent = _sub(
+            first_timestamp = NOW - 600.0,
+            mtime           = silent_mtime,
+            end_ts          = NOW - 300.0,
+            agent_id        = 'agent-parent',
+        )
+        child = _sub(
+            first_timestamp = NOW - 300.0,
+            mtime           = silent_mtime,
+            end_ts          = NOW - 200.0,
+            agent_id        = 'agent-child',
+            parent_id       = 'parent',
+        )
+
+        # run
+        result = _cohort(parent, child).visible(NOW, last_prompt_ts)
+
+        # expected
+        expected: list[RunningSubagent] = []
+
+        # assert
+        assert result == expected
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +429,13 @@ def test_streaming_duplicate_id_end_turn_reaches_done_state(tmp_home: Path) -> N
             '</task-notification>'
         ),
     }) + '\n')
+
+    # Keep the transcript's mtime at/behind the notification: a later write
+    # would (correctly) invalidate the terminal signal as stale.
+    notif_epoch = datetime.datetime(
+        2026, 5, 22, 17, 50, 30, tzinfo=datetime.timezone.utc,
+    ).timestamp()
+    os.utime(jsonl, (notif_epoch, notif_epoch))
 
     parsed = RunningSubagents.from_session(_SESSION_ID, _PROJECT_DIR)
     assert len(parsed.subagents) == 1

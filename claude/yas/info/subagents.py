@@ -731,6 +731,11 @@ class RunningSubagents:
     ABANDONED_HORIZON_SECONDS = 1800
     # Liveness window: silence threshold for "still writing" vs "idle/done" (straggler keep)
     LIVENESS_WINDOW_SECONDS = 30
+    # Terminal-signal skew: how far a transcript write may postdate a terminal
+    # status/end_ts and still be attributed to clock skew between the writer of
+    # the signal and the writer of the transcript. Beyond it, the write is
+    # proof the agent outlived the signal (see from_session's invalidation).
+    TERMINAL_SKEW_SECONDS = 5
     # Keep the old name as an alias so existing code that references it still works
     STALE_SECONDS = LIVENESS_WINDOW_SECONDS
 
@@ -866,6 +871,19 @@ class RunningSubagents:
                     status = 'completed'
                     end_ts = mtime
 
+                # Terminal-signal invalidation, applied AFTER every tier so no
+                # tier can re-stamp it: a terminal signal is only believable
+                # while the transcript agrees with it. A stall watchdog can
+                # emit <status>failed</status> for an agent that is in fact
+                # still working; the stamp then retires a live agent and
+                # re-roots its children. A transcript write postdating the
+                # signal by more than the skew tolerance proves the agent
+                # outlived it, so drop the stamp and let it render live again.
+                # `resumed` is computed above and deliberately survives this.
+                if end_ts > 0 and mtime - end_ts > cls.TERMINAL_SKEW_SECONDS:
+                    status = 'running'
+                    end_ts = 0.0
+
                 subagents.append(RunningSubagent(
                     agent_type      = agent_type,
                     description     = description,
@@ -892,6 +910,31 @@ class RunningSubagents:
         subagents.sort(key=lambda s: s.first_timestamp)
         return cls(subagents=subagents)
 
+    @classmethod
+    def _live_ancestors(cls, subs: list[RunningSubagent], now: float) -> set[int]:
+        '''ids of the agents that have a still-writing descendant.
+
+        An agent is live when it carries no terminal signal (end_ts == 0) and
+        its transcript was written within LIVENESS_WINDOW_SECONDS. Walking up
+        each live agent's parent chain marks the whole branch above it, keyed
+        by ``id(sub)`` to match _build_tree_index's identity convention.
+        '''
+        by_id: dict[str, RunningSubagent] = {}
+        for sub in subs:
+            if sub.agent_id:
+                by_id[sub.agent_id] = sub
+                by_id[sub.agent_id.removeprefix('agent-')] = sub
+        ancestors: set[int] = set()
+        for sub in subs:
+            if sub.end_ts > 0 or now - sub.mtime > cls.LIVENESS_WINDOW_SECONDS:
+                continue
+            parent = by_id.get(sub.parent_id) if sub.parent_id else None
+            # The membership guard also terminates on a parent_id cycle.
+            while parent is not None and parent is not sub and id(parent) not in ancestors:
+                ancestors.add(id(parent))
+                parent = by_id.get(parent.parent_id) if parent.parent_id else None
+        return ancestors
+
     def visible(self, now: float, last_prompt_ts: float | None) -> list[RunningSubagent]:
         '''Compute the turn-scoped cohort visible in the statusline.
 
@@ -899,8 +942,10 @@ class RunningSubagents:
         agent is a candidate if it started this turn (first_timestamp >=
         last_prompt_ts) OR it is still being written (transcript written within
         LIVENESS_WINDOW_SECONDS), which keeps stragglers from the previous turn
-        that haven't finished yet.  A still-running agent (end_ts == 0) that is
-        actively writing is always included regardless.
+        that haven't finished yet, OR it has a live descendant (a supervising
+        parent is transcript-silent while it waits on its children).  A
+        still-running agent (end_ts == 0) that is actively writing is always
+        included regardless.
 
         When last_prompt_ts is None (hook unavailable), fall back to the
         JANITOR_HORIZON_SECONDS recency window: include any agent written within
@@ -913,11 +958,16 @@ class RunningSubagents:
           been silent for JANITOR_HORIZON_SECONDS (60 s janitor sweep).
         '''
         if last_prompt_ts is not None:
-            # Turn-scoped membership (Tasks 3.2 + 3.3)
+            # Turn-scoped membership (Tasks 3.2 + 3.3), plus the supervising-
+            # parent keep: a parent blocked in a long wait loop writes nothing
+            # while its children work, so mtime alone would evict it and
+            # re-root its live children at the top level.
+            live_parents = self._live_ancestors(self.subagents, now)
             candidates = [
                 sub for sub in self.subagents
                 if sub.first_timestamp >= last_prompt_ts
                 or now - sub.mtime <= self.LIVENESS_WINDOW_SECONDS
+                or id(sub) in live_parents
             ]
         else:
             # No-marker fallback (Task 3.4): recency window

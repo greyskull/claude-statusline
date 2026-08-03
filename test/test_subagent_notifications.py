@@ -10,6 +10,7 @@ import os
 import time
 from pathlib import Path
 
+from helper import iso_ts
 from yas.info.subagents import RunningSubagents
 
 
@@ -97,7 +98,7 @@ def test_status_completed(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-c1', mtime=now - 100)
     _write_session_jsonl(tmp_home, [
-        _queue_operation_line('c1', 'toolu_c1', 'completed', '2026-07-25T03:43:19.010Z'),
+        _queue_operation_line('c1', 'toolu_c1', 'completed', iso_ts(now - 50)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-c1')
@@ -112,7 +113,7 @@ def test_status_killed(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-k1', mtime=now - 100)
     _write_session_jsonl(tmp_home, [
-        _queue_operation_line('k1', 'toolu_k1', 'killed', '2026-07-25T03:43:19.010Z'),
+        _queue_operation_line('k1', 'toolu_k1', 'killed', iso_ts(now - 50)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-k1')
@@ -126,7 +127,7 @@ def test_status_failed(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-f1', mtime=now - 100)
     _write_session_jsonl(tmp_home, [
-        _queue_operation_line('f1', 'toolu_f1', 'failed', '2026-07-25T03:43:19.010Z'),
+        _queue_operation_line('f1', 'toolu_f1', 'failed', iso_ts(now - 50)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-f1')
@@ -140,7 +141,7 @@ def test_status_stopped(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-s1', mtime=now - 100)
     _write_session_jsonl(tmp_home, [
-        _queue_operation_line('s1', 'toolu_s1', 'stopped', '2026-07-25T03:43:19.010Z'),
+        _queue_operation_line('s1', 'toolu_s1', 'stopped', iso_ts(now - 50)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-s1')
@@ -158,7 +159,7 @@ def test_unknown_status_treated_as_running(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-u1', mtime=now - 100)
     _write_session_jsonl(tmp_home, [
-        _queue_operation_line('u1', 'toolu_u1', 'some-future-status', '2026-07-25T03:43:19.010Z'),
+        _queue_operation_line('u1', 'toolu_u1', 'some-future-status', iso_ts(now - 50)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-u1')
@@ -227,8 +228,8 @@ def test_resume_second_notification_bumps_run_count(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-r1', mtime=now - 10)
     _write_session_jsonl(tmp_home, [
-        _queue_operation_line('r1', 'toolu_r1', 'completed', '2026-07-25T03:00:00.000Z'),
-        _queue_operation_line('r1', 'toolu_r1_b', 'completed', '2026-07-25T03:10:00.000Z'),
+        _queue_operation_line('r1', 'toolu_r1', 'completed', iso_ts(now - 20)),
+        _queue_operation_line('r1', 'toolu_r1_b', 'completed', iso_ts(now - 5)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-r1')
@@ -279,7 +280,7 @@ def test_notification_in_nested_parent_agent_jsonl(tmp_home: Path) -> None:
     parent_jsonl = sdir / 'agent-parent1.jsonl'
     parent_jsonl.write_text(
         '{"event": "start"}\n'
-        + _queue_operation_line('child1', 'toolu_child1', 'completed', '2026-07-25T03:20:00.000Z')
+        + _queue_operation_line('child1', 'toolu_child1', 'completed', iso_ts(now - 20))
     )
     # Top-level session file has nothing about the child at all.
     _write_session_jsonl(tmp_home, ['{"event": "unrelated"}\n'])
@@ -301,7 +302,7 @@ def test_queue_operation_record_shape(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-shapeq', mtime=now - 5)
     _write_session_jsonl(tmp_home, [
-        _queue_operation_line('shapeq', 'toolu_shapeq', 'completed', '2026-07-25T03:00:00.000Z'),
+        _queue_operation_line('shapeq', 'toolu_shapeq', 'completed', iso_ts(now - 2)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-shapeq')
@@ -313,7 +314,7 @@ def test_user_record_shape(tmp_home: Path) -> None:
     sdir = _subagents_dir(tmp_home)
     _write_agent(sdir, 'agent-shapeu', mtime=now - 5)
     _write_session_jsonl(tmp_home, [
-        _user_record_line('shapeu', 'toolu_shapeu', 'completed', '2026-07-25T03:00:00.000Z'),
+        _user_record_line('shapeu', 'toolu_shapeu', 'completed', iso_ts(now - 2)),
     ])
     result = RunningSubagents.from_session(SESSION_ID, PROJECT_DIR)
     sub = _get(result, 'agent-shapeu')
