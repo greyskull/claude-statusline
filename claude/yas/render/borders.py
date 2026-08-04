@@ -21,7 +21,6 @@ from yas.constants import (
     BOLD,
     BOLD_OFF,
     ITALIC,
-    ITALIC_OFF,
     LABEL_ABBREVIATIONS,
     RESET,
 )
@@ -211,9 +210,10 @@ class BorderRenderer:
         parts.append(self.R)
         return ''.join(parts)
 
-    # Version-tag glyphs sweep from the theme grey (first char) to white
-    # (last char) — a quiet ramp that stays legible against the border.
-    VERSION_WHITE_RGB = (255, 255, 255)
+    # Version-tag glyphs sweep from the theme grey (first char) to a
+    # brighter-but-still-muted grey (last char) — a quiet ramp that stays
+    # legible without shouting pure white against the border.
+    VERSION_BRIGHT_RGB = (160, 160, 160)
 
     def border_bottom(self, width: int, ups: tuple[int, ...] = (), fill: float = 1.0, timing: str = '', version: str = '') -> str:
         ups_set = set(ups)
@@ -257,13 +257,13 @@ class BorderRenderer:
                 lo, hi = min(version_cols), max(version_cols)
                 u = (i - lo) / max(1, hi - lo)
                 gr, gg, gb = self.gradient.GREY_RGB
-                wr, wg, wb = self.VERSION_WHITE_RGB
-                vr, vg, vb = (int(gr + (wr - gr) * u), int(gg + (wg - gg) * u), int(gb + (wb - gb) * u))
-                parts += [f'{BOLD}{ITALIC}\033[38;2;{vr};{vg};{vb}m', chars[i]]
+                br, bg, bb = self.VERSION_BRIGHT_RGB
+                vr, vg, vb = (int(gr + (br - gr) * u), int(gg + (bg - gg) * u), int(gb + (bb - gb) * u))
+                parts += [f'{BOLD}\033[38;2;{vr};{vg};{vb}m', chars[i]]
             else:
                 clr = self.gradient.grad_at(i, width, fill=fill)
                 if (i - 1) in version_cols:
-                    clr = BOLD_OFF + ITALIC_OFF + clr
+                    clr = BOLD_OFF + clr
                 parts += [clr, chars[i]]
         parts.append(self.R)
         return ''.join(parts)
