@@ -223,11 +223,12 @@ class BorderRenderer:
         chars.append(BOX_ARC_BR)
         # Overlay the annotation (`[timing ]version`) right-aligned into the
         # bottom edge, leaving two fill cells before the corner
-        # (`…47.2ms┈v0.6.1┈┄╌─╯` — a dashed cell separates the two). Glyphs
+        # (`…47.2ms┈v0.6.2┈┄╌─╯` — a dashed cell separates the two). Glyphs
         # land only on plain fill columns, so an
         # elbow or the corner is never disturbed and the visible width stays
         # exactly `width`. Version glyphs are remembered so the paint loop can
-        # style them (italic, grey→white gradient) apart from the timing.
+        # style them (bold, grey→muted-grey gradient, merging into the
+        # border's own fill colour once it reaches them) apart from the timing.
         annotation = f'{timing}{BOX_H_DASH4}{version}' if timing and version else (timing or version)
         version_cols: set[int] = set()
         if annotation:
@@ -242,7 +243,7 @@ class BorderRenderer:
                             version_cols.add(idx)
                 # Dashed lead-in/out: up to three fill cells on each side of
                 # the annotation ramp between the solid rule and the glyphs
-                # (`──╌┄┈47.2ms┈v0.6.1┈┄╌──`, densest dash nearest the text).
+                # (`──╌┄┈47.2ms┈v0.6.2┈┄╌──`, densest dash nearest the text).
                 # Only plain fill cells are converted, so an elbow or corner
                 # inside the ramp zone stops it short.
                 for dist, dash in enumerate((BOX_H_DASH4, BOX_H_DASH, BOX_H_DASH2), 1):

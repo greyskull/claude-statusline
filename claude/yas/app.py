@@ -55,9 +55,9 @@ def render(session_info: dict[str, object], width: int, *, bg_shift: str = 'warm
     else:
         tick = record_tick(session, view.transcript_usage)
         spec = build_wide(view, tick, width, r, soft_limit)
-    # The bottom-right border annotation: the version tag always (italic,
-    # grey→white gradient), preceded by the previous run's wall-clock when
-    # the show_render_time knob supplies it (`…47.2ms v0.6.1──╯`).
+    # The bottom-right border annotation: the version tag always (bold,
+    # grey→muted-grey gradient), preceded by the previous run's wall-clock
+    # when the show_render_time knob supplies it (`…47.2ms v0.6.2──╯`).
     out = '\n'.join(render_layout(spec, r, timing, f'v{VERSION}'))
     return apply_glyphs(out, glyph_mode, single_width)
 
