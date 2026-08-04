@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 
 
+# Keep in sync with pyproject.toml's [project] version — pyproject isn't
+# shipped with the runtime copy under ~/.claude, so the value lives here too.
+VERSION    = '0.6.2'
+
 HOME       = Path(os.path.expanduser('~'))
 CLAUDE_DIR = Path(os.environ.get('CLAUDE_CONFIG_DIR', str(HOME / '.claude')))
 MIN_WIDTH    = 40
@@ -102,6 +106,8 @@ RESET   = '\033[0m'
 BOLD    = '\033[1m'
 FAINT   = '\033[2m'
 ITALIC  = '\033[3m'
+ITALIC_OFF = '\033[23m'
+BOLD_OFF   = '\033[22m'
 STRIKE  = '\033[9m'   # SGR strikethrough on  (finished-subagent task description)
 UNSTRIKE = '\033[29m'  # SGR strikethrough off
 
@@ -210,6 +216,8 @@ PILL_BR    = '\u2598'  # U+2598 upper-left quadrant
 BOX_H       = '\u2500'  # U+2500 light horizontal
 BOX_V       = '\u2502'  # U+2502 light vertical
 BOX_H_DASH  = '\u2504'  # U+2504 light triple-dash horizontal
+BOX_H_DASH2 = '\u254c'  # U+254C light double-dash horizontal
+BOX_H_DASH4 = '\u2508'  # U+2508 light quadruple-dash horizontal
 BOX_T_RIGHT = '\u251c'  # U+251C vertical and right
 BOX_T_LEFT  = '\u2524'  # U+2524 vertical and left
 BOX_T_DOWN  = '\u252c'  # U+252C down and horizontal (top elbow)
@@ -277,6 +285,8 @@ ASCII_GLYPHS: dict[str, str] = {
     BOX_H:              '-',
     BOX_V:              '|',
     BOX_H_DASH:         '-',
+    BOX_H_DASH2:        '-',
+    BOX_H_DASH4:        '-',
     BOX_T_RIGHT:        '+',
     BOX_T_LEFT:         '+',
     BOX_T_DOWN:         '+',
