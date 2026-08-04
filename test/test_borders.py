@@ -87,10 +87,13 @@ def test_border_bottom_timing_right_aligned(r: borders.BorderRenderer) -> None:
     out = r.border_bottom(width=40, timing='47.2ms')
     stripped = strip_ansi(out)
     assert _visible_width(out) == 40
-    # `…47.2ms──╯`: text ends two fill cells before the corner (index w-1).
+    # `…47.2ms┈┄╯`: text ends two fill cells before the corner (index w-1);
+    # those cells carry the dashed lead-out ramp (densest nearest the text).
     assert stripped[-1] == '╯'
-    assert stripped[-3:-1] == '──'
+    assert stripped[-3:-1] == '┈┄'
     assert stripped[-9:-3] == '47.2ms'
+    # Lead-in ramp on the left of the text, sparsest furthest out.
+    assert stripped[-12:-9] == '╌┄┈'
 
 
 def test_border_bottom_timing_only_overlays_fill(r: borders.BorderRenderer) -> None:

@@ -10,13 +10,18 @@ from yas.constants import (
     BOX_CROSS,
     BOX_H,
     BOX_H_DASH,
+    BOX_H_DASH2,
+    BOX_H_DASH4,
     BOX_T_DOWN,
     BOX_T_LEFT,
     BOX_T_RIGHT,
     BOX_T_UP,
     BOX_V,
     ELLIPSIS,
+    BOLD,
+    BOLD_OFF,
     ITALIC,
+    ITALIC_OFF,
     LABEL_ABBREVIATIONS,
     RESET,
 )
@@ -206,26 +211,60 @@ class BorderRenderer:
         parts.append(self.R)
         return ''.join(parts)
 
-    def border_bottom(self, width: int, ups: tuple[int, ...] = (), fill: float = 1.0, timing: str = '') -> str:
+    # Version-tag glyphs sweep from the theme grey (first char) to white
+    # (last char) — a quiet ramp that stays legible against the border.
+    VERSION_WHITE_RGB = (255, 255, 255)
+
+    def border_bottom(self, width: int, ups: tuple[int, ...] = (), fill: float = 1.0, timing: str = '', version: str = '') -> str:
         ups_set = set(ups)
         chars: list[str] = [BOX_ARC_BL]
         for i in range(width - 2):
             chars.append(BOX_T_UP if (i + 2) in ups_set else BOX_H)
         chars.append(BOX_ARC_BR)
-        # Overlay the run-time annotation right-aligned into the bottom edge,
-        # leaving two fill cells before the corner (`…47.2ms──╯`). Glyphs land
-        # only on plain fill columns, so an elbow or the corner is never
-        # disturbed and the visible width stays exactly `width`.
-        if timing:
-            start = width - 3 - _visible_width(timing)
+        # Overlay the annotation (`[timing ]version`) right-aligned into the
+        # bottom edge, leaving two fill cells before the corner
+        # (`…47.2ms┈v0.6.1┈┄╌─╯` — a dashed cell separates the two). Glyphs
+        # land only on plain fill columns, so an
+        # elbow or the corner is never disturbed and the visible width stays
+        # exactly `width`. Version glyphs are remembered so the paint loop can
+        # style them (italic, grey→white gradient) apart from the timing.
+        annotation = f'{timing}{BOX_H_DASH4}{version}' if timing and version else (timing or version)
+        version_cols: set[int] = set()
+        if annotation:
+            start = width - 3 - _visible_width(annotation)
             if start >= 1:
-                for off, g in enumerate(timing):
+                version_from = len(annotation) - len(version) if version else len(annotation)
+                for off, g in enumerate(annotation):
                     idx = start + off
                     if 0 <= idx < width and chars[idx] == BOX_H:
                         chars[idx] = g
+                        if off >= version_from:
+                            version_cols.add(idx)
+                # Dashed lead-in/out: up to three fill cells on each side of
+                # the annotation ramp between the solid rule and the glyphs
+                # (`──╌┄┈47.2ms┈v0.6.1┈┄╌──`, densest dash nearest the text).
+                # Only plain fill cells are converted, so an elbow or corner
+                # inside the ramp zone stops it short.
+                for dist, dash in enumerate((BOX_H_DASH4, BOX_H_DASH, BOX_H_DASH2), 1):
+                    left, right = start - dist, start + len(annotation) - 1 + dist
+                    if left >= 1 and chars[left] == BOX_H:
+                        chars[left] = dash
+                    if right < width - 1 and chars[right] == BOX_H:
+                        chars[right] = dash
         parts: list[str] = []
         for i in range(width):
-            parts += [self.gradient.grad_at(i, width, fill=fill), chars[i]]
+            if i in version_cols:
+                lo, hi = min(version_cols), max(version_cols)
+                u = (i - lo) / max(1, hi - lo)
+                gr, gg, gb = self.gradient.GREY_RGB
+                wr, wg, wb = self.VERSION_WHITE_RGB
+                vr, vg, vb = (int(gr + (wr - gr) * u), int(gg + (wg - gg) * u), int(gb + (wb - gb) * u))
+                parts += [f'{BOLD}{ITALIC}\033[38;2;{vr};{vg};{vb}m', chars[i]]
+            else:
+                clr = self.gradient.grad_at(i, width, fill=fill)
+                if (i - 1) in version_cols:
+                    clr = BOLD_OFF + ITALIC_OFF + clr
+                parts += [clr, chars[i]]
         parts.append(self.R)
         return ''.join(parts)
 

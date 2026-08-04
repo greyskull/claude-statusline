@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 
 from yas.config import Config
-from yas.constants import CLAUDE_DIR, MIN_WIDTH, NARROW_WIDTH, MEDIUM_WIDTH
+from yas.constants import CLAUDE_DIR, MIN_WIDTH, NARROW_WIDTH, MEDIUM_WIDTH, VERSION
 from yas.info import SessionView
 from yas.layout import build_narrow, build_medium, build_wide, render_layout
 from yas.renderer import Renderer
@@ -55,7 +55,10 @@ def render(session_info: dict[str, object], width: int, *, bg_shift: str = 'warm
     else:
         tick = record_tick(session, view.transcript_usage)
         spec = build_wide(view, tick, width, r, soft_limit)
-    out = '\n'.join(render_layout(spec, r, timing))
+    # The bottom-right border annotation: the version tag always (italic,
+    # grey→white gradient), preceded by the previous run's wall-clock when
+    # the show_render_time knob supplies it (`…47.2ms v0.6.1──╯`).
+    out = '\n'.join(render_layout(spec, r, timing, f'v{VERSION}'))
     return apply_glyphs(out, glyph_mode, single_width)
 
 

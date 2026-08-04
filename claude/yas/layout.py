@@ -1345,13 +1345,13 @@ def build_wide(
     return spec
 
 
-def render_layout(spec: LayoutSpec, r: Renderer, timing: str = '') -> list[str]:
+def render_layout(spec: LayoutSpec, r: Renderer, timing: str = '', version: str = '') -> list[str]:
     lines: list[str] = []
     for row in spec.rows:
         if row.kind == 'top_border':
             lines.append(r.border_top(spec.width, spec.session_id, downs=row.downs, fill=spec.fill, pill=row.pill, labels=tuple(row.labels)))
         elif row.kind == 'bottom_border':
-            lines.append(r.border_bottom(spec.width, ups=row.ups, fill=spec.fill, timing=timing))
+            lines.append(r.border_bottom(spec.width, ups=row.ups, fill=spec.fill, timing=timing, version=version))
         elif row.kind == 'separator':
             lines.append(r.border_separator(spec.width, ups=row.ups, downs=row.downs, fill=spec.fill, labels=tuple(row.labels)))
         elif row.kind == 'separator_seam':
