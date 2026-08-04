@@ -252,14 +252,26 @@ class BorderRenderer:
                     if right < width - 1 and chars[right] == BOX_H:
                         chars[right] = dash
         parts: list[str] = []
+        # Same denom/t formula `grad_at` uses internally to decide fill vs
+        # off -- reusing it (rather than re-deriving a separate boundary)
+        # guarantees the version tag's per-character fill/grey split lands on
+        # exactly the same column the border's own fill reaches, no off-by-one.
+        denom = max(1, width - 1)
         for i in range(width):
             if i in version_cols:
-                lo, hi = min(version_cols), max(version_cols)
-                u = (i - lo) / max(1, hi - lo)
-                gr, gg, gb = self.gradient.GREY_RGB
-                br, bg, bb = self.VERSION_BRIGHT_RGB
-                vr, vg, vb = (int(gr + (br - gr) * u), int(gg + (bg - gg) * u), int(gb + (bb - gb) * u))
-                parts += [f'{BOLD}\033[38;2;{vr};{vg};{vb}m', chars[i]]
+                if (i / denom) <= fill:
+                    # The border's own fill has already reached/passed this
+                    # column -- let the glyph merge into the fill colour
+                    # instead of the grey sweep, staying bold.
+                    clr = self.gradient.grad_at(i, width, fill=fill)
+                else:
+                    lo, hi = min(version_cols), max(version_cols)
+                    u = (i - lo) / max(1, hi - lo)
+                    gr, gg, gb = self.gradient.GREY_RGB
+                    br, bg, bb = self.VERSION_BRIGHT_RGB
+                    vr, vg, vb = (int(gr + (br - gr) * u), int(gg + (bg - gg) * u), int(gb + (bb - gb) * u))
+                    clr = f'\033[38;2;{vr};{vg};{vb}m'
+                parts += [f'{BOLD}{clr}', chars[i]]
             else:
                 clr = self.gradient.grad_at(i, width, fill=fill)
                 if (i - 1) in version_cols:
