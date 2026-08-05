@@ -1,11 +1,35 @@
+import re
+
 import yas.renderer as renderer
-from yas.constants import BarChars
+from yas.constants import BarChars, BG_LUM_THRESHOLD
 from yas.render.text import _visible_width
+from yas.themes import THEMES
 from helper import strip_ansi
 
 
 _r = renderer.Renderer()
 
+
+_FG_RGB = re.compile(r'\x1b\[38;2;(\d+);(\d+);(\d+)m')
+_FG_256 = re.compile(r'\x1b\[38;5;(\d+)m')
+
+
+def _luminance(seq: str) -> int:
+    """Luma (0-255) of the first SGR foreground colour in `seq`.
+
+    Same weights as the pill foreground flip in `render/gradient.py`, so the
+    test measures brightness with the yardstick the renderer itself uses.
+    """
+    m = _FG_RGB.search(seq)
+    if m:
+        r, g, b = (int(x) for x in m.groups())
+        return (r * 299 + g * 587 + b * 114) // 1000
+    m = _FG_256.search(seq)
+    assert m, f'no foreground colour in {seq!r}'
+    n = int(m.group(1))
+    # xterm greyscale ramp: index 232..255 → grey level 8..238 in steps of 10.
+    assert 232 <= n <= 255, f'expected a greyscale index for a bar track, got {n}'
+    return 8 + (n - 232) * 10
 
 
 def test_gradient_bar_zero_fill_is_empty() -> None:
@@ -42,6 +66,27 @@ def test_empty_section_fades_leading_chars() -> None:
     short = strip_ansi(_r._empty_section(2))
     assert short == BarChars.EMPTY * 2
 
+
+def test_empty_fade_ramps_toward_background_for_every_theme() -> None:
+    # The ramp softens the fill→empty seam by starting *dim* and rising to
+    # BAR_EMPTY, where "dim" means closer to the terminal background. On a dark
+    # theme that is darker; on a light theme darker is the wrong way — it walks
+    # away from a pale background and lands as a dark smudge beside the fill.
+    # So each step must sit on the background side of the track it joins.
+    for name, theme in THEMES.items():
+        r = renderer.Renderer(theme=theme)
+        track = _luminance(r.BAR_EMPTY)
+        for step in r._empty_fade_colors():
+            if track >= BG_LUM_THRESHOLD:
+                assert _luminance(step) >= track, (
+                    f'{name}: fade step {step!r} is darker than its pale '
+                    f'track {r.BAR_EMPTY!r} — reads as a smudge on a light bg'
+                )
+            else:
+                assert _luminance(step) <= track, (
+                    f'{name}: fade step {step!r} is lighter than its dark '
+                    f'track {r.BAR_EMPTY!r}'
+                )
 
 
 def test_spec_gradient_bar_idx_wraps() -> None:

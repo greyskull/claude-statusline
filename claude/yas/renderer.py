@@ -21,6 +21,7 @@ from yas.constants import (
     ARROW_OUT_ACTIVE,
     ARROW_OUT_IDLE,
     BarChars,
+    BG_LUM_THRESHOLD,
     BOX_V,
     CLR_CYAN,
     CLR_CYAN_DAY,
@@ -1772,16 +1773,31 @@ class Renderer:
     _EMPTY_FADE_RGB = re.compile(r'\x1b\[38;2;(\d+);(\d+);(\d+)m')
 
     def _empty_fade_colors(self) -> list[str]:
-        # 3-step ramp going from a darker shade up to BAR_EMPTY, so the fill→empty
+        # 3-step ramp going from a dim shade up to BAR_EMPTY, so the fill→empty
         # seam blends instead of butting a coloured glyph against flat grey.
+        # "Dim" is nearer the terminal background, which is darker only on a dark
+        # theme: darkening a pale track walks away from the background instead
+        # and lands as a dark smudge against the fill. Which side the track is on
+        # is BG_LUM_THRESHOLD's question, the same one the pill foreground flip in
+        # render/gradient.py asks.
         m = self._EMPTY_FADE_256.search(self.BAR_EMPTY)
         if m:
             n = int(m.group(1))
+            # A grey's level *is* its luma, so converting the xterm greyscale
+            # index (232..255 → level 8..238) puts this branch on that same scale.
+            if 8 + (n - 232) * 10 >= BG_LUM_THRESHOLD:
+                return [f'\033[38;5;{min(255, n + k)}m' for k in (6, 4, 2)]
             return [f'\033[38;5;{max(232, n - k)}m' for k in (6, 4, 2)]
         m = self._EMPTY_FADE_RGB.search(self.BAR_EMPTY)
         if m:
             r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            return [f'\033[38;2;{int(r*k)};{int(g*k)};{int(b*k)}m' for k in (0.3, 0.5, 0.7)]
+            lum = (r * 299 + g * 587 + b * 114) // 1000
+            a = 255 if lum >= BG_LUM_THRESHOLD else 0
+            return [
+                f'\033[38;2;{int(a + (r - a) * k)};{int(a + (g - a) * k)};'
+                f'{int(a + (b - a) * k)}m'
+                for k in (0.3, 0.5, 0.7)
+            ]
         return [self.BAR_EMPTY] * 3
 
     def _empty_section(self, empty: int, blend: bool = True) -> str:
