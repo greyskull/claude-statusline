@@ -97,9 +97,9 @@ aliases when both are set — the aliases keep working but are deprecated.
 
 #### Valid values
 
-- **`theme`** — 14 built-in themes; unknown or unset falls back to `claude-dark`:
+- **`theme`** — 15 built-in themes; unknown or unset falls back to `claude-dark`:
   - **Dark:** `claude-dark`, `catppuccin-mocha`, `dracula`, `gruvbox-dark`, `nord`, `one-dark`, `solarized-dark`, `tokyo-night`, `palenight`
-  - **Light:** `claude-light`, `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`
+  - **Light:** `claude-light`, `catppuccin-latte`, `dracula-light`, `gruvbox-light`, `one-light`, `solarized-light`
 - **`bg_shift`** — `warm` or `cool`.
 - **`glyph_mode`** — all four modes preserve column geometry; an unknown value falls back to `nerdfont`:
   - `nerdfont` — default; full fidelity, needs a Nerd Font.

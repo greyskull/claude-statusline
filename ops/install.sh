@@ -1197,8 +1197,8 @@ run_wizard() {
     # 2. Theme (live preview).
     ui_select _preview_theme "Theme:" \
         claude-dark claude-light catppuccin-latte catppuccin-mocha dracula \
-        gruvbox-dark gruvbox-light nord one-dark one-light solarized-dark \
-        solarized-light tokyo-night palenight
+        dracula-light gruvbox-dark gruvbox-light nord one-dark one-light \
+        solarized-dark solarized-light tokyo-night palenight
     WIZ_THEME="$UI_WIDGET_VALUE"
 
     # 3. Labels (yes/no, default on).

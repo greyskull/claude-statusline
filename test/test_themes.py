@@ -36,7 +36,7 @@ SESSION  = (Path(__file__).parent.parent / 'ops'
 EXPECTED_THEMES = {
     'claude-dark', 'claude-light',
     'catppuccin-mocha', 'catppuccin-latte',
-    'dracula', 'gruvbox-dark', 'gruvbox-light', 'nord',
+    'dracula', 'dracula-light', 'gruvbox-dark', 'gruvbox-light', 'nord',
     'one-dark', 'one-light', 'palenight',
     'solarized-dark', 'solarized-light', 'tokyo-night',
 }
