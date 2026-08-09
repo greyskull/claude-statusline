@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -182,24 +183,183 @@ def _tail_read_notifications(path: Path) -> list[_Notification]:
     return notifications
 
 
+class _ToolResultCacheEntry(NamedTuple):
+    '''One cached tail-read state for toolUseResult scanning: (mtime, size,
+    byte-offset consumed, tool_use_id -> (status, ts) map found so far).'''
+    mtime:   float
+    size:    int
+    offset:  int
+    results: dict[str, tuple[str, float]]
+
+
+# Tail-read cache for toolUseResult scanning, keyed by absolute path string.
+# Same rationale as _notif_tail_cache: transcripts only grow, so re-scanning
+# whole files on every render would be too slow.
+_tool_result_tail_cache: dict[str, _ToolResultCacheEntry] = {}
+
+
+def _extract_tool_results(line: str) -> list[tuple[str, str, float]]:
+    '''Extract zero or more (tool_use_id, status, ts) triples from one JSONL line.
+
+    Looks for a top-level ``toolUseResult`` field — a sibling of ``message``,
+    not nested inside it — on a ``type: "user"`` record whose
+    ``message.content`` carries the matching ``tool_result`` block. This is
+    written by Claude Code core itself for every resolved Agent/Task tool
+    call, independent of whether a ``<task-notification>`` was ever emitted.
+    See the subagent-completion-signals investigation for the confirmed shape.
+    '''
+    out: list[tuple[str, str, float]] = []
+    try:
+        d = json.loads(line)
+    except (ValueError, TypeError):
+        return out
+    if not isinstance(d, dict) or d.get('type') != 'user':
+        return out
+    tur = d.get('toolUseResult')
+    if not isinstance(tur, dict):
+        return out
+    status = tur.get('status')
+    if not isinstance(status, str) or not status:
+        return out
+    msg = d.get('message')
+    content = msg.get('content') if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return out
+    ts_raw = d.get('timestamp') or tur.get('timestamp') or ''
+    ts = _parse_iso_to_epoch(str(ts_raw)) if ts_raw else 0.0
+    for item in content:
+        if isinstance(item, dict) and item.get('type') == 'tool_result':
+            tool_use_id = str(item.get('tool_use_id', '') or '')
+            if tool_use_id:
+                out.append((tool_use_id, status, ts))
+    return out
+
+
+def _tail_read_tool_results(path: Path) -> dict[str, tuple[str, float]]:
+    '''Read new tool_use_id -> (status, ts) pairs from path's toolUseResult
+    sibling fields since it was last seen.
+
+    Same tail-cache shape as _tail_read_notifications: an unchanged (mtime,
+    size) pair skips all I/O; a changed file is read only from the previously
+    recorded byte offset onward, never re-parsing the whole transcript.
+    '''
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        cached = _tool_result_tail_cache.get(key)
+        return cached.results if cached else {}
+
+    cached = _tool_result_tail_cache.get(key)
+    if cached is not None and cached.mtime == st.st_mtime and cached.size == st.st_size:
+        return cached.results
+
+    reusable    = cached is not None and cached.size <= st.st_size
+    prev_offset = cached.offset if reusable and cached is not None else 0
+    results     = dict(cached.results) if reusable and cached is not None else {}
+
+    try:
+        with path.open('rb') as fh:
+            fh.seek(prev_offset)
+            chunk = fh.read()
+    except OSError:
+        _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, prev_offset, results)
+        return results
+
+    last_nl = chunk.rfind(b'\n')
+    if last_nl == -1:
+        # No complete line has arrived since the last read; leave the offset
+        # put so the still-growing partial line is re-read whole next time.
+        _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, prev_offset, results)
+        return results
+
+    new_offset = prev_offset + last_nl + 1
+    for raw_line in chunk[:last_nl].split(b'\n'):
+        if b'"toolUseResult"' not in raw_line:
+            continue
+        for tool_use_id, status, ts in _extract_tool_results(raw_line.decode('utf-8', errors='ignore')):
+            results[tool_use_id] = (status, ts)
+
+    _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, new_offset, results)
+    return results
+
+
+# Every logical <task-notification> is written TWICE to the transcript, ~20-25ms
+# apart: once as a "queue-operation" record (no uuid) and once as a "user"
+# record (has a uuid) carrying the identical <task-notification> block for the
+# same task-id/tool-use-id (confirmed against real session data: 26
+# queue-operation + matching user records, paired ~20-25ms apart, for the same
+# task-ids). Left un-deduped, every notification is double-counted: run_count
+# comes out at 2x the real run count, which both mislabels a never-resumed
+# agent as resumed (run_count > 1) and — worse — makes a terminal-resumed
+# run_start_ts bracket anchor on the queue-operation twin of the SAME
+# notification (a ~20ms window) instead of one run earlier, collapsing a
+# finished, resumed agent's duration to ~0:00. A timestamp-window dedupe
+# (rather than filtering on record `type`) is used as the discriminator: it
+# doesn't require trusting an inferred, undocumented record-shape distinction
+# (this module already tracks two known notification record shapes — see
+# _extract_notifications — and doesn't carry the record `type` into
+# _Notification at all), and it is naturally robust to the notification's two
+# twins landing in EITHER the top-level session .jsonl or a
+# subagents/agent-*.jsonl (or split across both) since dedup runs on the
+# merged by-task-id list after both sources are absorbed. 1.0 second is
+# comfortably above the observed ~20-25ms twin gap and comfortably below any
+# realistic distinct-run gap (observed real runs are minutes apart).
+NOTIF_DEDUPE_WINDOW_SECONDS = 1.0
+
+
+def _dedupe_notifications(notes: list['_Notification']) -> list['_Notification']:
+    '''Collapse same-task-id notifications written within
+    NOTIF_DEDUPE_WINDOW_SECONDS of each other into one logical notification,
+    keeping the LATER twin (matches the real "user" record — the actual
+    transcript entry with a uuid — arriving after its "queue-operation"
+    counterpart). Input need not be sorted; output is ts-ascending.
+    '''
+    if len(notes) <= 1:
+        return list(notes)
+    ordered = sorted(notes, key=lambda n: n.ts)
+    deduped = [ordered[0]]
+    for note in ordered[1:]:
+        if note.ts - deduped[-1].ts <= NOTIF_DEDUPE_WINDOW_SECONDS:
+            deduped[-1] = note
+        else:
+            deduped.append(note)
+    return deduped
+
+
 class _NotifLookup(NamedTuple):
-    '''Aggregated notification state for one task-id: latest status/ts, total occurrence count.'''
+    '''Aggregated notification state for one task-id: latest status/ts, the
+    PREVIOUS notification's ts (0.0 if there is none), and total occurrence
+    count.
+
+    ``prev_ts`` exists for the terminal-and-resumed run_start_ts case: the
+    run being DISPLAYED for a finished, resumed agent is bracketed by the
+    second-to-last notification (its start) and the last one (its end) — the
+    last notification alone collapses the anchor onto the end, understating
+    duration to ~0. See ``RunningSubagents.from_session``.
+    '''
     status:       str
     ts:           float
+    prev_ts:      float
     notif_count:  int
 
 
 def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dict[str, _NotifLookup]:
-    '''Build a ``{task_id: _NotifLookup(status, ts, count)}`` map for one session tree.
+    '''Build a ``{task_id: _NotifLookup(status, ts, prev_ts, count)}`` map for one session tree.
 
     Scans the top-level session ``.jsonl`` AND every ``subagents/agent-*.jsonl``
     — a nested agent's completion notification lands in its PARENT AGENT's own
     transcript, not necessarily in the top-level session file, so every
     transcript in the tree must be scanned. Aggregates every
-    ``<task-notification>`` seen per task-id: the occurrence with the latest
-    timestamp decides ``status``/``ts`` (so a later re-notification of a
-    resumed agent wins), and ``count`` is the total number of notifications
-    observed for that task-id (a resumed agent notifies more than once).
+    ``<task-notification>`` seen per task-id, first deduping the
+    queue-operation/user twin pair each logical notification is written as
+    (see ``_dedupe_notifications``/``NOTIF_DEDUPE_WINDOW_SECONDS``): the
+    occurrence with the latest timestamp decides ``status``/``ts`` (so a
+    later re-notification of a resumed agent wins), the occurrence with the
+    SECOND-latest timestamp (if any) gives ``prev_ts``, and ``count`` is the
+    number of DISTINCT (deduped) notifications observed for that task-id —
+    the real run count, not the raw record count (a resumed agent notifies
+    more than once).
     '''
     by_task: dict[str, list[_Notification]] = {}
 
@@ -219,18 +379,34 @@ def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dic
 
     result: dict[str, _NotifLookup] = {}
     for task_id, notes in by_task.items():
-        latest = max(notes, key=lambda n: n.ts)
-        result[task_id] = _NotifLookup(status=latest.status, ts=latest.ts, notif_count=len(notes))
+        by_ts   = _dedupe_notifications(notes)
+        latest  = by_ts[-1]
+        prev_ts = by_ts[-2].ts if len(by_ts) >= 2 else 0.0
+        result[task_id] = _NotifLookup(
+            status=latest.status, ts=latest.ts, prev_ts=prev_ts, notif_count=len(by_ts),
+        )
     return result
 
 
-def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float]:
+def parse_transcript(
+    jsonl: Path, resume_after: float = 0.0,
+) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float]:
     """Parse one agent-*.jsonl transcript into the subagent metric tuple.
 
     Module-level so the workflow cohort reader (info/workflows.py) can call the
     identical token/activity/Done logic without duplicating it. Returns
-    ``(billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts)``.
-    Never raises; an unreadable transcript yields zeroes.
+    ``(billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts,
+    run_start_ts)``.
+
+    ``resume_after``, when positive, is the caller's resume-boundary timestamp
+    (typically the last-seen ``<task-notification>`` before the run being
+    displayed). When given, ``run_start_ts`` in the return is the timestamp of
+    the FIRST transcript line that postdates it — the true start of the
+    current run for a resumed agent — found in the same single streaming pass
+    used for everything else here (never a second whole-file re-read).
+    ``run_start_ts`` is ``0.0`` when ``resume_after`` is ``0.0`` (not asked
+    for) or no later line was found (caller falls back to ``resume_after``
+    itself). Never raises; an unreadable transcript yields zeroes.
     """
     seen: set[str] = set()
     # Usage is keyed by message id with last-line-wins: streaming re-writes
@@ -240,6 +416,7 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     # the first partial snapshot and undercounts output tokens.
     usage_by_id: dict[str, tuple[int, int, int]] = {}
     first_ts     = 0.0
+    run_start_ts = 0.0
     end_ts       = 0.0
     model        = ''
     last_activity: tuple[str, str, dict[str, object]] = ('', '', {})
@@ -255,12 +432,22 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     try:
         with jsonl.open('r', errors='ignore') as fh:
             for ln in fh:
-                if first_ts == 0.0 and '"timestamp"' in ln:
+                # Timestamp scan: keep reading timestamped lines past the
+                # first one only while resume_after was supplied and its
+                # run_start_ts boundary hasn't been found yet, so a
+                # never-resumed caller (resume_after == 0.0) pays no extra
+                # cost beyond the original single-timestamp check.
+                need_run_start = resume_after > 0.0 and run_start_ts == 0.0
+                if ('"timestamp"' in ln) and (first_ts == 0.0 or need_run_start):
                     try:
                         d = json.loads(ln)
-                        ts = d.get('timestamp', '')
-                        if ts:
-                            first_ts = _parse_iso_to_epoch(ts)
+                        ts_raw = d.get('timestamp', '')
+                        if ts_raw:
+                            parsed = _parse_iso_to_epoch(ts_raw)
+                            if first_ts == 0.0:
+                                first_ts = parsed
+                            if need_run_start and parsed > resume_after:
+                                run_start_ts = parsed
                     except (ValueError, TypeError):
                         pass
                 if '"usage"' not in ln or '"assistant"' not in ln:
@@ -376,7 +563,7 @@ def parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str,
     # not prose pattern-matching) for callers that still consult it (e.g.
     # info/workflows.py), but RunningSubagent.end_ts is overwritten from the
     # notification map, never from this heuristic.
-    return billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts
+    return billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, run_start_ts
 
 
 def _build_tree_index(
@@ -507,10 +694,18 @@ def cap_tree_groups(subs: list[RunningSubagent], cap: int) -> list[RunningSubage
         # (e.g. one root plus more live children than fit). Trim within it
         # instead of dropping it wholesale: keep the root, plus the
         # most-recently-active cap - 1 descendants, in original order.
+        # Live members outrank finished ones here regardless of recency: a
+        # finished row lingering out its retention window must never displace
+        # a still-running sibling. Among equals, most-recently-active wins,
+        # which for finished members is oldest-finished-evicted-first.
         root, *descendants = ordered[0]
         keep_ids = {
             id(sub) for sub in
-            sorted(descendants, key=lambda sub: sub.mtime, reverse=True)[:cap - 1]
+            sorted(
+                descendants,
+                key=lambda sub: (sub.end_ts == 0, sub.mtime if sub.end_ts == 0 else sub.end_ts),
+                reverse=True,
+            )[:cap - 1]
         }
         trimmed = [root] + [sub for sub in descendants if id(sub) in keep_ids]
         return trimmed
@@ -523,7 +718,7 @@ class RunningSubagent:
         'agent_type', 'description', 'billed_in', 'output', 'first_timestamp',
         'model', 'cache_read_in', 'total_input', 'last_activity', 'end_ts',
         'mtime', 'agent_id', 'jsonl_path', 'parent_id', 'spawn_depth',
-        'status', 'run_count', 'is_fork', 'resumed',
+        'status', 'run_count', 'is_fork', 'resumed', 'run_start_ts',
     )
 
     def __init__(
@@ -547,6 +742,7 @@ class RunningSubagent:
         run_count:       int = 0,      # <task-notification> occurrences seen for this agent; 0 while never finished
         is_fork:         bool = False,  # meta.json "isFork" (equivalently agentType == "fork")
         resumed:         bool = False,  # a later notification/activity postdates the last-seen notification
+        run_start_ts:    float | None = None,  # start of the CURRENT run; see subagent_dur_str
     ) -> None:
         self.agent_type      = agent_type
         self.description      = description
@@ -567,6 +763,11 @@ class RunningSubagent:
         self.run_count        = run_count
         self.is_fork          = is_fork
         self.resumed          = resumed
+        # Per-run start anchor for duration display: the start of the CURRENT
+        # run, not the agent's original spawn. Equals first_timestamp when
+        # unset (never-resumed agents, and callers like info/workflows.py
+        # that don't track resumption at all) — see subagent_dur_str.
+        self.run_start_ts     = run_start_ts if run_start_ts is not None else first_timestamp
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RunningSubagent):
@@ -580,6 +781,7 @@ class RunningSubagent:
             self.last_activity, self.end_ts, self.mtime, self.agent_id,
             self.jsonl_path, self.parent_id, self.spawn_depth,
             self.status, self.run_count, self.is_fork, self.resumed,
+            self.run_start_ts,
         )
 
     __hash__ = None  # type: ignore[assignment]
@@ -597,7 +799,7 @@ class RunningSubagent:
                 f'agent_id={self.agent_id!r}, jsonl_path={self.jsonl_path!r}, '
                 f'parent_id={self.parent_id!r}, spawn_depth={self.spawn_depth}, '
                 f'status={self.status!r}, run_count={self.run_count}, is_fork={self.is_fork}, '
-                f'resumed={self.resumed})')
+                f'resumed={self.resumed}, run_start_ts={self.run_start_ts})')
 
 
 class RunningSubagents:
@@ -616,8 +818,12 @@ class RunningSubagents:
     def __repr__(self) -> str:
         return f'RunningSubagents(subagents={self.subagents!r})'
 
-    # Cohort grace: seconds after the last end_ts before a fully-Done section retires
-    COHORT_GRACE_SECONDS = 20
+    # Cohort grace: seconds after the last end_ts before a fully-Done section
+    # retires. Matches FINISHED_LINGER_SECONDS (and constants.
+    # SUBAGENT_RETENTION_SECONDS at the layout layer) so a fully-done cohort
+    # doesn't retire on a shorter horizon than a lingering member of a still-
+    # dirty cohort would.
+    COHORT_GRACE_SECONDS = 120
     # Janitor horizon: total-silence threshold to sweep a dirty cohort (no end_turn);
     # also the recency-window fallback when no prompt-marker is available
     JANITOR_HORIZON_SECONDS = 60
@@ -629,13 +835,29 @@ class RunningSubagents:
     ABANDONED_HORIZON_SECONDS = 1800
     # Liveness window: silence threshold for "still writing" vs "idle/done" (straggler keep)
     LIVENESS_WINDOW_SECONDS = 30
+    # Finished-member linger: how long a Done member of a still-dirty cohort
+    # stays visible after its end_ts. Matches constants.SUBAGENT_RETENTION_SECONDS
+    # so the info layer no longer retires a finished row an entire minute before
+    # the layout's own retention horizon would. It is a MAXIMUM, not a
+    # guarantee — cap_tree_groups still evicts finished rows early (oldest
+    # end_ts first) whenever live members need the room.
+    FINISHED_LINGER_SECONDS = 120
+    # Terminal-signal skew: how far a transcript write may postdate a terminal
+    # status/end_ts and still be attributed to clock skew between the writer of
+    # the signal and the writer of the transcript. Beyond it, the write is
+    # proof the agent outlived the signal (see from_session's invalidation).
+    TERMINAL_SKEW_SECONDS = 5
     # Keep the old name as an alias so existing code that references it still works
     STALE_SECONDS = LIVENESS_WINDOW_SECONDS
 
     @classmethod
-    def from_session(cls, session_id: str, project_dir: str) -> RunningSubagents:
+    def from_session(cls, session_id: str, project_dir: str, now: float | None = None) -> RunningSubagents:
         if not session_id or not project_dir:
             return cls()
+        # now is injectable for tests; defaults to wall-clock time so the
+        # ABANDONED_HORIZON_SECONDS fallback below is deterministic under test.
+        if now is None:
+            now = time.time()
         # Match Claude Code's projects/ dir convention: replace every non-
         # alphanumeric character with '-'. Works on both Unix
         # ('/home/user/my-project' -> '-home-user-my-project') and Windows
@@ -664,6 +886,7 @@ class RunningSubagents:
                 spawn_depth = 0
                 is_fork = False
                 meta_model = ''
+                tool_use_id = ''
                 try:
                     data = json.loads(meta.read_text())
                     agent_type = _sanitize(data.get('agentType', '') or '')
@@ -676,8 +899,17 @@ class RunningSubagents:
                     spawn_depth = int(raw_depth) if isinstance(raw_depth, (int, float)) else 0
                     is_fork = bool(data.get('isFork', False)) or agent_type == 'fork'
                     meta_model = str(data.get('model', '') or '')
+                    # toolUseId names the Agent/Task tool_use that spawned this
+                    # agent — the join key for the tier-1 toolUseResult signal
+                    # below (found in the spawning transcript's tool_result).
+                    tool_use_id = str(data.get('toolUseId', '') or '')
                 except Exception:
                     continue
+                # The spawning transcript: top-level session file when there's
+                # no parentAgentId, else the parent agent's own transcript
+                # (a nested spawn's tool_result lands in ITS spawner's file,
+                # same locality rule <task-notification> scanning documents).
+                parent_jsonl = subagents_dir / f'agent-{parent_id}.jsonl' if parent_id else session_jsonl
 
                 jsonl = meta.with_suffix('').with_suffix('.jsonl')
                 if not jsonl.is_file():
@@ -687,31 +919,135 @@ class RunningSubagents:
                 except OSError:
                     continue
 
-                billed_in, cache_read_in, output, first_ts, model, last_activity, _ = cls._parse_transcript(jsonl)
-                if meta_model:
-                    model = meta_model
+                # Authoritative status, checked in priority order:
+                #
+                # Tier 1 (preferred): the SPAWNING transcript's own tool_result
+                # record for the Agent/Task tool_use that created this agent —
+                # a structured `toolUseResult.status` field written by Claude
+                # Code core itself, not agent-authored prose. It fires even
+                # when no <task-notification> was ever emitted. Only a
+                # confirmed 'completed' status is trusted here; other values
+                # haven't been observed in the wild yet (see the
+                # subagent-completion-signals investigation), so anything else
+                # falls through to the tiers below rather than risk a false
+                # positive.
+                #
+                # Tiers 1 and 2 are resolved BEFORE the transcript parse below
+                # (moved up from their old post-parse position) so notif_ts/
+                # prev_notif_ts are available to pick the parse's resume-
+                # boundary argument — letting the same streaming pass locate
+                # run_start_ts instead of a second whole-file re-read. Tier 3
+                # (below the parse call) still needs the parse's own
+                # transcript_end_ts and is unaffected by this reordering: it
+                # only ever fires when tiers 1/2 left status=='running', in
+                # which case boundary_ts is computed from that same 'running'
+                # state either way.
+                status        = 'running'
+                run_count     = 0
+                notif_ts      = 0.0
+                prev_notif_ts = 0.0
+                end_ts        = 0.0
+                if tool_use_id and parent_jsonl.is_file():
+                    tool_result = _tail_read_tool_results(parent_jsonl).get(tool_use_id)
+                    if tool_result is not None and tool_result[0] == 'completed':
+                        status = 'completed'
+                        end_ts = tool_result[1] if tool_result[1] > 0 else mtime
 
-                # Authoritative status: an unrecognised or missing notification
-                # NEVER means done — only a known terminal status, from the
-                # LATEST notification seen, does. run_count/resumed surface the
-                # same-task-id-notifies-more-than-once resume case (bias rule
-                # + resume detection — never inferred from transcript prose).
+                # Tier 2: <task-notification> scan. Always consulted for
+                # run_count/resumed bookkeeping (a same-task-id notifying more
+                # than once is the resume signal, independent of tier 1), but
+                # only overrides `status` while tier 1 hasn't already resolved
+                # it — an unrecognised or missing notification NEVER means
+                # done on its own (bias rule).
                 task_id = jsonl.stem.removeprefix('agent-')
                 lookup = notif_map.get(task_id) or notif_map.get(jsonl.stem)
-                status    = 'running'
-                run_count = 0
-                notif_ts  = 0.0
                 if lookup is not None:
-                    run_count = lookup.notif_count
-                    notif_ts  = lookup.ts
+                    run_count     = lookup.notif_count
+                    notif_ts      = lookup.ts
+                    prev_notif_ts = lookup.prev_ts
                     raw_status = lookup.status
-                    if raw_status in _TERMINAL_STATUSES:
+                    if status == 'running' and raw_status in _TERMINAL_STATUSES:
                         status = raw_status
+                        end_ts = notif_ts
                 # Resumed: more than one notification seen, or the transcript
                 # kept being written after the last-seen notification (a
                 # resumed agent appends more turns to the same jsonl).
                 resumed = run_count > 1 or (notif_ts > 0 and mtime > notif_ts)
-                end_ts = notif_ts if status != 'running' else 0.0
+
+                # Terminal-signal invalidation, moved up from its original
+                # post-tier-3 position: it depends only on mtime (already
+                # stat'd above) and end_ts as tiers 1/2 left it, never on the
+                # transcript parse below, and tier 3 (below the parse call)
+                # only ever assigns end_ts = mtime exactly when it fires — so
+                # `mtime - end_ts` is trivially 0 there and this check is
+                # unconditionally a no-op for it either way. Evaluating it
+                # here lets boundary_ts (below) see the FINAL running/
+                # terminal verdict before the transcript is even parsed, so a
+                # stale terminal notification whose transcript kept being
+                # written doesn't collapse run_start_ts onto the notification
+                # instead of the live resume boundary. A terminal signal is
+                # only believable while the transcript agrees with it: a
+                # stall watchdog can emit <status>failed</status> for an
+                # agent that is in fact still working, and a transcript write
+                # postdating the signal by more than the skew tolerance
+                # proves it outlived the signal. `resumed` is computed above
+                # and deliberately survives this.
+                if end_ts > 0 and mtime - end_ts > cls.TERMINAL_SKEW_SECONDS:
+                    status = 'running'
+                    end_ts = 0.0
+
+                # Per-run start boundary for duration display (subagent_dur_str),
+                # resolved from tiers 1/2 + the invalidation verdict above
+                # (tier 3 below never changes this pick: it only ever fires
+                # when status is STILL 'running' here, i.e. no notification
+                # matched at all, so boundary_ts is 0.0 in that branch either
+                # way):
+                #  - still running (no terminal signal, or one just
+                #    invalidated above): the run in progress started right
+                #    after the LATEST notification (the end of the previous
+                #    run) — or, if never notified, there's no notification
+                #    boundary at all (0.0 -> first_timestamp below).
+                #  - finished with more than one notification seen: the
+                #    DISPLAYED run is bracketed by the SECOND-TO-LAST
+                #    notification (its start) and the last one (its end,
+                #    already end_ts) — anchoring on the latest notification
+                #    here would collapse run_start_ts onto end_ts itself
+                #    (~0:00 duration on a real multi-minute run).
+                #  - finished with at most one notification: no resume
+                #    bracket exists; 0.0 -> first_timestamp below.
+                if status == 'running':
+                    boundary_ts = notif_ts
+                elif run_count > 1:
+                    boundary_ts = prev_notif_ts if prev_notif_ts > 0 else notif_ts
+                else:
+                    boundary_ts = 0.0
+
+                billed_in, cache_read_in, output, first_ts, model, last_activity, transcript_end_ts, parsed_run_start = (
+                    cls._parse_transcript(jsonl, boundary_ts)
+                )
+                if meta_model:
+                    model = meta_model
+
+                run_start_ts = (
+                    (parsed_run_start if parsed_run_start > 0 else boundary_ts)
+                    if boundary_ts > 0 else first_ts
+                )
+
+                # Tier 3 (last resort): lost-notification staleness fallback.
+                # Neither tier 1 nor tier 2 ever fired — an upstream
+                # event-emission gap — but the agent's own last assistant line
+                # already carries a terminal stop_reason (end_turn, via
+                # parse_transcript's transcript_end_ts) AND the transcript has
+                # gone silent for the full ABANDONED_HORIZON_SECONDS — the same
+                # long horizon visible() already uses to sweep orphaned
+                # end_ts==0 members. Gating on both conditions (not stop_reason
+                # alone) is what keeps this from reintroducing the reverted
+                # end_turn-only false positive described in parse_transcript's
+                # NOTE: a normal fast-finishing agent is still well within the
+                # horizon and keeps waiting for a real tier-1/tier-2 signal.
+                if status == 'running' and transcript_end_ts > 0 and now - mtime > cls.ABANDONED_HORIZON_SECONDS:
+                    status = 'completed'
+                    end_ts = mtime
 
                 subagents.append(RunningSubagent(
                     agent_type      = agent_type,
@@ -733,11 +1069,37 @@ class RunningSubagents:
                     run_count       = run_count,
                     is_fork         = is_fork,
                     resumed         = resumed,
+                    run_start_ts    = run_start_ts,
                 ))
         except OSError:
             pass
         subagents.sort(key=lambda s: s.first_timestamp)
         return cls(subagents=subagents)
+
+    @classmethod
+    def _live_ancestors(cls, subs: list[RunningSubagent], now: float) -> set[int]:
+        '''ids of the agents that have a still-writing descendant.
+
+        An agent is live when it carries no terminal signal (end_ts == 0) and
+        its transcript was written within LIVENESS_WINDOW_SECONDS. Walking up
+        each live agent's parent chain marks the whole branch above it, keyed
+        by ``id(sub)`` to match _build_tree_index's identity convention.
+        '''
+        by_id: dict[str, RunningSubagent] = {}
+        for sub in subs:
+            if sub.agent_id:
+                by_id[sub.agent_id] = sub
+                by_id[sub.agent_id.removeprefix('agent-')] = sub
+        ancestors: set[int] = set()
+        for sub in subs:
+            if sub.end_ts > 0 or now - sub.mtime > cls.LIVENESS_WINDOW_SECONDS:
+                continue
+            parent = by_id.get(sub.parent_id) if sub.parent_id else None
+            # The membership guard also terminates on a parent_id cycle.
+            while parent is not None and parent is not sub and id(parent) not in ancestors:
+                ancestors.add(id(parent))
+                parent = by_id.get(parent.parent_id) if parent.parent_id else None
+        return ancestors
 
     def visible(self, now: float, last_prompt_ts: float | None) -> list[RunningSubagent]:
         '''Compute the turn-scoped cohort visible in the statusline.
@@ -746,8 +1108,10 @@ class RunningSubagents:
         agent is a candidate if it started this turn (first_timestamp >=
         last_prompt_ts) OR it is still being written (transcript written within
         LIVENESS_WINDOW_SECONDS), which keeps stragglers from the previous turn
-        that haven't finished yet.  A still-running agent (end_ts == 0) that is
-        actively writing is always included regardless.
+        that haven't finished yet, OR it has a live descendant (a supervising
+        parent is transcript-silent while it waits on its children).  A
+        still-running agent (end_ts == 0) that is actively writing is always
+        included regardless.
 
         When last_prompt_ts is None (hook unavailable), fall back to the
         JANITOR_HORIZON_SECONDS recency window: include any agent written within
@@ -755,16 +1119,21 @@ class RunningSubagents:
 
         After computing candidates, retirement rules apply:
         - If all candidates are Done (end_ts > 0): hide once
-          now - max(end_ts) > COHORT_GRACE_SECONDS (20 s clean-retire).
+          now - max(end_ts) > COHORT_GRACE_SECONDS (120 s clean-retire).
         - Otherwise (dirty cohort): hide once every member's transcript has
           been silent for JANITOR_HORIZON_SECONDS (60 s janitor sweep).
         '''
         if last_prompt_ts is not None:
-            # Turn-scoped membership (Tasks 3.2 + 3.3)
+            # Turn-scoped membership (Tasks 3.2 + 3.3), plus the supervising-
+            # parent keep: a parent blocked in a long wait loop writes nothing
+            # while its children work, so mtime alone would evict it and
+            # re-root its live children at the top level.
+            live_parents = self._live_ancestors(self.subagents, now)
             candidates = [
                 sub for sub in self.subagents
                 if sub.first_timestamp >= last_prompt_ts
                 or now - sub.mtime <= self.LIVENESS_WINDOW_SECONDS
+                or id(sub) in live_parents
             ]
         else:
             # No-marker fallback (Task 3.4): recency window
@@ -777,31 +1146,38 @@ class RunningSubagents:
         if not candidates:
             return []
 
-        # Retirement logic (Task 3.3)
-        if all(sub.end_ts > 0 for sub in candidates):
-            # Fully-Done cohort: retire once the grace window expires
-            if now - max(sub.end_ts for sub in candidates) > self.COHORT_GRACE_SECONDS:
-                return []
-        else:
-            # Dirty cohort: janitor sweep when every member has gone silent
-            # long enough to be real evidence of abandonment. A member with a
-            # terminal status but no clean end_turn still only needs
-            # JANITOR_HORIZON_SECONDS silence; a still-running member
-            # (end_ts == 0) has no terminal signal at all, so silence alone
-            # under an hour is not evidence it is dead -- it may just be mid
-            # long-tool-call or extended thinking. Require the much longer
-            # ABANDONED_HORIZON_SECONDS before sweeping those.
-            def _retired(sub: RunningSubagent) -> bool:
-                horizon = self.JANITOR_HORIZON_SECONDS if sub.end_ts > 0 else self.ABANDONED_HORIZON_SECONDS
-                return now - sub.mtime > horizon
+        # Retirement logic (Task 3.3), applied per member — not all-or-
+        # nothing. A single still-active sibling in the same turn-scoped
+        # cohort must not keep a long-finished member visible forever; each
+        # candidate is independently dropped once IT satisfies the horizon
+        # for its own state. Aggregate counts ("N active") that read
+        # visible() see the smaller live set as a result, which is correct.
+        all_done = all(sub.end_ts > 0 for sub in candidates)
 
-            if all(_retired(sub) for sub in candidates):
-                return []
+        def _retired(sub: RunningSubagent) -> bool:
+            if sub.end_ts > 0:
+                # Done member: a fully-clean cohort retires on
+                # COHORT_GRACE_SECONDS; a done member sitting inside a
+                # still-dirty cohort lingers for FINISHED_LINGER_SECONDS so it
+                # doesn't vanish mid-turn while a sibling is still working.
+                # The two constants are equal by design (both 120s, matching
+                # the layout layer's SUBAGENT_RETENTION_SECONDS) but this is
+                # a select, not a sum: a candidate never accumulates both
+                # horizons, so raising one doesn't compound with the other.
+                horizon = self.COHORT_GRACE_SECONDS if all_done else self.FINISHED_LINGER_SECONDS
+                return now - sub.end_ts > horizon
+            # Still-running (end_ts == 0): no terminal signal at all, so
+            # silence alone under an hour is not evidence it is dead -- it
+            # may just be mid long-tool-call or extended thinking. Require
+            # the much longer ABANDONED_HORIZON_SECONDS before sweeping.
+            return now - sub.mtime > self.ABANDONED_HORIZON_SECONDS
 
-        return candidates
+        return [sub for sub in candidates if not _retired(sub)]
 
     @staticmethod
-    def _parse_transcript(jsonl: Path) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float]:
+    def _parse_transcript(
+        jsonl: Path, resume_after: float = 0.0,
+    ) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float]:
         # Thin delegator to the module-level parse_transcript, kept so existing
         # callers/tests referencing RunningSubagents._parse_transcript still work.
-        return parse_transcript(jsonl)
+        return parse_transcript(jsonl, resume_after)

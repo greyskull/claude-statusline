@@ -82,7 +82,7 @@ def pango_escape(text: str) -> str:
 class SgrState:
     """Mutable SGR attribute state, threaded across an ANSI string."""
 
-    __slots__ = ('fg', 'bg', 'bold', 'italic', 'underline')
+    __slots__ = ('fg', 'bg', 'bold', 'italic', 'underline', 'strike')
 
     def __init__(self) -> None:
         self.reset()
@@ -93,6 +93,7 @@ class SgrState:
         self.bold      = False
         self.italic    = False
         self.underline = False
+        self.strike    = False
 
     def apply(self, params: list[int]) -> None:
         """Fold one SGR escape's parameters into the current state."""
@@ -110,6 +111,9 @@ class SgrState:
             elif p == 23:              self.italic    = False
             elif p == 4:               self.underline = True
             elif p == 24:              self.underline = False
+            # 9/29: strikethrough, used for finished subagents' text fields.
+            elif p == 9:               self.strike    = True
+            elif p == 29:              self.strike    = False
             elif p == 39:              self.fg        = None
             elif p == 49:              self.bg        = None
             elif 30 <= p <= 37:        self.fg        = xterm256_to_hex(p - 30)
@@ -136,6 +140,7 @@ class SgrState:
         if self.bold:                  attrs.append('weight="bold"')
         if self.italic:                attrs.append('style="italic"')
         if self.underline:             attrs.append('underline="single"')
+        if self.strike:                attrs.append('strikethrough="true"')
         if not attrs:
             return text
         return f'<span {" ".join(attrs)}>{text}</span>'

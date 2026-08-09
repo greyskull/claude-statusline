@@ -195,7 +195,7 @@ def write_subagents(
 
     parent (7th element, int > 0) is the 1-based index of this agent's spawner
     within `subagents`; it writes parentAgentId/spawnDepth into the meta.json so
-    the tree view (`YAS_SUBAGENT_TREE` / `[layout].subagent_tree`) can nest it.
+    the (always-on) tree view can nest it.
 
     action selects the latest assistant message's content blocks:
       - (tool_name, input_dict)  -> a tool_use block  -> `GLYPH_TASKS Tool[arg]`
@@ -1172,7 +1172,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 28.0,
         seven_day_pct = 18.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = WIDE_COLS,
     ),
     ScenarioConfig(
@@ -1188,7 +1187,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 28.0,
         seven_day_pct = 18.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = MEDIUM_COLS,
     ),
     ScenarioConfig(
@@ -1204,7 +1202,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 28.0,
         seven_day_pct = 18.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = NARROW_COLS,
     ),
 
@@ -1223,7 +1220,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 34.0,
         seven_day_pct = 22.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = WIDE_COLS,
     ),
     ScenarioConfig(
@@ -1238,7 +1234,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 34.0,
         seven_day_pct = 22.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = MEDIUM_COLS,
     ),
     ScenarioConfig(
@@ -1253,7 +1248,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 34.0,
         seven_day_pct = 22.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = NARROW_COLS,
     ),
 
@@ -1274,7 +1268,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 38.0,
         seven_day_pct = 24.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = WIDE_COLS,
     ),
     ScenarioConfig(
@@ -1290,7 +1283,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 38.0,
         seven_day_pct = 24.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = MEDIUM_COLS,
     ),
     ScenarioConfig(
@@ -1306,7 +1298,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 38.0,
         seven_day_pct = 24.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = NARROW_COLS,
     ),
 
@@ -1328,7 +1319,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 27.0,
         seven_day_pct = 17.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = WIDE_COLS,
     ),
     ScenarioConfig(
@@ -1346,7 +1336,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 27.0,
         seven_day_pct = 17.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = MEDIUM_COLS,
     ),
     ScenarioConfig(
@@ -1364,7 +1353,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 27.0,
         seven_day_pct = 17.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = NARROW_COLS,
     ),
 
@@ -1390,7 +1378,7 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 36.0,
         seven_day_pct = 23.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\nmax_width = 300\n',
+        yas_toml    = '[layout]\nmax_width = 300\n',
         columns     = WIDE_COLS,
     ),
     ScenarioConfig(
@@ -1412,7 +1400,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 36.0,
         seven_day_pct = 23.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = MEDIUM_COLS,
     ),
     ScenarioConfig(
@@ -1434,7 +1421,6 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 36.0,
         seven_day_pct = 23.0,
-        yas_toml    = '[layout]\nsubagent_tree = true\n',
         columns     = NARROW_COLS,
     ),
     ScenarioConfig(

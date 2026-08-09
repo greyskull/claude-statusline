@@ -6,18 +6,25 @@ import re
 from pathlib import Path
 
 
+# Keep in sync with pyproject.toml's [project] version — pyproject isn't
+# shipped with the runtime copy under ~/.claude, so the value lives here too.
+VERSION    = '0.6.4'
+
 HOME       = Path(os.path.expanduser('~'))
 CLAUDE_DIR = Path(os.environ.get('CLAUDE_CONFIG_DIR', str(HOME / '.claude')))
 MIN_WIDTH    = 40
 DEFAULT_MAX_WIDTH    = 140
+# Repo-levels (not path segments) the OpenSpec downward scan descends below
+# cwd before pruning. 1 (the historic hardcoded behavior) finds a nested
+# openspec/ in a repo directly below cwd; 0 disables the downward scan
+# entirely (only cwd's own upward-found openspec/ is considered). See
+# yas.info.openspec for the repo-levels -> path-segments conversion.
+DEFAULT_OPENSPEC_SCAN_DEPTH = 1
 DEFAULT_SOFT_LIMIT   = 150_000
 DEFAULT_TOKEN_WINDOW = 60.0
 DEFAULT_THEME        = 'claude-dark'
 DEFAULT_SHOW_DAY_STATS = True
 DEFAULT_SHOW_TOOL_USES = False
-# Subagent tree view: parent/child rows drawn with ├/└ branch prefixes.
-# Off by default so the flat cohort rendering is byte-identical unless enabled.
-DEFAULT_SUBAGENT_TREE  = False
 DEFAULT_JUSTIFY        = False
 DEFAULT_LABELS         = False
 # Context-state word (ported from Dumbometer, MIT). Opt-in: off by default so
@@ -32,16 +39,11 @@ MEDIUM_WIDTH = 80
 # Below this the agents stack single-column. Set under DEFAULT_MAX_WIDTH=140 so
 # the two-column layout is actually reachable in a default-config wide terminal.
 TWO_COL_WF_WIDTH = 120
-# Box width at/above which the wide layout's plain subagent cohort (the
-# fallback single-column stack, not the checklist/subagents side-by-side
-# split) pairs agents into two side-by-side columns, filled column-major.
-# Set under DEFAULT_MAX_WIDTH=140 so the two-column layout is actually
-# reachable in a default-config wide terminal.
-TWO_COL_SUBAGENT_WIDTH = 120
-# When the wide layout's checklist/subagents side-by-side split is in tree
-# mode (cfg.subagent_tree), the plan/task-list column is fixed at this width
-# instead of the usual 45%-of-inner cap, so the subagent tree gets the rest
-# of a wide box instead of being starved by an even split. Still clamped to
+# The wide layout's checklist/subagents side-by-side split always renders the
+# subagent side as a tree (parent/child rows with ├/└ branch prefixes), so
+# the plan/task-list column is fixed at this width instead of the usual
+# 45%-of-inner cap, giving the subagent tree the rest of a wide box instead
+# of being starved by an even split. Still clamped to
 # the 45%-of-inner ceiling on narrow terminals so it degrades to the old
 # behavior when the box is too small to justify a fixed-width left column.
 # 68 (down from an earlier 78) hands the subagent side ~10 more columns on
@@ -110,6 +112,8 @@ RESET   = '\033[0m'
 BOLD    = '\033[1m'
 FAINT   = '\033[2m'
 ITALIC  = '\033[3m'
+ITALIC_OFF = '\033[23m'
+BOLD_OFF   = '\033[22m'
 STRIKE  = '\033[9m'   # SGR strikethrough on  (finished-subagent task description)
 UNSTRIKE = '\033[29m'  # SGR strikethrough off
 
@@ -121,7 +125,7 @@ META_EXCLUDE_TOOLS = frozenset({'TodoWrite', 'ExitPlanMode', 'AskUserQuestion'})
 # Plain-ASCII caption for the tool-counts separator. The label overlay applies
 # superscript() at render time, so no raw superscript glyphs live in source.
 TOOL_COUNTS_LABEL = 'tools main/sub'
-LINES_LABEL = 'LOC read/write'
+LINES_LABEL = 'loc read/write'
 
 CLR_GREY_DIM   = '\033[38;5;244m'
 CLR_GREY_DARK  = '\033[38;5;238m'
@@ -155,11 +159,10 @@ GLYPH_BURN_FAST     = '\uef76' # nf-cod-zap         (shown when the burn rate is
 GLYPH_BURN_SLOW     = '\uf490' # nf-oct-flame       (shown when the burn rate is _not_ too fast)
 GLYPH_FOLDER        = '\uef85' # nf-custom folder   (path row)
 GLYPH_SUBAGENT      = '\uf135' # nf-fa-tasks        (subagent list)
-GLYPH_SUBAGENT_ROW    = '\u25b6' # U+25B6             (per-row Running Subagent marker)
 GLYPH_SUBAGENT_DONE   = '\u2713' # U+2713             (Completed subagent row marker)
 GLYPH_SUBAGENT_ENDED  = '\u2717' # U+2717             (Killed/Stopped subagent row marker \u2014 "ended early by intent")
 GLYPH_SUBAGENT_FAILED = '!' # U+0021 '!'         (Failed subagent row marker \u2014 ended by error)
-GLYPH_SUBAGENT_RESUME = '\u21ba' # U+21BA             (Resumed-running subagent row marker, replaces GLYPH_SUBAGENT_ROW)
+GLYPH_SUBAGENT_RESUME = '\u21ba' # U+21BA             (Resumed-running subagent row marker)
 GLYPH_PLUGINS       = '\uf1e6' # nf-fa-plug         (plugins label)
 GLYPH_HELPER        = '\uf4cd' # nf-mdi-star_circle (5h rate-limit helper)
 ICON_TOK_RATE       = '\U000f18a7'  # nf-md gauge         (t/m rate label)
@@ -219,6 +222,8 @@ PILL_BR    = '\u2598'  # U+2598 upper-left quadrant
 BOX_H       = '\u2500'  # U+2500 light horizontal
 BOX_V       = '\u2502'  # U+2502 light vertical
 BOX_H_DASH  = '\u2504'  # U+2504 light triple-dash horizontal
+BOX_H_DASH2 = '\u254c'  # U+254C light double-dash horizontal
+BOX_H_DASH4 = '\u2508'  # U+2508 light quadruple-dash horizontal
 BOX_T_RIGHT = '\u251c'  # U+251C vertical and right
 BOX_T_LEFT  = '\u2524'  # U+2524 vertical and left
 BOX_T_DOWN  = '\u252c'  # U+252C down and horizontal (top elbow)
@@ -241,7 +246,7 @@ SPARK_RAMP      = '\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588'  # U+2581..
 # short for the full word. Tried before falling back to a whole-word-boundary
 # ellipsis shrink of the original text, and well before a label is dropped.
 LABEL_ABBREVIATIONS: dict[str, str] = {
-    'LOC read/write':     'LOC r/w',
+    'loc read/write':     'loc r/w',
     'output sess/day':    'out sess/day',
     'input sess/day':     'in sess/day',
 }
@@ -286,6 +291,8 @@ ASCII_GLYPHS: dict[str, str] = {
     BOX_H:              '-',
     BOX_V:              '|',
     BOX_H_DASH:         '-',
+    BOX_H_DASH2:        '-',
+    BOX_H_DASH4:        '-',
     BOX_T_RIGHT:        '+',
     BOX_T_LEFT:         '+',
     BOX_T_DOWN:         '+',
@@ -310,7 +317,6 @@ ASCII_GLYPHS: dict[str, str] = {
     GLYPH_WF_DIVIDER:   ':',
     # Markers / arrows.
     WF_PHASE_DOT:       '.',
-    GLYPH_SUBAGENT_ROW: '>',
     GLYPH_SUBAGENT_DONE:'v',
     GLYPH_SUBAGENT_ENDED: 'x',
     GLYPH_SUBAGENT_RESUME: '>',
@@ -417,7 +423,6 @@ GITHUB_ICON_OVERRIDE: dict[str, str] = {
     GLYPH_SKILLS:       '⬦',  # ⬦ white medium diamond (was ◆ U+25C6, EAW=A)
     GLYPH_HELPER:       '✦',  # ✦ black four-pointed star (was ★ U+2605, EAW=A)
     GLYPH_SUBAGENT:     '⫶',  # ⫶ triple colon (stacked list, was ☰ tasks)
-    GLYPH_SUBAGENT_ROW: '▸',  # ▸ small right triangle (was ▶ U+25B6, EAW=A)
 }
 
 # Pre-built {codepoint: str} map for str.translate (used by `github` glyph_mode).

@@ -515,6 +515,145 @@ DRACULA = Theme(
     spec_empty_ansi = fg256(233),
 )
 
+
+# Dracula on a light background. Dracula is a dark scheme and its stock accents
+# measure 1.08-1.34:1 against off-white -- effectively invisible -- so this keeps
+# Dracula's hues and darkens only the TEXT slots until each clears WCAG AA.
+# Ratios in the comments are measured against the intended background #FFFBF0.
+#
+# The one part that looks wrong and is not: `models` keeps Dracula's ORIGINAL
+# anchors, unmodified. Those are pill backgrounds with a flipped foreground, not
+# text, and all six already clear BG_LUM_THRESHOLD (110) -- measured: opus 234,
+# sonnet 184, haiku 171, other 169, fable 142, mythos 141. Darkening them would
+# break the pill flip and throw away the loudest Dracula signal on screen.
+DRACULA_LIGHT = Theme(
+    name        = 'dracula-light',
+
+    # #6272A4 is Dracula's own comment color, unmodified: it clears AA (4.55:1)
+    # on off-white as-is. Every dim text slot below points at it, which is the
+    # fix for the labels that were vanishing under the dark default.
+    border      = fg( 68,  71,  90),  #  8.85:1  Dracula selection, as body gray
+    border_off  = fg( 98, 114, 164),  #  4.55:1  comment
+    pwd         = fg(137,  54, 255),  #  5.03:1  purple
+    branch      = fg(  0, 127,  32),  #  5.01:1  green
+    commit      = fg( 98, 114, 164),
+    session     = fg( 98, 114, 164),
+    skills      = fg(105, 115,   0),  #  5.01:1  olive; see `yellow` below
+    time        = fg( 98, 114, 164),
+    tok         = fg(  0, 119, 144),  #  5.03:1  cyan
+    tok_dim     = fg( 98, 114, 164),
+    tok_day     = fg(  0, 119, 144),
+    tok_day_dim = fg( 98, 114, 164),
+    cost        = fg(220,   0,   0),  #  5.02:1  red
+    bar_fill    = fg(  0, 127,  32),
+    # Dracula's bar_empty is #000000, which would draw a black bar straight
+    # across a light statusline. This is the empty half of the track, so it wants
+    # to read as absence: light, but still distinguishable from the background.
+    bar_empty   = fg(198, 193, 180),
+    dim_green   = fg(  0, 127,  32),
+    label       = fg( 98, 114, 164),
+    ctx         = fg(  0, 119, 144),
+    ctx_dim     = fg( 98, 114, 164),
+    # Light themes invert this slot -- "bright white" has to mean max emphasis,
+    # which on off-white is the darkest tone, not the lightest. Compare
+    # GRUVBOX_LIGHT and ONE_LIGHT, which both do the same thing.
+    white_brt   = fg( 40,  42,  54),  # 13.77:1  Dracula's bg, as the fg
+    arrow       = fg(  0, 127,  32),
+    dirty       = fg(220,   0,   0),
+    icon_path   = fg(  0, 119, 144),
+    tok_icon    = fg(105, 115,   0),
+    model       = fg(137,  54, 255),
+
+    safe        = fg(  0, 127,  32),
+    warn        = fg(105, 115,   0),
+    alert       = fg(220,   0,   0),
+    # Olive, not yellow. A color cannot be both recognizably yellow and readable
+    # on off-white; this is the tradeoff, not an oversight.
+    yellow      = fg(105, 115,   0),
+    tok_arrow   = fg(105, 115,   0),
+
+    # Unmodified Dracula -- see the note above the theme.
+    models = {
+        'opus':   ModelColors(
+            anchor     = (241, 250, 140),
+            warm_shift = (247, 184, 118),
+            cool_shift = (177, 250, 133),
+            label      = fg(241, 250, 140),
+        ),
+        'sonnet': ModelColors(
+            anchor     = ( 80, 250, 123),
+            warm_shift = (104, 243, 175),
+            cool_shift = (107, 224, 154),
+            label      = fg( 80, 250, 123),
+        ),
+        'haiku':  ModelColors(
+            anchor     = (189, 147, 249),
+            warm_shift = (164, 190, 251),
+            cool_shift = (209, 139, 234),
+            label      = fg(189, 147, 249),
+        ),
+        'other':  ModelColors(
+            anchor     = (255, 121, 198),
+            warm_shift = (255, 110, 164),
+            cool_shift = (235, 129, 213),
+            label      = fg(255, 121, 198),
+        ),
+        'fable':  ModelColors(
+            anchor     = (255,  90, 120),
+            warm_shift = (255,  70,  90),
+            cool_shift = (255, 130, 150),
+            label      = fg(255,  90, 120),
+        ),
+        'mythos': ModelColors(
+            anchor     = (140, 120, 255),
+            warm_shift = (160, 110, 240),
+            cool_shift = (110, 140, 255),
+            label      = fg(140, 120, 255),
+        ),
+    },
+
+    # The light-theme pair, not Dracula's. Every light theme in this file uses
+    # (10,10,10)/(250,250,250) where the dark ones use (15,15,15)/(235,235,235),
+    # and ops/demo.py buckets its per-theme renders on exactly that difference
+    # (`pill_fg_dark[0] <= 10`), so a light theme carrying the dark pair would
+    # file itself under demo/themes/dark/. Both values also widen the pill
+    # contrast slightly, which the loud unmodified anchors below can use.
+    pill_fg_dark  = ( 10,  10,  10),
+    pill_fg_light = (250, 250, 250),
+
+    grad_stops = (
+        (0.00, (  0, 127,  32)),  # green
+        (0.25, (105, 115,   0)),  # olive
+        (0.50, (169,  87,   0)),  # orange   5.01:1
+        (0.75, (220,   0,   0)),  # red
+        (1.00, (211,   0, 121)),  # pink     5.02:1
+    ),
+    # The fade target a gradient blends toward past its fill point, so it is the
+    # "spent" end of the bar and has to be light here, not dark.
+    grey_rgb    = (198, 193, 180),
+    spark_stops = (
+        (0.00, (150,   0,   0)),
+        (0.50, (185,   0,   0)),
+        (1.00, (220,   0,   0)),
+    ),
+    spec_gradients = (
+        ((137,  54, 255), (  0, 119, 144), (  0, 119, 144)),  # Ocean
+        ((220,   0,   0), (211,   0, 121), (105, 115,   0)),  # Sunset
+        ((  0, 100,  25), (  0, 127,  32), (  0, 127,  32)),  # Forest
+        ((211,   0, 121), (137,  54, 255), (211,   0, 121)),  # Lavender
+        ((220,   0,   0), (220,   0,   0), (105, 115,   0)),  # Ember
+        ((137,  54, 255), (110,  43, 204), (  0, 119, 144)),  # Arctic
+        ((105, 115,   0), (220,   0,   0), (105, 115,   0)),  # Copper
+        ((211,   0, 121), (211,   0, 121), (220,   0,   0)),  # Rose
+        ((  0, 119, 144), (  0, 127,  32), (  0, 119, 144)),  # Mint
+        ((211,   0, 121), (137,  54, 255), (  0, 119, 144)),  # Nebula
+        ((  0, 119, 144), (211,   0, 121), (137,  54, 255)),  # Aurora
+        ((105, 115,   0), (220,   0,   0), (211,   0, 121)),  # Volcano
+    ),
+    # 254 is the light-theme convention in this file; dark themes use 233.
+    spec_empty_ansi = fg256(254),
+)
+
 GRUVBOX_DARK = Theme(
     name        = 'gruvbox-dark',
 
@@ -1700,6 +1839,7 @@ THEMES: dict[str, Theme] = {
     CATPPUCCIN_LATTE.name:   CATPPUCCIN_LATTE,
     CATPPUCCIN_MOCHA.name:   CATPPUCCIN_MOCHA,
     DRACULA.name:            DRACULA,
+    DRACULA_LIGHT.name:      DRACULA_LIGHT,
     GRUVBOX_DARK.name:       GRUVBOX_DARK,
     GRUVBOX_LIGHT.name:      GRUVBOX_LIGHT,
     NORD.name:               NORD,

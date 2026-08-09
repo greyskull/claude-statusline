@@ -117,7 +117,7 @@ class SessionView:
 
     @cached_property
     def changes(self) -> list[tuple[str, int, int]]:
-        return OpenSpec.from_cwd(self.session.cwd).changes
+        return OpenSpec.from_cwd(self.session.cwd, max_depth=self.cfg.openspec_scan_depth).changes
 
     @cached_property
     def tool_counts(self) -> ToolCounts:

@@ -68,7 +68,42 @@ def test_default_when_nothing_set(tmp_path: Path) -> None:
     assert cfg.show_tool_uses is False
     assert cfg.justify is False
     assert cfg.labels is False
+    assert cfg.openspec_scan_depth == 1
     assert cfg.errors == ()
+
+
+# 4.1b openspec_scan_depth precedence + validation
+
+def test_openspec_scan_depth_env_overrides_toml(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[openspec]\nscan_depth = 2\n')
+    cfg = config.Config.load(env={'YAS_OPENSPEC_SCAN_DEPTH': '3'}, config_dir=tmp_path)
+    assert cfg.openspec_scan_depth == 3
+
+
+@requires_tomllib
+def test_openspec_scan_depth_toml_overrides_default(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[openspec]\nscan_depth = 2\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.openspec_scan_depth == 2
+
+
+def test_openspec_scan_depth_default_when_nothing_set(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.openspec_scan_depth == 1
+
+
+def test_openspec_scan_depth_zero_is_legal(tmp_path: Path) -> None:
+    """0 ('don't recurse') is a legal value, unlike the pos-int knobs."""
+    cfg = config.Config.load(env={'YAS_OPENSPEC_SCAN_DEPTH': '0'}, config_dir=tmp_path)
+    assert cfg.openspec_scan_depth == 0
+
+
+@requires_tomllib
+def test_invalid_toml_openspec_scan_depth_falls_back_to_default(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[openspec]\nscan_depth = -1\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.openspec_scan_depth == 1              # invalid → default
+    assert 'openspec_scan_depth' in cfg.errors
 
 
 # 4.2 Alias resolution + canonical-wins
@@ -221,25 +256,6 @@ def test_env_show_render_time_zero_overrides_toml_true(tmp_path: Path) -> None:
     (tmp_path / 'yas.toml').write_text('[layout]\nshow_render_time = true\n')
     cfg = config.Config.load(env={'YAS_SHOW_RENDER_TIME': '0'}, config_dir=tmp_path)
     assert cfg.show_render_time is False
-
-
-# subagent_tree (parent/child subagent rows with tree glyphs; off by default)
-
-def test_subagent_tree_default_off(tmp_path: Path) -> None:
-    cfg = config.Config.load(env={}, config_dir=tmp_path)
-    assert cfg.subagent_tree is False
-
-
-def test_env_subagent_tree_enables(tmp_path: Path) -> None:
-    cfg = config.Config.load(env={'YAS_SUBAGENT_TREE': '1'}, config_dir=tmp_path)
-    assert cfg.subagent_tree is True
-
-
-@requires_tomllib
-def test_toml_subagent_tree_enables(tmp_path: Path) -> None:
-    (tmp_path / 'yas.toml').write_text('[layout]\nsubagent_tree = true\n')
-    cfg = config.Config.load(env={}, config_dir=tmp_path)
-    assert cfg.subagent_tree is True
 
 
 # show_tool_uses (per-tool tool_use counts row, wide layout; on by default)
