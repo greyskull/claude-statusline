@@ -326,8 +326,8 @@ def tree_columns(
         # actual string `subagent_row` will render, or a long-running parent
         # row silently claims one column less than it needs and every
         # shorter-duration child row drifts left of it. See subagent_dur_str.
-        # The name is measured via `subagent_type_label` (includes the ×N
-        # resume suffix `subagent_row` renders) capped at SUBAGENT_NAME_MAX
+        # The name is measured via `subagent_type_label` (the same string
+        # `subagent_row` renders) capped at SUBAGENT_NAME_MAX
         # (the renderer truncates past that); +3 + model_w: the ' X <model>'
         # field after the name, where X is the run-state marker/separator
         # glyph (0 when model_w is 0, e.g. an empty cohort) — keep all of it
@@ -1345,13 +1345,13 @@ def build_wide(
     return spec
 
 
-def render_layout(spec: LayoutSpec, r: Renderer, timing: str = '') -> list[str]:
+def render_layout(spec: LayoutSpec, r: Renderer, timing: str = '', version: str = '') -> list[str]:
     lines: list[str] = []
     for row in spec.rows:
         if row.kind == 'top_border':
             lines.append(r.border_top(spec.width, spec.session_id, downs=row.downs, fill=spec.fill, pill=row.pill, labels=tuple(row.labels)))
         elif row.kind == 'bottom_border':
-            lines.append(r.border_bottom(spec.width, ups=row.ups, fill=spec.fill, timing=timing))
+            lines.append(r.border_bottom(spec.width, ups=row.ups, fill=spec.fill, timing=timing, version=version))
         elif row.kind == 'separator':
             lines.append(r.border_separator(spec.width, ups=row.ups, downs=row.downs, fill=spec.fill, labels=tuple(row.labels)))
         elif row.kind == 'separator_seam':

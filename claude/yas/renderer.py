@@ -114,7 +114,7 @@ from yas.session import ContextWindow, RateBucket, RateLimits
 from yas.info.subagents import RunningSubagent
 from yas.info.workflows import RunningWorkflow
 from yas.info.tasks import TaskList
-from yas.render.text import _middle_ellipsis, _visible_width, fmt_tok, fmt_tok_fixed
+from yas.render.text import _middle_ellipsis, _visible_width, fmt_tok, fmt_tok_fixed, strike
 from yas.tokens import TokenRate
 
 if TYPE_CHECKING:
@@ -206,6 +206,35 @@ def _best_fit_cluster(
             cluster = cand
             break
     return cluster
+
+
+def _is_pua(ch: str) -> bool:
+    """True if `ch` is a Nerd Font Private Use Area codepoint."""
+    cp = ord(ch)
+    return 0xE000 <= cp <= 0xF8FF or 0xF0000 <= cp <= 0xFFFFD
+
+
+def _strike_activity(activity: str) -> str:
+    """Strike an activity segment's text, leaving its leading PUA glyph plain.
+
+    `subagent_activity` emits '<glyph> <text>'; a rule drawn across a Nerd
+    Font icon renders as a mangled box, so only the part past the glyph's
+    trailing space is wrapped. Call this AFTER any ellipsis truncation — the
+    callers slice the raw string, and slicing an escape-bearing one would cut
+    a sequence in half and let the strike bleed into the next column.
+
+    If there's no space (e.g. the glyph got truncated down to nothing but
+    itself), still never strike a leading PUA glyph — strike everything
+    after it instead of falling back to striking the whole string.
+    """
+    if not activity:
+        return ''
+    glyph, sep, text = activity.partition(' ')
+    if sep:
+        return f'{glyph}{sep}{strike(text)}'
+    if _is_pua(activity[0]):
+        return f'{activity[0]}{strike(activity[1:])}'
+    return strike(activity)
 
 
 # ---------------------------------------------------------------------------
@@ -354,8 +383,8 @@ class Renderer:
     def border_top(self, width: int, session_id: str = '', downs: tuple[int, ...] = (), fill: float = 1.0, pill: Pill | None = None, labels: tuple[tuple[str, int], ...] = ()) -> str:
         return self.border.border_top(width, session_id, downs, fill, pill, labels)
 
-    def border_bottom(self, width: int, ups: tuple[int, ...] = (), fill: float = 1.0, timing: str = '') -> str:
-        return self.border.border_bottom(width, ups, fill, timing)
+    def border_bottom(self, width: int, ups: tuple[int, ...] = (), fill: float = 1.0, timing: str = '', version: str = '') -> str:
+        return self.border.border_bottom(width, ups, fill, timing, version)
 
     def border_separator(self, width: int, ups: tuple[int, ...] = (), downs: tuple[int, ...] = (), fill: float = 1.0, labels: tuple[tuple[str, int], ...] = ()) -> str:
         return self.border.border_separator(width, ups, downs, fill, labels)
@@ -841,6 +870,15 @@ class Renderer:
         # successful finish, red for any other ending (failed, killed,
         # stopped). Only meaningful when is_done.
         done_clr    = self.safe if status == 'completed' else self.alert
+        # A finished row strikes through every TEXT field (duration, name,
+        # model, token/lines counts, description, activity) on top of the
+        # existing grey. `str` is the identity for the running case — SGR 9
+        # is zero-width either way, so none of the width math below shifts;
+        # `mark` is only ever applied at paint time, never to a measured
+        # string. Glyphs, elbows and padding cells are excluded: the ✓/✗
+        # marker keeps its unstruck done_clr so pass-vs-fail stays readable,
+        # and `strike` leaves a field's own pad spaces outside the escape.
+        mark        = strike if is_done else str
         run_count   = getattr(sub, 'run_count', 0)
         is_resumed  = (not is_done) and (getattr(sub, 'resumed', False) or run_count >= 1)
         dur_s   = subagent_dur_str(sub, now)
@@ -853,8 +891,8 @@ class Renderer:
 
         step      = rainbow_step()
         c_marker  = rainbow_at(step, 12)
-        # Includes the ×N resume suffix — shared with layout's column-width
-        # measurement (see metrics.subagent_type_label). Capped at
+        # Shared with layout's column-width measurement (see
+        # metrics.subagent_type_label). Capped at
         # SUBAGENT_NAME_MAX so one pathological agent type can't push the
         # model/description columns off the row (the layout's cohort
         # measurements apply the same cap).
@@ -984,7 +1022,7 @@ class Renderer:
             changed_blank_w = _visible_width(changed_s)
             read_part    = read_s if (lines is not None and read_lc) else ' ' * read_blank_w
             changed_part = changed_s if (lines is not None and changed_lc) else ' ' * changed_blank_w
-            lines_field  = f'{read_part} / {changed_part}'
+            lines_field  = f'{mark(read_part)} / {mark(changed_part)}'
             # Whether this row has ANY lines data at all — gates whether the
             # non-tree cluster reserves the field's width when there's
             # nothing to show. tree_single always reserves it (see
@@ -1011,7 +1049,7 @@ class Renderer:
             # agent's timer is frozen, so keeping it in a live colour read as
             # if it were still ticking.
             if is_done:
-                front_c = f'{self.CTX_DIM}{dur_s}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
+                front_c = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{mark(type_text)}{self.R}'
             else:
                 front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
             if tree_single:
@@ -1028,7 +1066,7 @@ class Renderer:
                     mid_marker = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R}'
                 else:
                     mid_marker = f'{self.LABEL}{MIDDLE_DOT}{self.R}'
-                front_c += f' {mid_marker} {model_field_clr}{front_model_str}{self.R}'
+                front_c += f' {mid_marker} {model_field_clr}{mark(front_model_str)}{self.R}'
 
             # Cluster order (tree_single mode): '· tok · lines'. The model
             # field has already moved into the front (see above) and is no
@@ -1042,26 +1080,33 @@ class Renderer:
 
             def build_cluster(show_lines: bool, show_tok: bool) -> str:
                 d = self.CTX_DIM if is_done else self.LABEL
+                # The loc read/changed field renders in the SAME grey as the
+                # activity/log column at the end of the row (`self.CTX_DIM`,
+                # theme `ctx_dim`) in both run states — it used to be the only
+                # white text on the row and drew the eye away from the tok
+                # reading beside it. Deliberately not `tok_clr`: tok keeps its
+                # risk-zone tint.
+                lines_clr = self.CTX_DIM
                 fields: list[str] = []
                 if tree_single:
                     if show_tok:
                         tok_clr = d if is_done else ctx_clr
-                        fields.append(f'{tok_clr}{tok_field}{self.R}')
+                        fields.append(f'{tok_clr}{mark(tok_field)}{self.R}')
                     # tree_single ALWAYS reserves the lines field's width
                     # when show_lines (width-pressure hasn't shed it) — even
                     # with no data — so sibling rows in the cohort stay
                     # column-aligned. The non-tree path below omits the
                     # field entirely when there's no data (`has_lines`).
                     if show_lines:
-                        fields.append(f'{d if is_done else self.white_brt}{lines_field}{self.R}')
+                        fields.append(f'{lines_clr}{lines_field}{self.R}')
                 else:
                     if show_lines and has_lines:
-                        fields.append(f'{d if is_done else self.white_brt}{lines_field}{self.R}')
+                        fields.append(f'{lines_clr}{lines_field}{self.R}')
                     if show_tok:
                         tok_clr = d if is_done else ctx_clr
-                        fields.append(f'{tok_clr}{tok_field}{self.R}')
+                        fields.append(f'{tok_clr}{mark(tok_field)}{self.R}')
                     model_clr_use = d if is_done else model_clr
-                    fields.append(f'{model_clr_use}{model_str}{self.R}')
+                    fields.append(f'{model_clr_use}{mark(model_str)}{self.R}')
                 if not fields:
                     return ''
                 sep = f' {d}{dot}{self.R}'
@@ -1143,6 +1188,8 @@ class Renderer:
                     activity = self.subagent_activity(sub.last_activity, cap=max(0, act_w - 3))
                     if _visible_width(activity) > act_w:
                         activity = activity[:max(0, act_w - 1)] + ELLIPSIS
+                    if is_done:
+                        activity = _strike_activity(activity)  # after truncation
                     line1 = f'{line1} {dot_clr}{MIDDLE_DOT}{self.R} {self.CTX_DIM}{activity}{self.R}'
                 line1 += ' ' * max(0, target_w - _visible_width(line1))
                 # Elbow is already embedded in front_c (between the duration
@@ -1162,11 +1209,13 @@ class Renderer:
             activity     = self.subagent_activity(sub.last_activity, cap=activity_cap)
             if _visible_width(activity) > avail2:
                 activity = activity[:max(0, avail2 - 1)] + ELLIPSIS
+            left2_w = 6 + _visible_width(activity)  # measured before the strike
+            if is_done:
+                activity = _strike_activity(activity)  # after truncation
             left2   = (
                 f'   {self.CTX_DIM}{GLYPH_CONTINUATION}{self.R}  '
                 f'{self.CTX_DIM}{activity}{self.R}'
             )
-            left2_w = 6 + _visible_width(activity)
             pad2    = max(0, target_w2 - left2_w)
             line2   = f'{left2}{" " * pad2}'
 
@@ -1228,7 +1277,7 @@ class Renderer:
             # Frozen timer and name/type both grey, same as the twoline tree
             # form above; the ✓/✗ marker below is the only field that keeps
             # done_clr, so pass-vs-fail stays readable.
-            front_n = f'{self.CTX_DIM}{dur_s}{self.R} {elbow_n}{self.CTX_DIM}{ITALIC}{type_text}{self.R}'
+            front_n = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow_n}{self.CTX_DIM}{ITALIC}{mark(type_text)}{self.R}'
         else:
             front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{ITALIC}{type_text}{self.R}'
         model_n_clr = self.CTX_DIM if is_done else model_clr
@@ -1238,8 +1287,8 @@ class Renderer:
             mid_n = f'{c_marker}{BOLD}{GLYPH_SUBAGENT_RESUME}{self.R}'
         else:
             mid_n = f'{dot_n_clr}{MIDDLE_DOT}{self.R}'
-        front_n += (f' {mid_n} {model_n_clr}{model_field}{self.R}'
-                    f' {dot_n_clr}{MIDDLE_DOT}{self.R} {tok_n_clr}{tok_n}{self.R}')
+        front_n += (f' {mid_n} {model_n_clr}{mark(model_field)}{self.R}'
+                    f' {dot_n_clr}{MIDDLE_DOT}{self.R} {tok_n_clr}{mark(tok_n)}{self.R}')
         front_n_w = _visible_width(front_n)
 
         # Never overflow the right border: when even the tok-terminated front

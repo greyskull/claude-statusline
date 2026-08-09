@@ -57,10 +57,17 @@ mon/run:
 version/bump:
 	# update plugin.json
 	sed -i 's/$(shell uv version --short)/$(VERSION)/g' .claude-plugin/plugin.json
+	# update the runtime copy (claude/yas/constants.py isn't pip/uv-installed --
+	# ops/install.sh runs the loose files directly, so this can't read the
+	# version via importlib.metadata and has to carry its own literal).
+	# Anchored on the VERSION line itself rather than the old value, so it
+	# doesn't matter whether this runs before or after `uv version` mutates
+	# pyproject.toml below.
+	sed -i "s/^VERSION[[:space:]]*=.*/VERSION    = '$(VERSION)'/" claude/yas/constants.py
 	# update pyproject.toml & uv.lock
 	uv version $(VERSION)
 	@uv lock && uv sync --all-groups
-	@git add .claude-plugin/plugin.json pyproject.toml uv.lock
+	@git add .claude-plugin/plugin.json claude/yas/constants.py pyproject.toml uv.lock
 	@git commit -m "Bump version to $(VERSION)"
 	@git push
 
