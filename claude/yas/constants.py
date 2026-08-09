@@ -14,6 +14,12 @@ HOME       = Path(os.path.expanduser('~'))
 CLAUDE_DIR = Path(os.environ.get('CLAUDE_CONFIG_DIR', str(HOME / '.claude')))
 MIN_WIDTH    = 40
 DEFAULT_MAX_WIDTH    = 140
+# Repo-levels (not path segments) the OpenSpec downward scan descends below
+# cwd before pruning. 1 (the historic hardcoded behavior) finds a nested
+# openspec/ in a repo directly below cwd; 0 disables the downward scan
+# entirely (only cwd's own upward-found openspec/ is considered). See
+# yas.info.openspec for the repo-levels -> path-segments conversion.
+DEFAULT_OPENSPEC_SCAN_DEPTH = 1
 DEFAULT_SOFT_LIMIT   = 150_000
 DEFAULT_TOKEN_WINDOW = 60.0
 DEFAULT_THEME        = 'claude-dark'

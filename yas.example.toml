@@ -85,3 +85,12 @@
 #                                                            # NOTE: this is [context].labels,
 #                                                            # NOT [layout].labels above.
 # thresholds = [25, 50, 70, 90]                              # exactly 4 ascending ints, 1..99
+
+# [openspec]
+# scan_depth = 1  # int >= 0; repo-levels below cwd the OpenSpec downward scan
+#                 #   descends looking for nested openspec/ roots (monorepo-of-repos
+#                 #   layout). 1 (default) finds a repo directly below cwd; 2 also
+#                 #   finds one nested a level deeper; 0 disables the downward scan
+#                 #   entirely (only an openspec/ found by walking upward from cwd
+#                 #   is used). Unlike most numeric knobs here, 0 is legal.
+#                 #   env: YAS_OPENSPEC_SCAN_DEPTH

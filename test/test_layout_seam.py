@@ -66,7 +66,7 @@ def _silence_dynamic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(skills_mod.LoadedSkills, 'from_transcript',
                         classmethod(lambda cls, path: skills_mod.LoadedSkills(names=[])))
     monkeypatch.setattr(openspec_mod.OpenSpec, 'from_cwd',
-                        classmethod(lambda cls, cwd: openspec_mod.OpenSpec(changes=[])))
+                        classmethod(lambda cls, cwd, max_depth=None: openspec_mod.OpenSpec(changes=[])))
     monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: ''))
 
 

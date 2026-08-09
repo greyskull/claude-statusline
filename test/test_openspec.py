@@ -120,7 +120,25 @@ def test_from_cwd_merges_upward_and_downward_roots(tmp_path: Path) -> None:
 
     result = openspec_mod.OpenSpec.from_cwd(str(sub))
     names = sorted(n for n, _, _ in result.changes)
-    assert names == sorted(['nested-repo/nested-change', f'{tmp_path.name}/own-change'])
+    assert names == sorted([
+        'nested-repo/nested-change',
+        f'{tmp_path.name}/own-change',
+    ])
+
+
+def test_scan_downward_depth_boundary(tmp_path: Path) -> None:
+    """A repo exactly 1 level below cwd is found; one 2 levels below is not."""
+    shallow = tmp_path / 'repo-a' / 'openspec' / 'changes' / 'shallow-change'
+    shallow.mkdir(parents=True)
+    (shallow / 'tasks.md').write_text('- [ ] one\n')
+
+    deep = tmp_path / 'group' / 'repo-b' / 'openspec' / 'changes' / 'deep-change'
+    deep.mkdir(parents=True)
+    (deep / 'tasks.md').write_text('- [ ] one\n')
+
+    result = openspec_mod.OpenSpec.from_cwd(str(tmp_path))
+    names = sorted(n for n, _, _ in result.changes)
+    assert names == ['shallow-change']
 
 
 def test_scan_downward_respects_max_depth(tmp_path: Path) -> None:
@@ -133,4 +151,30 @@ def test_scan_downward_respects_max_depth(tmp_path: Path) -> None:
     (changes_dir / 'tasks.md').write_text('- [ ] one\n')
 
     result = openspec_mod.OpenSpec.from_cwd(str(tmp_path))
+    assert result.changes == []
+
+
+def test_from_cwd_max_depth_2_finds_repo_two_levels_down(tmp_path: Path) -> None:
+    """max_depth=2 (repo-levels) finds a repo 2 levels below cwd, which the
+    default max_depth=1 does not."""
+    deep = tmp_path / 'group' / 'repo-b' / 'openspec' / 'changes' / 'deep-change'
+    deep.mkdir(parents=True)
+    (deep / 'tasks.md').write_text('- [ ] one\n')
+
+    default_result = openspec_mod.OpenSpec.from_cwd(str(tmp_path))
+    assert default_result.changes == []
+
+    deep_result = openspec_mod.OpenSpec.from_cwd(str(tmp_path), max_depth=2)
+    names = sorted(n for n, _, _ in deep_result.changes)
+    assert names == ['deep-change']
+
+
+def test_from_cwd_max_depth_0_disables_downward_scan(tmp_path: Path) -> None:
+    """max_depth=0 disables the downward scan entirely (upward-found
+    openspec/ still applies)."""
+    changes_dir = tmp_path / 'repo-a' / 'openspec' / 'changes' / 'add-thing'
+    changes_dir.mkdir(parents=True)
+    (changes_dir / 'tasks.md').write_text('- [ ] one\n')
+
+    result = openspec_mod.OpenSpec.from_cwd(str(tmp_path), max_depth=0)
     assert result.changes == []
