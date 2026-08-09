@@ -87,10 +87,13 @@ def test_border_bottom_timing_right_aligned(r: borders.BorderRenderer) -> None:
     out = r.border_bottom(width=40, timing='47.2ms')
     stripped = strip_ansi(out)
     assert _visible_width(out) == 40
-    # `…47.2ms──╯`: text ends two fill cells before the corner (index w-1).
+    # `…47.2ms┈┄╯`: text ends two fill cells before the corner (index w-1);
+    # those cells carry the dashed lead-out ramp (densest nearest the text).
     assert stripped[-1] == '╯'
-    assert stripped[-3:-1] == '──'
+    assert stripped[-3:-1] == '┈┄'
     assert stripped[-9:-3] == '47.2ms'
+    # Lead-in ramp on the left of the text, sparsest furthest out.
+    assert stripped[-12:-9] == '╌┄┈'
 
 
 def test_border_bottom_timing_only_overlays_fill(r: borders.BorderRenderer) -> None:
@@ -99,6 +102,69 @@ def test_border_bottom_timing_only_overlays_fill(r: borders.BorderRenderer) -> N
     stripped = strip_ansi(out)
     assert _visible_width(out) == 40
     assert stripped[35] == '┴'  # column 36 (1-based) → index 35
+
+
+# --- version tag participates in the border's own context-usage fill ---------
+
+def test_border_bottom_version_before_fill_boundary_stays_grey(r: borders.BorderRenderer) -> None:
+    # `fill` hasn't reached any of the version tag's columns yet -- every
+    # character keeps the muted grey→160 bold sweep, none of the fill's own
+    # gradient colour.
+    version = 'v0.6.2'
+    width = 40
+    out = r.border_bottom(width=width, version=version, fill=0.1)
+    stripped = strip_ansi(out)
+    idx = stripped.index(version)
+    cols = _col_glyphs(out)
+    for i in range(idx, idx + len(version)):
+        prefix = cols[i][0]
+        assert '\x1b[1m' in prefix  # still bold
+        # not the fill's own gradient colour at this column
+        assert r.gradient.grad_at(i, width, fill=0.1) not in prefix
+
+
+def test_border_bottom_version_fully_swallowed_by_fill(r: borders.BorderRenderer) -> None:
+    # `fill=1.0` -- the border's own fill has passed every column, so every
+    # version glyph merges into the fill's gradient colour, still bold.
+    version = 'v0.6.2'
+    width = 40
+    out = r.border_bottom(width=width, version=version, fill=1.0)
+    stripped = strip_ansi(out)
+    idx = stripped.index(version)
+    cols = _col_glyphs(out)
+    for i in range(idx, idx + len(version)):
+        prefix = cols[i][0]
+        assert '\x1b[1m' in prefix  # still bold
+        assert r.gradient.grad_at(i, width, fill=1.0) in prefix
+
+
+def test_border_bottom_version_partially_swallowed_by_fill(r: borders.BorderRenderer) -> None:
+    # `fill` lands mid-tag: the same per-column boundary math the border
+    # itself uses (`col / max(1, width - 1) <= fill`) decides, character by
+    # character, which glyphs have been swallowed by the fill colour and
+    # which are still on the grey sweep -- and it must agree exactly with
+    # where the border's own fill/off transition sits, no off-by-one.
+    version = 'v0.6.2'
+    width = 40
+    out = r.border_bottom(width=width, version=version, fill=1.0)
+    stripped = strip_ansi(out)
+    idx = stripped.index(version)
+    denom = max(1, width - 1)
+    # Pick a fill fraction that lands exactly between two of the tag's
+    # columns (idx+2 filled, idx+3 not), derived from the same boundary
+    # formula the renderer itself uses.
+    fill = (idx + 2) / denom
+    out = r.border_bottom(width=width, version=version, fill=fill)
+    cols = _col_glyphs(out)
+    for offset, ch in enumerate(version):
+        i = idx + offset
+        prefix = cols[i][0]
+        assert '\x1b[1m' in prefix  # bold throughout, filled or not
+        expect_filled = (i / denom) <= fill
+        if expect_filled:
+            assert r.gradient.grad_at(i, width, fill=fill) in prefix, offset
+        else:
+            assert r.gradient.grad_at(i, width, fill=fill) not in prefix, offset
 
 
 def test_border_bottom_no_timing_unchanged(r: borders.BorderRenderer) -> None:
@@ -225,14 +291,14 @@ def test_label_never_shifts_past_its_own_anchor_column(r: borders.BorderRenderer
 
 
 def test_label_uses_caller_abbreviation_when_full_text_cannot_shift_to_fit(r: borders.BorderRenderer) -> None:
-    # 'LOC read/write' doesn't fit even the full run between two nearby
-    # elbows, but its registered abbreviation ('LOC r/w') does -- and that's
+    # 'loc read/write' doesn't fit even the full run between two nearby
+    # elbows, but its registered abbreviation ('loc r/w') does -- and that's
     # preferred over an ellipsis shrink of the full phrase.
-    out = r.border_separator(width=60, downs=(9, 20), labels=(('LOC read/write', 12),))
+    out = r.border_separator(width=60, downs=(9, 20), labels=(('loc read/write', 12),))
     stripped = strip_ansi(out)
     assert stripped[8] == '┬' and stripped[19] == '┬'  # both elbows intact
     run = stripped[9:19]  # the whole fill run between the two elbows
-    assert superscript('LOC r/w') in run
+    assert superscript('loc r/w') in run
     assert ELLIPSIS not in run  # abbreviation fits outright, no shrink needed
 
 
@@ -363,7 +429,7 @@ def test_label_sweep_never_clips_mid_word_or_hits_elbow(r: borders.BorderRendere
     # combination: the label is either untouched-from-bare (dropped) or a
     # legitimate rendering per `_is_valid_rendered_label`; either way neither
     # elbow is ever disturbed and the two elbows' own columns never move.
-    labels = ['input', 'output', 'cost', 'LOC read/write', 'output sess/day']
+    labels = ['input', 'output', 'cost', 'loc read/write', 'output sess/day']
     for text in labels:
         for run_len in range(1, 12):
             left_elbow = 5

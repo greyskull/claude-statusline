@@ -635,4 +635,9 @@ def test_existing_phrases_survive_under_force_color(uninstall_env):
     combined = wire_result.stdout + wire_result.stderr
     assert 'private uv-managed 3.13' in combined
     # Color codes must never inject the prerelease version into the default path.
-    assert '3.15' not in combined
+    # NB: a bare `'3.15' not in combined` is a false-positive trap — the preflight
+    # line prints the *patch* version too (e.g. "CPython 3.13.15 found"), and the
+    # substring "3.15" sits right inside "3.13.15". Assert on the delimited
+    # selection phrases instead, matching the pattern used above (~line 459-460).
+    assert 'private uv-managed 3.15' not in combined
+    assert 'CPython 3.15' not in combined

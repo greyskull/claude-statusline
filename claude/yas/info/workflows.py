@@ -212,7 +212,7 @@ class RunningWorkflows:
             except OSError:
                 continue
             agent_id = jsonl.stem[len('agent-'):]  # 'agent-<id>.jsonl' -> '<id>'
-            billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts = parse_transcript(jsonl)
+            billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, _ = parse_transcript(jsonl)
             # Fallback identity: the label defaults to the first prompt line and
             # lives in agent_type so subagent_row renders it as the primary
             # identity at every width. run-JSON enrichment may override it.

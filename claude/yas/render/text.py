@@ -12,7 +12,9 @@ from yas.constants import (
     ELLIPSIS,
     GITHUB_TRANSLATE,
     MIDDLE_DOT,
+    STRIKE,
     UNICODE_TRANSLATE,
+    UNSTRIKE,
 )
 
 
@@ -84,6 +86,25 @@ def _is_wide(ch: str) -> bool:
 def _visible_width(s: str) -> int:
     plain = _ANSI_RE.sub('', s)
     return sum(2 if _is_wide(ch) else 1 for ch in plain)
+
+
+def strike(s: str) -> str:
+    """Wrap ``s``'s non-blank core in SGR 9 (strikethrough), padding excluded.
+
+    Used to mark every text field of a finished subagent. Leading/trailing
+    spaces are left OUTSIDE the escape so a right-justified or ljust-padded
+    field doesn't draw a rule across its own padding cells, and an all-blank
+    field (a shed lines/tok column) is returned untouched. SGR 9/29 are
+    zero-width and stripped by ``_visible_width``, so this never moves a
+    column; it must therefore be applied only at paint time, after the width
+    math has measured the raw text.
+    """
+    core = s.strip(' ')
+    if not core:
+        return s
+    lead  = len(s) - len(s.lstrip(' '))
+    trail = len(s) - len(s.rstrip(' '))
+    return f'{" " * lead}{STRIKE}{core}{UNSTRIKE}{" " * trail}'
 
 
 def to_ascii(s: str) -> str:

@@ -26,12 +26,12 @@ from yas.constants import (
     DEFAULT_JUSTIFY,
     DEFAULT_LABELS,
     DEFAULT_MAX_WIDTH,
+    DEFAULT_OPENSPEC_SCAN_DEPTH,
     DEFAULT_SOFT_LIMIT,
     DEFAULT_TOKEN_WINDOW,
     DEFAULT_THEME,
     DEFAULT_SHOW_DAY_STATS,
     DEFAULT_SHOW_TOOL_USES,
-    DEFAULT_SUBAGENT_TREE,
 )
 from yas.themes import THEMES
 
@@ -48,6 +48,15 @@ def _parse_pos_int(raw: object, origin: str) -> int:
     n = int(raw)  # str/int/float ok; 'banana' raises
     if n <= 0:
         raise ValueError('must be > 0')
+    return n
+
+
+def _parse_nonneg_int(raw: object, origin: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        raise ValueError('expected an integer')
+    n = int(raw)  # str/int/float ok; 'banana' raises
+    if n < 0:
+        raise ValueError('must be >= 0')
     return n
 
 
@@ -342,7 +351,8 @@ class Config:
         'max_width', 'full_width', 'justify', 'labels', 'soft_limit',
         'token_window', 'theme', 'bg_shift', 'glyph_mode', 'single_width',
         'show_day_stats', 'context_state', 'context_labels', 'context_thresholds',
-        'show_render_time', 'show_tool_uses', 'subagent_tree', 'soft_limit_models', 'errors', 'debug_lines',
+        'show_render_time', 'show_tool_uses', 'soft_limit_models', 'openspec_scan_depth',
+        'errors', 'debug_lines',
     )
 
     max_width:          int
@@ -361,8 +371,8 @@ class Config:
     context_thresholds: tuple[int, ...]
     show_render_time:   bool
     show_tool_uses:     bool
-    subagent_tree:      bool
     soft_limit_models:  tuple[tuple[str, int], ...]
+    openspec_scan_depth: int
     errors:             tuple[str, ...]
     debug_lines:        tuple[str, ...]
 
@@ -384,8 +394,8 @@ class Config:
         context_thresholds: tuple[int, ...] = DEFAULT_CONTEXT_THRESHOLDS,
         show_render_time:   bool = False,
         show_tool_uses:     bool = DEFAULT_SHOW_TOOL_USES,
-        subagent_tree:      bool = DEFAULT_SUBAGENT_TREE,
         soft_limit_models:  tuple[tuple[str, int], ...] = (),
+        openspec_scan_depth: int = DEFAULT_OPENSPEC_SCAN_DEPTH,
         errors:             tuple[str, ...] = (),
         debug_lines:        tuple[str, ...] = (),
     ) -> None:
@@ -406,8 +416,8 @@ class Config:
         s(self, 'context_thresholds', context_thresholds)
         s(self, 'show_render_time', show_render_time)
         s(self, 'show_tool_uses', show_tool_uses)
-        s(self, 'subagent_tree', subagent_tree)
         s(self, 'soft_limit_models', soft_limit_models)
+        s(self, 'openspec_scan_depth', openspec_scan_depth)
         s(self, 'errors', errors)
         s(self, 'debug_lines', debug_lines)
 
@@ -425,8 +435,8 @@ class Config:
                 f'show_day_stats={self.show_day_stats}, context_state={self.context_state}, '
                 f'context_labels={self.context_labels!r}, context_thresholds={self.context_thresholds!r}, '
                 f'show_render_time={self.show_render_time}, show_tool_uses={self.show_tool_uses}, '
-                f'subagent_tree={self.subagent_tree}, '
                 f'soft_limit_models={self.soft_limit_models!r}, '
+                f'openspec_scan_depth={self.openspec_scan_depth}, '
                 f'errors={self.errors!r}, debug_lines={self.debug_lines!r})')
 
     @classmethod
@@ -458,6 +468,7 @@ class Config:
 
         layout, tokens, appearance = _table('layout'), _table('tokens'), _table('appearance')
         context = _table('context')
+        openspec = _table('openspec')
         glyphs = _table_in(appearance, 'glyphs')
         cli = _parse_argv(argv) if argv is not None else {}
 
@@ -520,10 +531,6 @@ class Config:
             'show_tool_uses',
             _env_sources(env, 'YAS_SHOW_TOOL_USES') + toml_src(layout, 'show_tool_uses'),
             _parse_bool, DEFAULT_SHOW_TOOL_USES, errors, debug)
-        subagent_tree = _resolve(
-            'subagent_tree',
-            _env_sources(env, 'YAS_SUBAGENT_TREE') + toml_src(layout, 'subagent_tree'),
-            _parse_bool, DEFAULT_SUBAGENT_TREE, errors, debug)
         justify = _resolve(
             'justify',
             _env_sources(env, 'YAS_JUSTIFY') + toml_src(layout, 'justify'),
@@ -545,6 +552,11 @@ class Config:
             _env_sources(env, 'YAS_CONTEXT_THRESHOLDS') + toml_src(context, 'thresholds'),
             _parse_context_thresholds, DEFAULT_CONTEXT_THRESHOLDS, errors, debug)
 
+        openspec_scan_depth = _resolve(
+            'openspec_scan_depth',
+            _env_sources(env, 'YAS_OPENSPEC_SCAN_DEPTH') + toml_src(openspec, 'scan_depth'),
+            _parse_nonneg_int, DEFAULT_OPENSPEC_SCAN_DEPTH, errors, debug)
+
         soft_limit_models = _parse_models(tokens.get('model'), errors, debug)
 
         return cls(
@@ -564,8 +576,8 @@ class Config:
             context_thresholds=context_thresholds,
             show_render_time=show_render_time,
             show_tool_uses=show_tool_uses,
-            subagent_tree=subagent_tree,
             soft_limit_models=tuple(soft_limit_models),
+            openspec_scan_depth=openspec_scan_depth,
             errors=tuple(errors),
             debug_lines=tuple(debug),
         )

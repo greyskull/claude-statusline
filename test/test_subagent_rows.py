@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from yas.constants import (
 )
 from yas.info import SessionView
 from yas.info.subagents import RunningSubagent
+from yas.render.metrics import subagent_dur_str
 from yas.render.text import _visible_width, fmt_tok, fmt_tok_fixed
 from yas.tokens import TickRecord, TokenLog
 from helper import strip_ansi
@@ -46,6 +48,7 @@ def _make_sub(
     status: str | None = None,
     run_count: int = 0,
     resumed: bool = False,
+    run_start_ts: float | None = None,
 ) -> RunningSubagent:
     now = time.time()
     if first_timestamp is None:
@@ -71,6 +74,10 @@ def _make_sub(
         status          = status,
         run_count       = run_count,
         resumed         = resumed,
+        # None -> RunningSubagent's own default (equals first_timestamp), so
+        # every existing caller that doesn't pass this keeps exercising the
+        # "no distinct resume boundary tracked" path unchanged.
+        run_start_ts    = run_start_ts,
     )
 
 
@@ -382,6 +389,45 @@ def test_done_two_line_duration_does_not_tick() -> None:
     assert strip_ansi(line1_a) == strip_ansi(line1_b)
 
 
+def test_done_two_line_duration_is_greyed() -> None:
+    # A finished agent's timer is frozen, so it greys with the type/name text
+    # rather than keeping the live/done accent colour. Only the ✓/✗ marker
+    # keeps done_clr.
+    sub   = _make_done_sub()
+    dur_s = subagent_dur_str(sub, time.time())
+    line1, _ = _two(sub)
+    # dur_s is right-justified; `strike` keeps the pad space outside SGR 9.
+    assert f'{_r.CTX_DIM}{dur_s.replace(dur_s.strip(), STRIKE + dur_s.strip() + UNSTRIKE)}' in line1
+    assert f'{_r.safe}{dur_s}' not in line1
+
+
+def test_running_two_line_duration_keeps_live_colour() -> None:
+    sub   = _make_sub()
+    dur_s = subagent_dur_str(sub, time.time())
+    line1, _ = _two(sub)
+    assert f'{_r.CTX}{dur_s}' in line1
+
+
+def test_done_one_line_duration_is_greyed() -> None:
+    sub   = _make_done_sub()
+    dur_s = subagent_dur_str(sub, time.time())
+    line  = _one(sub)
+    assert f'{_r.CTX_DIM}{dur_s.replace(dur_s.strip(), STRIKE + dur_s.strip() + UNSTRIKE)}' in line
+    assert f'{_r.safe}{dur_s}' not in line
+
+
+def test_done_one_line_name_is_greyed() -> None:
+    # The italic name/type field greys too, matching the twoline tree form.
+    line = _one(_make_done_sub())
+    assert f'{_r.CTX_DIM}{ITALIC}' in line
+    assert f'{_r.safe}{ITALIC}' not in line
+
+
+def test_running_one_line_name_keeps_live_styling() -> None:
+    line = _one(_make_sub())
+    assert f'{_r.SKILLS}{ITALIC}' in line
+
+
 def test_done_two_line_no_marker() -> None:
     line1, _ = _two(_make_done_sub())
     plain = strip_ansi(line1)
@@ -445,13 +491,16 @@ def test_two_line_strikethrough_applies_to_all_terminal_states() -> None:
         assert STRIKE in line1 and UNSTRIKE in line1, f'status={status} missing strikethrough'
 
 
-def test_one_line_resumed_shows_resume_glyph_and_suffix() -> None:
+def test_one_line_resumed_shows_resume_glyph_without_run_count() -> None:
+    # The ×N run-count suffix was removed: run_count counts
+    # <task-notification> records, which a stall watchdog inflates for
+    # merely-slow agents. The ↺ glyph alone marks the resume.
     sub = _make_sub(status='running', run_count=1, resumed=True,
                     first_timestamp=time.time() - 47)
     out = strip_ansi(_one(sub))
     assert '↺' in out
     assert '▶' not in out
-    assert '×2' in out
+    assert '×' not in out
 
 
 def test_one_line_resumed_keeps_live_styling_not_dim() -> None:
@@ -460,13 +509,32 @@ def test_one_line_resumed_keeps_live_styling_not_dim() -> None:
     assert _r.SKILLS in line
 
 
-def test_one_line_resumed_elapsed_continues_from_original_spawn() -> None:
-    # Elapsed time is computed from first_timestamp regardless of resume —
-    # a resumed agent's duration is NOT reset by the resume.
+def test_one_line_resumed_elapsed_uses_first_timestamp_when_run_start_unset() -> None:
+    # RENAMED (was test_one_line_resumed_elapsed_continues_from_original_spawn):
+    # `_make_sub` leaves `run_start_ts` unset, so it defaults to
+    # `first_timestamp` (the "no resume boundary tracked" case) regardless of
+    # the `resumed`/`run_count` flags passed here. Kept, renamed, to cover
+    # exactly that default-anchor fallback rather than imply it exercises the
+    # real resume-boundary math (see info/subagents.py's `run_start_ts`
+    # computation in `from_session` for that).
     sub = _make_sub(status='running', run_count=1, resumed=True,
                     first_timestamp=time.time() - 90)
     out = strip_ansi(_one(sub))
     assert '1:30' in out
+
+
+def test_one_line_resumed_elapsed_uses_run_start_ts_when_set() -> None:
+    # The real resume-boundary case: run_start_ts distinct from
+    # first_timestamp must win — this is the row-rendering-level regression
+    # guard for the fix (info/subagents.py's from_session covers the actual
+    # boundary computation; this only checks subagent_row wires run_start_ts
+    # through subagent_dur_str correctly).
+    now = time.time()
+    sub = _make_sub(status='running', run_count=1, resumed=True,
+                    first_timestamp=now - 65 * 60, run_start_ts=now - 90)
+    out = strip_ansi(_one(sub))
+    assert '1:30' in out
+    assert '1:05:' not in out
 
 
 def test_two_line_resumed_shows_resume_glyph_in_tree_column() -> None:
@@ -475,7 +543,7 @@ def test_two_line_resumed_shows_resume_glyph_in_tree_column() -> None:
                            tree_prefix='├ ', tree_desc_col=40)
     plain = strip_ansi(line)
     assert '↺' in plain
-    assert '×3' in plain  # run_count(2) + 1 total passes
+    assert '×' not in plain  # the run-count suffix is gone; the glyph remains
 
 
 def test_one_line_not_resumed_without_resumed_flag_or_run_count() -> None:
@@ -904,14 +972,8 @@ def test_subagent_cells_prefixes_branch_glyphs() -> None:
     k1   = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
     k2   = _make_tree_sub('agent-c', parent_id='a', ts_off=2)
     gk   = _make_tree_sub('agent-d', parent_id='c', ts_off=3)
-    cells = layout.subagent_cells([root, k1, k2, gk], True)
+    cells = layout.subagent_cells([root, k1, k2, gk])
     assert [p for _, p in cells] == ['', '├ ', '└ ', '  └ ']
-
-
-def test_subagent_cells_flat_mode_unchanged() -> None:
-    subs = [_make_tree_sub('agent-b', parent_id='a'), _make_tree_sub('agent-a', ts_off=1)]
-    # Default (flat) mode: original order, no prefixes, no reordering.
-    assert layout.subagent_cells(subs, False) == [(subs[0], ''), (subs[1], '')]
 
 
 def test_cap_tree_groups_keeps_active_parent_with_child() -> None:
@@ -1388,7 +1450,7 @@ def test_build_wide_tree_mode_renders_branches(monkeypatch: pytest.MonkeyPatch) 
         classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[root, kid1, kid2])),
     )
     session = session_mod.SessionInfo.from_dict(json.loads(SESSION.read_text()))
-    view    = SessionView(session, Config(subagent_tree=True))
+    view    = SessionView(session, Config())
     tick    = TickRecord(token_log=TokenLog(), day_cost=0.0, tok_rate=0)
     spec    = layout.build_wide(view, tick, 140, _r)
     out     = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
@@ -1424,7 +1486,7 @@ def test_retention_drops_terminal_row_past_120s() -> None:
     now = time.time()
     fresh_done = _rs('a', status='completed', end_ts=now - 10)
     stale_done = _rs('b', status='completed', end_ts=now - 200)
-    out = layout.select_visible_cohort([fresh_done, stale_done], cap=6, tree=False, now=now)
+    out = layout.select_visible_cohort([fresh_done, stale_done], cap=6, now=now)
     assert fresh_done in out
     assert stale_done not in out
 
@@ -1432,7 +1494,7 @@ def test_retention_drops_terminal_row_past_120s() -> None:
 def test_retention_never_drops_running_row() -> None:
     now = time.time()
     running = _rs('a', status='running')
-    out = layout.select_visible_cohort([running], cap=6, tree=False, now=now)
+    out = layout.select_visible_cohort([running], cap=6, now=now)
     assert running in out
 
 
@@ -1440,7 +1502,7 @@ def test_cascade_clear_forces_running_descendant_terminal() -> None:
     now = time.time()
     parent = _rs('p', status='completed', end_ts=now - 5)
     child  = _rs('c', status='running', parent_id='p')
-    out = layout.select_visible_cohort([parent, child], cap=6, tree=True, now=now)
+    out = layout.select_visible_cohort([parent, child], cap=6, now=now)
     child_out = next(s for s in out if s.agent_id == 'c')
     assert child_out.status == 'completed'
     assert child_out.end_ts == parent.end_ts
@@ -1451,10 +1513,46 @@ def test_cascade_clear_walks_multiple_ancestor_levels() -> None:
     grandparent = _rs('gp', status='killed', end_ts=now - 5)
     parent      = _rs('p', status='running', parent_id='gp')
     child       = _rs('c', status='running', parent_id='p')
-    out = layout.select_visible_cohort([grandparent, parent, child], cap=6, tree=True, now=now)
+    out = layout.select_visible_cohort([grandparent, parent, child], cap=6, now=now)
     for sub in out:
         if sub.agent_id in ('p', 'c'):
             assert sub.status == 'killed'
+
+
+def test_cap_evicts_finished_group_before_live_one() -> None:
+    # Capacity pressure: a lingering finished root must yield its slot to a
+    # still-running one even though its retention window has not expired.
+    now  = time.time()
+    done = _rs('done', status='completed', end_ts=now - 10, mtime=now - 10)
+    live = _rs('live', status='running', mtime=now - 1)
+
+    out = layout.select_visible_cohort([done, live], cap=1, now=now)
+
+    assert out == [live]
+
+
+def test_cap_evicts_oldest_finished_group_first() -> None:
+    now    = time.time()
+    older  = _rs('older',  status='completed', end_ts=now - 90, mtime=now - 90)
+    newer  = _rs('newer',  status='completed', end_ts=now - 10, mtime=now - 10)
+
+    out = layout.select_visible_cohort([older, newer], cap=1, now=now)
+
+    assert out == [newer]
+
+
+def test_cap_within_one_group_keeps_live_child_over_finished_one() -> None:
+    # Single-group trim path: the finished child has the more recent mtime,
+    # but a live sibling still outranks it.
+    now      = time.time()
+    root     = _rs('root', status='running', mtime=now - 1)
+    finished = _rs('fin',  status='completed', end_ts=now - 2, mtime=now - 1,
+                   parent_id='root')
+    live     = _rs('live', status='running', mtime=now - 30, parent_id='root')
+
+    out = layout.select_visible_cohort([root, finished, live], cap=2, now=now)
+
+    assert out == [root, live]
 
 
 # K. Per-subagent lines read/changed field (Decision 10) -----------------------
@@ -1741,6 +1839,48 @@ def test_narrow_width_no_lines_matches_pre_change_output() -> None:
         assert line1_default == line1_explicit_none
 
 
+def test_lines_field_uses_the_log_column_grey() -> None:
+    # The loc read/changed values render in the same grey as the activity/log
+    # column at the end of the row (CTX_DIM), not bright white.
+    sub  = _make_sub(last_activity=('text', 'ran the gates', {}))
+    line = _r.subagent_row(sub, 156, twoline=True, tree_single=True,
+                           tree_prefix='├ ', tree_desc_col=40,
+                           tree_activity_col=110, lines=(1200, 34)).split('\n')[0]
+
+    assert f'{_r.CTX_DIM}1.20K' in line
+    assert _r.white_brt not in line
+    # Same constant the log column paints with.
+    assert f'{_r.CTX_DIM}{GLYPH_REPLYING} ran the gates' in line
+
+
+def test_lines_field_grey_composes_with_the_finished_strikethrough() -> None:
+    # The lines field is CTX_DIM in BOTH run states — that alone predates the
+    # strikethrough feature and asserting it on the done row only wouldn't
+    # detect a regression (the finished path was already CTX_DIM before
+    # strikethrough existed). What's new is that strike layers on top of the
+    # SAME colour rather than the field going conditionally-coloured again;
+    # asserting both branches together is what makes a regression back to
+    # `d if is_done else white_brt`-style conditional colouring fail here.
+    done = _make_done_sub()
+    live = _make_sub()
+    kw   = dict(twoline=True, tree_single=True, tree_prefix='├ ',
+                tree_desc_col=40, lines=(1200, 34))
+
+    done_line = _r.subagent_row(done, 156, **kw).split('\n')[0]
+    live_line = _r.subagent_row(live, 156, **kw).split('\n')[0]
+
+    # Colour opens, strike opens and closes inside it, then the row's reset —
+    # no bleed — and the colour codes are zero-width either way.
+    assert f'{_r.CTX_DIM}{STRIKE}1.20K{UNSTRIKE}' in done_line
+    # The live row carries the SAME grey with no strike at all — if the
+    # colour ever regressed to being conditional on run state again, this
+    # branch would go back to white_brt and this assertion would catch it.
+    assert f'{_r.CTX_DIM}1.20K' in live_line
+    assert STRIKE not in live_line and UNSTRIKE not in live_line
+    assert _r.white_brt not in live_line
+    assert _visible_width(done_line) == _visible_width(live_line) == 156
+
+
 # L. Self-scoping: no rollup across the tree ----------------------------------
 
 def test_self_scoped_lines_no_rollup_between_parent_and_child() -> None:
@@ -1772,7 +1912,7 @@ def test_eviction_drops_oldest_completion_first_across_states() -> None:
         _rs('run-1',      status='running'),
         _rs('run-2',      status='running'),
     ]
-    out = layout.select_visible_cohort(subs, cap=4, tree=True, now=now)
+    out = layout.select_visible_cohort(subs, cap=4, now=now)
     ids = {s.agent_id for s in out}
     assert 'old-fail' not in ids           # oldest completion evicted first
     assert 'run-1' in ids and 'run-2' in ids  # running rows never displaced
@@ -1801,3 +1941,112 @@ def test_one_line_collapse_name_is_italic() -> None:
     sub = _make_sub(agent_type='general-purpose')
     line = _one(sub, 96)
     assert f'{ITALIC}general-purpose' in line
+
+
+# M. Finished rows: strikethrough across every text field ---------------------
+
+_STRIKE_SPAN_RE = re.compile(re.escape(STRIKE) + '(.*?)' + re.escape(UNSTRIKE), re.DOTALL)
+
+# Nerd Font PUA, box drawing/elbows, and the marker/separator glyphs — none of
+# these may ever fall inside an SGR 9 span (a rule drawn through a glyph or a
+# border renders as a mangled cell).
+_NEVER_STRUCK = '│┬┴├└─·✓✗↺'
+
+
+def _struck_spans(line: str) -> list[str]:
+    return _STRIKE_SPAN_RE.findall(line)
+
+
+def _is_pua(ch: str) -> bool:
+    cp = ord(ch)
+    return 0xE000 <= cp <= 0xF8FF or 0xF0000 <= cp <= 0xFFFFD
+
+
+def _done_tree_row(**kw) -> str:
+    sub = _make_done_sub(
+        agent_type    = 'verifier',
+        description   = 'run the gates',
+        last_activity = ('text', 'wrote the report', {}),
+        total_input   = 12345,
+        **kw,
+    )
+    out = _r.subagent_row(sub, 156, twoline=True, tree_single=True,
+                          tree_prefix='├ ', tree_desc_col=40,
+                          tree_activity_col=110, lines=(1200, 34))
+    return out.split('\n')[0]
+
+
+def test_done_tree_row_strikes_every_text_field() -> None:
+    line1 = _done_tree_row()
+
+    struck = ''.join(_struck_spans(line1))
+
+    for field in ('1:30', 'verifier', 'sonnet', fmt_tok_fixed(12345),
+                  '1.20K', '34', 'run the gates', 'wrote the report'):
+        assert field in struck, f'{field!r} not struck through'
+
+
+def test_done_tree_row_leaves_glyphs_borders_and_padding_unstruck() -> None:
+    line1 = _done_tree_row()
+
+    spans = _struck_spans(line1)
+
+    assert spans
+    for span in spans:
+        assert span, 'empty strikethrough span'
+        assert span == span.strip(' '), f'padding struck through: {span!r}'
+        assert not any(_is_pua(ch) for ch in span), f'PUA glyph struck: {span!r}'
+        assert not any(ch in _NEVER_STRUCK for ch in span), f'glyph/border struck: {span!r}'
+
+
+def test_done_row_strikethrough_is_always_terminated() -> None:
+    line1 = _done_tree_row()
+
+    assert line1.count(STRIKE) == line1.count(UNSTRIKE)
+    # No dangling SGR 9 past the last terminator — nothing can bleed into the
+    # next cell or the row below.
+    assert line1.rindex(UNSTRIKE) > line1.rindex(STRIKE)
+
+
+def test_strike_activity_never_strikes_a_leading_pua_glyph_without_a_space() -> None:
+    # `_strike_activity` normally splits on the glyph's trailing space, but a
+    # no-space activity (e.g. the glyph alone, or a glyph glued straight to
+    # text with no separator) must still leave the leading PUA glyph plain —
+    # falling back to striking the WHOLE string would rule through the icon.
+    glyph = GLYPH_REPLYING
+    struck = renderer_mod._strike_activity(f'{glyph}nospace')
+
+    assert struck.startswith(glyph)
+    assert not struck.startswith(f'{STRIKE}{glyph}')
+    assert f'{STRIKE}nospace{UNSTRIKE}' in struck
+
+    # Plain text with no glyph at all still gets struck in full.
+    assert renderer_mod._strike_activity('plaintext') == renderer_mod.strike('plaintext')
+
+
+def test_strikethrough_is_absent_from_a_running_row() -> None:
+    sub  = _make_sub()
+    line = _r.subagent_row(sub, 156, twoline=True, tree_single=True,
+                           tree_prefix='├ ', tree_desc_col=40)
+
+    assert STRIKE not in line
+
+
+@pytest.mark.parametrize('content_width', (96, 136, 156))
+def test_done_and_running_rows_have_identical_display_width(content_width: int) -> None:
+    kw   = dict(agent_type='verifier', description='run the gates', total_input=12345)
+    done = _make_done_sub(**kw)
+    live = _make_sub(**kw)
+
+    tree_done = _r.subagent_row(done, content_width, twoline=True, tree_single=True,
+                                tree_prefix='├ ', tree_desc_col=40).split('\n')[0]
+    tree_live = _r.subagent_row(live, content_width, twoline=True, tree_single=True,
+                                tree_prefix='├ ', tree_desc_col=40).split('\n')[0]
+    one_done  = _one(done, content_width)
+    one_live  = _one(live, content_width)
+
+    # SGR 9/29 are zero-width: a finished row occupies exactly the same
+    # columns as a running one, and the escapes leave no trace in plain text.
+    assert _visible_width(tree_done) == _visible_width(tree_live) == content_width
+    assert _visible_width(one_done) == _visible_width(one_live) == content_width
+    assert STRIKE not in strip_ansi(tree_done) and UNSTRIKE not in strip_ansi(tree_done)
