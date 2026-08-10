@@ -330,3 +330,29 @@ def test_context_line_compact_badge_absent_by_default() -> None:
     )
     out = r.context_line_compact(ctx, available=40)
     assert '!200K' not in _strip(out)
+
+
+# show_icons: default on preserves the hourglass glyph beside the token/pct
+# figures; off drops it while keeping every number and the bar unchanged.
+def test_context_line_show_icons_true_keeps_hourglass() -> None:
+    r = Renderer()
+    ctx = ContextWindow(total_input_tokens=10_000, total_output_tokens=5_000, context_window_size=200_000)
+    out = r.context_line(ctx, available=76, show_icons=True)
+    assert GLYPH_HOURGLASS in out
+
+
+def test_context_line_show_icons_false_drops_hourglass() -> None:
+    r = Renderer()
+    ctx = ContextWindow(total_input_tokens=10_000, total_output_tokens=5_000, context_window_size=200_000)
+    out = r.context_line(ctx, available=76, show_icons=False)
+    assert GLYPH_HOURGLASS not in out
+    assert '10.0K' in _strip(out) or '15.0K' in _strip(out)  # value still rendered
+    assert _visible_width(out) <= 76
+
+
+def test_context_line_show_icons_false_over_soft_limit_drops_hourglass() -> None:
+    r = Renderer()
+    ctx = ContextWindow(total_input_tokens=200_000, total_output_tokens=0, context_window_size=200_000)
+    out = r.context_line(ctx, available=76, show_icons=False)
+    assert GLYPH_HOURGLASS not in out
+    assert _visible_width(out) <= 76

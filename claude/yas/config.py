@@ -352,7 +352,7 @@ class Config:
         'token_window', 'theme', 'bg_shift', 'glyph_mode', 'single_width',
         'show_day_stats', 'context_state', 'context_labels', 'context_thresholds',
         'show_render_time', 'show_tool_uses', 'soft_limit_models', 'openspec_scan_depth',
-        'errors', 'debug_lines',
+        'show_icons', 'errors', 'debug_lines',
     )
 
     max_width:          int
@@ -373,6 +373,7 @@ class Config:
     show_tool_uses:     bool
     soft_limit_models:  tuple[tuple[str, int], ...]
     openspec_scan_depth: int
+    show_icons:          bool
     errors:             tuple[str, ...]
     debug_lines:        tuple[str, ...]
 
@@ -396,6 +397,7 @@ class Config:
         show_tool_uses:     bool = DEFAULT_SHOW_TOOL_USES,
         soft_limit_models:  tuple[tuple[str, int], ...] = (),
         openspec_scan_depth: int = DEFAULT_OPENSPEC_SCAN_DEPTH,
+        show_icons:          bool = True,
         errors:             tuple[str, ...] = (),
         debug_lines:        tuple[str, ...] = (),
     ) -> None:
@@ -418,6 +420,7 @@ class Config:
         s(self, 'show_tool_uses', show_tool_uses)
         s(self, 'soft_limit_models', soft_limit_models)
         s(self, 'openspec_scan_depth', openspec_scan_depth)
+        s(self, 'show_icons', show_icons)
         s(self, 'errors', errors)
         s(self, 'debug_lines', debug_lines)
 
@@ -437,6 +440,7 @@ class Config:
                 f'show_render_time={self.show_render_time}, show_tool_uses={self.show_tool_uses}, '
                 f'soft_limit_models={self.soft_limit_models!r}, '
                 f'openspec_scan_depth={self.openspec_scan_depth}, '
+                f'show_icons={self.show_icons}, '
                 f'errors={self.errors!r}, debug_lines={self.debug_lines!r})')
 
     @classmethod
@@ -519,6 +523,10 @@ class Config:
             + _env_sources(env, 'YAS_GLYPH_SINGLE_WIDTH')
             + toml_src(glyphs, 'single_width'),
             _parse_bool, False, errors, debug)
+        show_icons = _resolve(
+            'show_icons',
+            _env_sources(env, 'YAS_SHOW_ICONS') + toml_src(glyphs, 'show_icons'),
+            _parse_bool, True, errors, debug)
         show_day_stats = _resolve(
             'show_day_stats',
             _env_sources(env, 'YAS_SHOW_DAY_STATS') + toml_src(tokens, 'show_day_stats'),
@@ -578,6 +586,7 @@ class Config:
             show_tool_uses=show_tool_uses,
             soft_limit_models=tuple(soft_limit_models),
             openspec_scan_depth=openspec_scan_depth,
+            show_icons=show_icons,
             errors=tuple(errors),
             debug_lines=tuple(debug),
         )

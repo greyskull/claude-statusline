@@ -33,9 +33,11 @@ demo:
 # (demo/<scenario>.png) via ops/ansi_png.py — handy for before/after PR shots.
 # Font/size/colours are overridable; see ops/ansi_png.py for the env knobs:
 #   DEMO_ONLY=tasks YAS_DEMO_FONT='FiraCode Nerd Font Mono' make demo/img
+# Set SKIP_PNG=1 to skip the PNG conversion step (still requires DEMO_ONLY):
+#   SKIP_PNG=1 DEMO_ONLY=tasks make demo/img
 demo/img:
 	@uv run python3 ops/demo.py --snapshots demo/
-	@if [ -n "$(DEMO_ONLY)" ]; then \
+	@if [ -n "$(DEMO_ONLY)" ] && [ -z "$(SKIP_PNG)" ]; then \
 		case "$(DEMO_ONLY)" in \
 			subagent-tree-*) d=demo/subagents;; \
 			*) d=demo;; \

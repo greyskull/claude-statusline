@@ -1146,6 +1146,44 @@ def test_tree_labels_name_shifted_right_of_desc_col_start(monkeypatch: pytest.Mo
     assert name_col == 3 + desc_col + 2
 
 
+def test_context_labels_survive_show_icons_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `context`/`fill`/`dumb` separator labels are anchored off the
+    hourglass glyph in `context_line`. With show_icons=False the glyph is
+    gone, so the anchor must fall back to the first token instead of
+    silently dropping the whole label row."""
+    _silence_dynamic(monkeypatch)
+    view = SessionView(_session(), Config(labels=True, show_icons=False))
+    spec = layout.build_wide(view, _tick(), 200, _r)
+
+    ctx_row = next(
+        (row for row in spec.rows if row.labels and any(lbl == 'context' for lbl, _ in row.labels)),
+        None,
+    )
+    assert ctx_row is not None, 'expected a `context` label even with show_icons=False'
+
+
+def test_helper_row_show_icons_false_drops_5h7d_and_flame_when_gaps_widen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`build_wide` re-derives ``helper_5h``/``helper_7d`` a second time once it
+    widens the inter-stat gaps to spend justification slack (``gap_5h``/
+    ``gap_7d`` != 1) — that second `_rate_helpers` call must also thread
+    ``show_icons``, or the 5h/7d clock/calendar glyphs and the burndown flame
+    reappear in the top row regardless of the config. Sweeps widths since the
+    widen-gaps branch only fires once enough slack accumulates."""
+    from yas.constants import ICON_LIMIT_5H, ICON_LIMIT_7D, GLYPH_BURN_FAST, GLYPH_BURN_SLOW
+    from helper import strip_ansi
+
+    _silence_dynamic(monkeypatch)
+    view = SessionView(_session(), Config(show_icons=False))
+    for width in (140, 160, 180, 200, 220):
+        spec = layout.build_wide(view, _tick(), width, _r)
+        out  = layout.render_layout(spec, _r)
+        plain = '\n'.join(strip_ansi(ln) for ln in out)
+        for glyph in (ICON_LIMIT_5H, ICON_LIMIT_7D, GLYPH_BURN_FAST, GLYPH_BURN_SLOW):
+            assert glyph not in plain, f'{glyph!r} leaked at width={width} with show_icons=False'
+
+
 def tree_columns_for(view: SessionView) -> tuple[int, int, int]:
     """Recompute the same desc/stats/activity anchors `build_wide` used, so
     the test can assert the label's offset relative to them without
