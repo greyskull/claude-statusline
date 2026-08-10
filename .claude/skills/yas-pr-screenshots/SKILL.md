@@ -47,10 +47,24 @@ demo/img` (via `ops/ansi_png.py` — needs ImageMagick `magick` + a Mono Nerd Fo
      'kitchen-sink:kitchen-sink:' 'narrow:kitchen-sink:YAS_MAX_WIDTH=40' 'subagents:subagents:'
    ```
 
-   It renders after (current tree) and before (a throwaway `main` worktree) for each
-   variant, copies them to `screenshots/<pr_id>/{before,after}/<label>.png`, and prints
-   the markdown table to stdout. A before render that fails (scenario new to the branch)
-   yields an empty before cell instead of aborting.
+   For each variant it renders after (current tree) and before (a throwaway `main`
+   worktree), then combines the pair into ONE wide PNG — before and after side by side,
+   each half topped by a small "before" / "after" heading, joined by a visible vertical
+   separator strip (ImageMagick `magick`, deterministic). The combined image lands at
+   `screenshots/<pr_id>/<label>.png` (the raw halves are also kept under
+   `screenshots/<pr_id>/{before,after}/` for reference, but the table embeds only the
+   combined image). It prints the markdown table to stdout: a blank-headed left column
+   holding the variant label, one row per variant. A before render that fails (scenario
+   new to the branch) yields a "(not on main)" placeholder left half instead of aborting.
+
+   ```
+   |  | before / after |
+   |--|----------------|
+   | <label> | ![<label>](<url_base>/<label>.png?raw=true) |
+   ```
+
+   When the change is theme-wide, use the same scenario (usually `kitchen-sink`) across
+   all rows and vary only `YAS_THEME`, labelling each row with the theme name.
 
 5. **Commit + push** (outward-facing — confirm with the user first):
 
@@ -67,7 +81,7 @@ demo/img` (via `ops/ansi_png.py` — needs ImageMagick `magick` + a Mono Nerd Fo
 ## Notes
 
 - Images render only after the push lands (GitHub's LFS/image proxy may lag a few seconds).
-- The embed URL is `.../blob/main/screenshots/<pr_id>/<side>/<label>.png?raw=true` — the
+- The embed URL is `.../blob/main/screenshots/<pr_id>/<label>.png?raw=true` — the
   `?raw=true` blob form resolves LFS pointers correctly where `raw.githubusercontent.com` doesn't.
-- Prerequisite: `magick` on PATH and a Mono Nerd Font installed (see `ops/ansi_png.py` env knobs).
-- Want a row label column? Prepend `| variant |` cells — the requested base format is two columns.
+- Prerequisite: `magick` on PATH (also used for the combine step) and a Mono Nerd Font
+  installed (see `ops/ansi_png.py` env knobs).
