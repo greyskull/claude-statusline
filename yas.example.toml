@@ -73,6 +73,16 @@
 # boolean and combines with any mode above. (env: YAS_GLYPH_SINGLE_WIDTH,
 # CLI: --glyph-single-width)
 # single_width = false
+#
+# show_icons toggles every icon shown beside a number/metric across the whole
+# statusline: the tokens/cost row (in/out token arrows, cost icon, lines
+# read/changed icons, rate-label gauge icon), the context-window hourglass, the
+# 5h/7d rate-limit clock/calendar icons, the model-pill lightbulb, and the
+# workflow-summary corner glyph beside the agent count. Icons labelling
+# non-numeric text (folder glyph, skills/plugins tags, branch arrow, etc.) are
+# unaffected. The numbers themselves always render; only the glyphs beside
+# them are affected. Off is number-only. (env: YAS_SHOW_ICONS)
+# show_icons = true
 
 # [context]
 # Context state word — a morphing Smart -> Coasting -> Foggy -> Cooked -> Dumb

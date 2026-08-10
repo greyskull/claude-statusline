@@ -63,6 +63,7 @@ def test_default_when_nothing_set(tmp_path: Path) -> None:
     assert cfg.bg_shift == 'warm'
     assert cfg.glyph_mode == 'nerdfont'
     assert cfg.single_width is False
+    assert cfg.show_icons is True
     assert cfg.show_day_stats is True
     assert cfg.show_render_time is False
     assert cfg.show_tool_uses is False
@@ -513,6 +514,32 @@ def test_cli_glyph_mode_beats_env_and_toml(tmp_path: Path) -> None:
         argv=['--glyph-mode', 'unicode'],
     )
     assert cfg.glyph_mode == 'unicode'
+
+
+# 4.4b show_icons resolution (env → toml → default true)
+
+def test_show_icons_default_is_true(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.show_icons is True
+
+
+@requires_tomllib
+def test_toml_show_icons_false(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[appearance.glyphs]\nshow_icons = false\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.show_icons is False
+
+
+def test_env_show_icons_falsy_values(tmp_path: Path) -> None:
+    for v in ('0', 'false', 'False'):
+        cfg = config.Config.load(env={'YAS_SHOW_ICONS': v}, config_dir=tmp_path)
+        assert cfg.show_icons is False, v
+
+
+def test_env_show_icons_overrides_toml_false(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[appearance.glyphs]\nshow_icons = false\n')
+    cfg = config.Config.load(env={'YAS_SHOW_ICONS': '1'}, config_dir=tmp_path)
+    assert cfg.show_icons is True
 
 
 @requires_tomllib

@@ -391,3 +391,49 @@ def test_tokens_cost_min_width_is_consistent_with_fit() -> None:
         lines, _cols, _mark, min_w = _call(box_width=box, **_NARROW)
         fits = _visible_width(lines[0]) <= box - 3
         assert fits == (box >= min_w), (box, min_w, _visible_width(lines[0]))
+
+
+# show_icons: default on preserves current behaviour; off drops every
+# per-number glyph in the row but keeps the numbers and dividers intact.
+
+def test_tokens_cost_show_icons_defaults_true() -> None:
+    on  = _call()
+    default = _call(show_icons=True)
+    assert on == default
+
+
+def test_tokens_cost_show_icons_false_drops_glyphs() -> None:
+    lines, _cols, _mark, _min = _call(show_icons=False, lines=(1234, 567), box_width=140)
+    text = lines[0]
+    for glyph in (ICON_COST, ICON_TOK_RATE, GLYPH_LINES_READ, GLYPH_LINES_CHANGED):
+        assert glyph not in text
+
+
+def test_tokens_cost_show_icons_true_keeps_glyphs() -> None:
+    lines, _cols, _mark, _min = _call(show_icons=True, lines=(1234, 567), box_width=140)
+    text = lines[0]
+    for glyph in (ICON_COST, ICON_TOK_RATE, GLYPH_LINES_READ, GLYPH_LINES_CHANGED):
+        assert glyph in text
+
+
+def test_tokens_cost_show_icons_false_keeps_numbers_and_dividers() -> None:
+    lines, (col1, col2), _mark, _min = _call(show_icons=False, box_width=BOX_WIDTH)
+    stripped = strip_ansi(lines[0])
+    assert stripped[col1 - 3] == '│'
+    assert stripped[col2 - 3] == '│'
+    assert '0.01' in stripped and '0.02' in stripped
+
+
+def test_tokens_cost_show_icons_false_narrower_min_width() -> None:
+    # Fewer glyphs means less content, so the row's own min_width floor with
+    # icons off must not exceed the icons-on floor.
+    _l_on,  _c_on,  _m_on,  min_on  = _call(show_icons=True,  **_NARROW)
+    _l_off, _c_off, _m_off, min_off = _call(show_icons=False, **_NARROW)
+    assert min_off <= min_on
+
+
+def test_tokens_cost_show_icons_false_session_only_drops_cost_icon() -> None:
+    lines, _cols, _mark, _min = _call(show_icons=False, show_day_stats=False)
+    text = lines[0]
+    assert ICON_COST not in text
+    assert ICON_TOK_RATE not in text

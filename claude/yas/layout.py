@@ -508,7 +508,7 @@ def build_workflow_rows(
                     right_lines = [' ' * half_w] * len(left_lines)
                 for j in range(len(left_lines)):
                     out.append(RowSpec('content', content=f'{left_lines[j]}{divider}{right_lines[j]}'))
-            out.append(RowSpec('content', content=left_only(r.workflow_summary(run, half_w, hidden_agents=hidden_agents))))
+            out.append(RowSpec('content', content=left_only(r.workflow_summary(run, half_w, hidden_agents=hidden_agents, show_icons=view.cfg.show_icons))))
         if hidden_runs > 0:
             out.append(RowSpec('content', content=left_only(f'{r.LABEL}+{hidden_runs} more workflows{r.R}')))
         return out
@@ -522,7 +522,7 @@ def build_workflow_rows(
             for sub in agents:
                 for line in r.subagent_row(sub, inner, twoline=width > 100, session_inout=0).split('\n'):
                     out.append(RowSpec('content', content=line))
-        out.append(RowSpec('content', content=r.workflow_summary(run, inner, hidden_agents=hidden_agents)))
+        out.append(RowSpec('content', content=r.workflow_summary(run, inner, hidden_agents=hidden_agents, show_icons=view.cfg.show_icons)))
     if hidden_runs > 0:
         out.append(RowSpec('content', content=f'{r.LABEL}+{hidden_runs} more workflows{r.R}'))
     return out
@@ -547,6 +547,7 @@ def build_narrow(
     max_right    = max(8, width // 2)
     rate_text, right_text, right_w = r.model_right_section_compact(
         session.model_name, session.rate_limits, max_right, effort_for_bg,
+        show_icons=view.cfg.show_icons,
     )
     line_context = r.context_line_compact(ctx, width - 3, soft_limit)
 
@@ -623,6 +624,7 @@ def build_medium(
     max_right    = max(8, width // 2)
     rate_text, right_text, right_w = r.model_right_section_compact(
         session.model_name, session.rate_limits, max_right, effort_for_bg,
+        show_icons=view.cfg.show_icons,
     )
 
     spec = LayoutSpec(width=width, fill=fill, session_id=session.session_id)
@@ -717,6 +719,7 @@ def build_wide(
         session.model_name, session.model_thinking, session.rate_limits,
         session.effort.level if session.thinking.enabled else '',
         fast_mode=session.fast_mode,
+        show_icons=view.cfg.show_icons,
     )
     # Reading `view.tool_counts` here forces its transcript scan on every wide
     # render (previously only when `cfg.show_tool_uses` was on, for the
@@ -730,6 +733,7 @@ def build_wide(
         session.session_id, width, fill, view.cfg.show_day_stats,
         view.cfg.justify,
         lines=(view.tool_counts.lines_read, view.tool_counts.lines_changed),
+        show_icons=view.cfg.show_icons,
     )
     # The three-segment tokens │ cost │ rate row is fixed-content-width: at the
     # bottom of the wide band (box ~80-84) it cannot hold both columns plus the
@@ -739,7 +743,7 @@ def build_wide(
     # and fall back to the compact context line the medium layout uses.
     tokens_fits = width >= max(tokens_min_w, TOKENS_COST_MIN_WIDTH)
 
-    plugins_line = r.plugins_skills(len(skills.names), skill_display, session.workspace.plugins)
+    plugins_line = r.plugins_skills(len(skills.names), skill_display, session.workspace.plugins, show_icons=view.cfg.show_icons)
     # border_line pads to width - 3 ('│ ' + content + '│') but never truncates;
     # a long plugin list would overflow the box, so clip it here.
     plugins_avail = width - 3
@@ -752,7 +756,10 @@ def build_wide(
 
     state_labels = view.cfg.context_labels if view.cfg.context_state else None
     line_context = (
-        r.context_line(ctx, width - 3, soft_limit, state_labels=state_labels, state_thresholds=view.cfg.context_thresholds)
+        r.context_line(
+            ctx, width - 3, soft_limit, state_labels=state_labels,
+            state_thresholds=view.cfg.context_thresholds, show_icons=view.cfg.show_icons,
+        )
         if tokens_fits else
         r.context_line_compact(ctx, width - 3, soft_limit)
     )
@@ -771,7 +778,7 @@ def build_wide(
     cache_section_w = 0      # vsep_w + glyph+space+time width; 0 when shed/hidden
     cache_content   = ''     # rendered text (no vsep); empty when not shown
     if cache_cd is not None:
-        _cache_txt, _cache_w = r.cache_section(*cache_cd)
+        _cache_txt, _cache_w = r.cache_section(*cache_cd, show_icons=view.cfg.show_icons)
         _cache_section_w = vsep_w + _cache_w
         # Width-shed: drop if path would get fewer than 5 visible chars.
         if (width - 4) - vsep_w - helper_w - _cache_section_w - right_w >= 5:
@@ -847,7 +854,7 @@ def build_wide(
             h7_left  = (h7_outer + 2) // 2
             h7_right = h7_outer - h7_left
         if gap_5h != 1 or gap_7d != 1:
-            helper_5h, helper_7d = r._rate_helpers(session.rate_limits, gap_5h, gap_7d)
+            helper_5h, helper_7d = r._rate_helpers(session.rate_limits, gap_5h, gap_7d, show_icons=view.cfg.show_icons)
         if _has_cache:
             cache_extra = _extras[_idx]
             _idx += 1
@@ -1008,31 +1015,38 @@ def build_wide(
         # [glyph, (-h:mm), used%, burn-glyph, burn%] (distinguished by the
         # countdown's leading '('); the compact form is [glyph, used%, ∞] and
         # carries only `used`.
+        # When show_icons hides the leading glyph, the token walk starts one
+        # position later — index 0 is the value itself rather than the glyph
+        # — so the whole label sequence shifts left by one (`_h5_shift`).
+        _h5_shift = 0 if view.cfg.show_icons else -1
         _p5     = _ANSI_RE.sub('', padded_5h)
         _h5     = _token_offsets(_p5)
         _h5base = helper_anchor + 2
         if _h5:
-            top_labels.append(('5h', _h5base + _h5[0]))
-            if len(_h5) >= 2 and _p5[_h5[1]] == '(':
-                top_labels.append(('remain', _h5base + _h5[1]))
-                if len(_h5) >= 3:
-                    top_labels.append(('used', _h5base + _h5[2]))
-                if len(_h5) >= 4:
-                    top_labels.append(('burn rate', _h5base + _h5[3]))
-            elif len(_h5) >= 2 and _p5[_h5[1]] != '∞':
-                top_labels.append(('used', _h5base + _h5[1]))
+            if view.cfg.show_icons:
+                top_labels.append(('5h', _h5base + _h5[0]))
+            if len(_h5) >= 2 + _h5_shift and _p5[_h5[1 + _h5_shift]] == '(':
+                top_labels.append(('remain', _h5base + _h5[1 + _h5_shift]))
+                if len(_h5) >= 3 + _h5_shift:
+                    top_labels.append(('used', _h5base + _h5[2 + _h5_shift]))
+                if len(_h5) >= 4 + _h5_shift:
+                    top_labels.append(('burn rate', _h5base + _h5[3 + _h5_shift]))
+            elif len(_h5) >= 2 + _h5_shift and _p5[_h5[1 + _h5_shift]] != '∞':
+                top_labels.append(('used', _h5base + _h5[1 + _h5_shift]))
         # 7d cell, when present: `7d` over the glyph, `used` over the pct, and
         # `burn rate` over the burn glyph. tokens: [glyph, used%, burn-glyph, burn%].
         if has_7d and sep_rate_col is not None:
+            _h7_shift = 0 if view.cfg.show_icons else -1
             _p7     = _ANSI_RE.sub('', padded_7d)
             _h7     = _token_offsets(_p7)
             _h7base = sep_rate_col + 2
             if _h7:
-                top_labels.append(('7d', _h7base + _h7[0]))
-                if len(_h7) >= 2:
-                    top_labels.append(('used', _h7base + _h7[1]))
-                if len(_h7) >= 3:
-                    top_labels.append(('burn rate', _h7base + _h7[2]))
+                if view.cfg.show_icons:
+                    top_labels.append(('7d', _h7base + _h7[0]))
+                if len(_h7) >= 2 + _h7_shift:
+                    top_labels.append(('used', _h7base + _h7[1 + _h7_shift]))
+                if len(_h7) >= 3 + _h7_shift:
+                    top_labels.append(('burn rate', _h7base + _h7[2 + _h7_shift]))
         # Cache countdown cell begins just after the cache │.
         if cache_section_w and cache_div_col is not None:
             top_labels.append(('cache', cache_div_col + 2))
@@ -1063,6 +1077,11 @@ def build_wide(
         _ctx_plain = _ANSI_RE.sub('', line_context)
         _ctx_off   = _token_offsets(_ctx_plain)
         _hg = next((k for k, o in enumerate(_ctx_off) if _ctx_plain[o] == GLYPH_HOURGLASS), None)
+        # When show_icons hides the hourglass, there is no glyph token to anchor
+        # on — the first token offset is directly the `context` value instead,
+        # so anchor one position earlier (-1) to keep the same relative walk.
+        if _hg is None and not view.cfg.show_icons:
+            _hg = -1
         if _hg is not None:
             for _name, _k in zip(('context', 'fill', 'dumb'),
                                  range(_hg + 1, _hg + 4)):
