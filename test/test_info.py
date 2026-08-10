@@ -540,9 +540,9 @@ def test_elapsed_section_fixed_8_col_width() -> None:
     import yas.renderer as renderer_mod
     r = renderer_mod.Renderer()
     _text, w = r.elapsed_section('13:27')
-    assert w == 8
+    assert w == 8  # '+13:27' (6 chars) absorbed inside the rjust(8) field
     _text2, w2 = r.elapsed_section('99:59:59')
-    assert w2 == 8
+    assert w2 == 9  # '+99:59:59' (9 chars) already fills the field; sign grows it by one
 
 
 def test_elapsed_section_right_justified() -> None:
@@ -551,7 +551,7 @@ def test_elapsed_section_right_justified() -> None:
     r = renderer_mod.Renderer()
     text, _ = r.elapsed_section('05:03')
     stripped = strip_ansi(text)
-    assert stripped == '   05:03'  # right-justified to 8 cols (3 spaces + 5-char clock)
+    assert stripped == '  +05:03'  # right-justified to 8 cols (2 spaces + signed 6-char clock)
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +711,41 @@ def test_elapsed_section_clear_only_omits_session_timer() -> None:
     assert '18:33' in stripped
     # No 8-space right-justified pad — no session timer rendered.
     assert '        ' not in stripped  # no 8-space block
+
+
+def test_elapsed_section_show_icons_false_drops_clear_glyph() -> None:
+    """show_icons=False hides GLYPH_CLEAR but keeps the signed digits (fix for the
+    top-row leak: elapsed_section was the only number-adjacent icon not gated)."""
+    import yas.renderer as renderer_mod
+    from yas.constants import GLYPH_CLEAR
+    from helper import strip_ansi
+    r = renderer_mod.Renderer()
+
+    on, _  = r.elapsed_section('13:27', '05:11', show_icons=True)
+    off, _ = r.elapsed_section('13:27', '05:11', show_icons=False)
+    assert GLYPH_CLEAR in on
+    assert GLYPH_CLEAR not in off
+    assert '+05:11' in strip_ansi(off)
+    assert '+13:27' in strip_ansi(off)
+
+
+def test_elapsed_section_count_up_timers_are_signed() -> None:
+    """Session and clear timers count up, so both carry a leading `+` against
+    the digits (no space) regardless of show_icons."""
+    import yas.renderer as renderer_mod
+    from helper import strip_ansi
+    r = renderer_mod.Renderer()
+
+    session_only, _ = r.elapsed_section('13:27')
+    assert '+13:27' in strip_ansi(session_only)
+
+    both, _ = r.elapsed_section('13:27', '05:11')
+    stripped = strip_ansi(both)
+    assert '+05:11' in stripped
+    assert '+13:27' in stripped
+
+    clear_only, _ = r.elapsed_section('', '18:33')
+    assert '+18:33' in strip_ansi(clear_only)
 
 
 def test_elapsed_section_clock_skew_clamped(tmp_path) -> None:
