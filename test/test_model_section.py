@@ -423,7 +423,14 @@ class TestShowIconsModelRow:
         off, _ = r.cache_section(125.0, 30, show_icons=False)
         assert GLYPH_CACHE in strip_ansi(on)
         assert GLYPH_CACHE not in strip_ansi(off)
-        assert '02:05' in strip_ansi(off)
+        assert '-02:05' in strip_ansi(off)
+
+    def test_cache_section_countdown_is_signed(self) -> None:
+        """Cache TTL counts down, so the digits carry a leading `-` against
+        the clock (no space), same colour as the digits."""
+        r = Renderer()
+        text, _ = r.cache_section(125.0, 30, show_icons=True)
+        assert '-02:05' in strip_ansi(text)
 
     def test_plugins_skills_show_icons_false_drops_glyphs(self) -> None:
         r = Renderer()

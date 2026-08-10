@@ -793,7 +793,7 @@ def build_wide(
         clear_ms  = max(0.0, view.now - clear_epoch) * 1000
         clear_str = _fmt_elapsed_clock(int(clear_ms))
 
-    elapsed_content, _elapsed_cw = r.elapsed_section(elapsed, clear_str)
+    elapsed_content, _elapsed_cw = r.elapsed_section(elapsed, clear_str, show_icons=view.cfg.show_icons)
     elapsed_section_w = 0
     if elapsed or clear_str:
         _sw = _elapsed_cw + 3
@@ -801,7 +801,7 @@ def build_wide(
             elapsed_section_w = _sw
         elif clear_str:
             # Try clear-only (drop session timer)
-            _co, _cw = r.elapsed_section('', clear_str)
+            _co, _cw = r.elapsed_section('', clear_str, show_icons=view.cfg.show_icons)
             _sw_c = _cw + 3
             if (width - 4) - vsep_w - _sw_c - helper_w - cache_section_w - right_w >= 5:
                 elapsed_content, _elapsed_cw = _co, _cw
@@ -1003,11 +1003,16 @@ def build_wide(
             _pe   = _ANSI_RE.sub('', elapsed_content)
             _eo   = _token_offsets(_pe)
             _ebse = path_div_col + 2
+            # When show_icons hides the leading GLYPH_CLEAR, the token walk
+            # starts one position later — index 0 is the clear value itself
+            # rather than the glyph — so clear/session shift left by one
+            # (`_el_shift`), mirroring `_h5_shift` below.
+            _el_shift = 0 if view.cfg.show_icons else -1
             if clear_str:
-                if len(_eo) >= 2:
-                    top_labels.append(('clear', _ebse + _eo[1]))
-                if len(_eo) >= 3:
-                    top_labels.append(('session', _ebse + _eo[2]))
+                if len(_eo) >= 2 + _el_shift:
+                    top_labels.append(('clear', _ebse + _eo[1 + _el_shift]))
+                if len(_eo) >= 3 + _el_shift:
+                    top_labels.append(('session', _ebse + _eo[2 + _el_shift]))
             elif _eo:
                 top_labels.append(('session', _ebse + _eo[0]))
         # 5h helper cell: `5h` over the glyph, then one label per rendered
