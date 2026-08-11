@@ -102,7 +102,7 @@ def test_justify_slack_zero_matches_unjustified(
     # Patch fit_path to consume all available width so total_slack == 0.
     monkeypatch.setattr(
         renderer_mod.Renderer, 'fit_path',
-        lambda self, pwd, git, target_w, compact_only=False: 'x' * max(0, target_w),
+        lambda self, pwd, git, target_w, compact_only=False, show_icons=True: 'x' * max(0, target_w),
     )
     session = _session()
     view_on  = SessionView(session, Config(justify=True))
