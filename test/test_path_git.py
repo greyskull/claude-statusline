@@ -168,3 +168,53 @@ class TestFitPath:
         # Very wide target_w — compact_only should still not return full path_git
         result = r.fit_path('~/p', git, 999, compact_only=True)
         assert 'abc1234' not in strip_ansi(result)
+
+
+# show_icons gating of the leading folder glyph (the top-row "home" icon)
+
+class TestPathGitShowIcons:
+    def test_path_git_show_icons_false_drops_folder_glyph(self) -> None:
+        from yas.constants import GLYPH_FOLDER
+        r = Renderer()
+        git = GitInfo(branch='main', commit='abc1234')
+        out = r.path_git('~/proj', git, show_icons=False)
+        assert GLYPH_FOLDER not in out
+        stripped = strip_ansi(out)
+        assert '~/proj' in stripped
+        assert 'main' in stripped
+
+    def test_path_git_show_icons_false_narrower_than_default(self) -> None:
+        r = Renderer()
+        git = GitInfo(branch='main', commit='abc1234')
+        with_icon    = r.path_git('~/proj', git)
+        without_icon = r.path_git('~/proj', git, show_icons=False)
+        assert _visible_width(without_icon) < _visible_width(with_icon)
+
+    def test_path_glyph_only_show_icons_false_is_empty(self) -> None:
+        from yas.constants import GLYPH_FOLDER
+        r = Renderer()
+        out = r.path_glyph_only(show_icons=False)
+        assert GLYPH_FOLDER not in out
+        assert _visible_width(out) == 0
+
+    def test_fit_path_show_icons_false_drops_folder_glyph_at_every_rung(self) -> None:
+        """Sweep every rung of the fit_path ladder (full → branch-only → glyph
+        floor) with show_icons=False; the folder glyph must never leak back in,
+        and the glyph-only floor must collapse to 0 visible columns."""
+        from yas.constants import GLYPH_FOLDER
+        r = Renderer()
+        git = GitInfo(branch='feature/very-long-branch-name', commit='abc1234',
+                      modified=2, untracked=1)
+        full = r.path_git('~/p', git, show_icons=False)
+        for target_w in (_visible_width(full) + 10, _visible_width(full), 20, 5, 2, 0):
+            result = r.fit_path('~/p', git, target_w, show_icons=False)
+            assert GLYPH_FOLDER not in result
+            assert _visible_width(result) <= max(target_w, 0)
+
+    def test_fit_path_show_icons_false_glyph_floor_is_empty(self) -> None:
+        r = Renderer()
+        git = GitInfo(branch='feature/very-long-branch-name', commit='abc1234')
+        pwd = '~/also-very-long-path'
+        result = r.fit_path(pwd, git, 0, show_icons=False)
+        assert result == r.path_glyph_only(show_icons=False)
+        assert result == ''

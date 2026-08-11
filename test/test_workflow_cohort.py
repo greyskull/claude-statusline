@@ -489,6 +489,26 @@ class TestWorkflowHeaderSummary:
         # assert
         assert '+3 hidden' in result
 
+    def test_summary_show_icons_false_drops_corner_glyph(self, strip_ansi):
+        # setup: show_icons=False drops the leading corner glyph beside
+        # "N agents" but keeps every number/word in the summary intact.
+        run = RunningWorkflow(
+            run_id = 'wf_x', name = 'wf_x', phase = '',
+            agents = [
+                _make_workflow_subagent('a1', total_input=1000, output=200, end_ts=1.0),
+                _make_workflow_subagent('a2', total_input=500, output=100),
+            ],
+        )
+
+        # run
+        result = strip_ansi(_r.workflow_summary(run, 80, show_icons=False))
+
+        # assert
+        assert GLYPH_WF_SUMMARY not in result
+        assert '2 agents' in result
+        assert '1 done' in result
+        assert '1.8K' in result
+
 
 class TestWorkflowLayout:
 

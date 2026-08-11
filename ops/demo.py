@@ -1573,7 +1573,7 @@ def render_scenario(
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f'{stem}.txt'
     dest.write_text('\n\n'+out+'\n\n')
-    print(f'  wrote {dest}')
+    # print(f'  wrote {dest}')
 
 
 def scenario_out_dir(base_dir: Path, cfg: ScenarioConfig) -> Path:

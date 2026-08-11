@@ -85,6 +85,7 @@ aliases when both are set — the aliases keep working but are deprecated.
 | `bg_shift` | `YAS_BG_SHIFT` (also `--bg-shift` CLI) | — | `[appearance].bg_shift` | `warm` |
 | `glyph_mode` | `YAS_GLYPH_MODE` (also `--glyph-mode` CLI) | — | `[appearance.glyphs].mode` | `nerdfont` |
 | `single_width` | `YAS_GLYPH_SINGLE_WIDTH` (also `--glyph-single-width` CLI) | — | `[appearance.glyphs].single_width` | `false` |
+| `show_icons` | `YAS_SHOW_ICONS` | — | `[appearance.glyphs].show_icons` | `true` |
 | `context_state` | `YAS_CONTEXT_STATE` | — | `[context].state` | `false` |
 | `context_labels` | `YAS_CONTEXT_LABELS` | — | `[context].labels` | `Smart,Coasting,Foggy,Cooked,Dumb` |
 | `context_thresholds` | `YAS_CONTEXT_THRESHOLDS` | — | `[context].thresholds` | `25,50,70,90` |
@@ -110,6 +111,7 @@ aliases when both are set — the aliases keep working but are deprecated.
 #### Behaviour notes
 
 - **`single_width`** — orthogonal boolean that folds double-width dynamic content (wide emoji, CJK in branch names/paths) to width-1; combinable with any `glyph_mode`. The statusline's own glyphs are already width-1, so column geometry is preserved.
+- **`show_icons`** — when `false`, drops essentially every icon/glyph the statusline draws, including the top-left home/folder glyph. The exceptions — glyphs that still render — are the task-plan checkboxes, the subagent status markers, and the box/border and workflow structural glyphs (frame, sparkline blocks, separators, row markers). Text and numbers still render; only the glyph beside each is omitted, and column/border alignment is preserved. `true` by default, preserving current behaviour.
 - **`full_width`** — when `true`, makes the box fill the terminal and ignore `max_width`.
 - **`show_render_time`** — when `true`, annotates the bottom-right border with the previous run's wall-clock render time (e.g. `…47.2ms──╯`). Off by default; each run shows the prior run's timing, so it is blank on a session's first render.
 - **`show_tool_uses`** — when `true`, adds a row (wide layout only) under the tokens/cost band, listing per-tool `tool_use` counts.
@@ -164,6 +166,7 @@ bg_shift = "warm"
 [appearance.glyphs]
 mode = "nerdfont"
 single_width = false
+show_icons = true
 
 [context]
 state = false

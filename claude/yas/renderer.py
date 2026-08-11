@@ -399,6 +399,7 @@ class Renderer:
     def path_git(
         self, short_pwd: str, git: GitInfo,
         *, show_path: bool = True, show_commit: bool = True, show_dirty: bool = True,
+        show_icons: bool = True,
     ) -> str:
         dirty = ''
         if show_dirty:
@@ -417,20 +418,26 @@ class Renderer:
         # middle-ellipsis). show_path=False yields the branch-only rung (glyph +
         # arrow + branch) used as a width-degradation step below the path forms.
         path_part = f'{self.PWD}{short_pwd}{self.R} ' if show_path else ''
+        glyph_part = f'{GLYPH_FOLDER}  ' if show_icons else ''
 
         return (
-            f'{self.ICON_PATH}{GLYPH_FOLDER}  {path_part}'
+            f'{self.ICON_PATH}{glyph_part}{path_part}'
             f'{self.LABEL}{self.ARROW}{BOLD}{GLYPH_IN}{self.R}'
             f' {self.BRANCH}{git.branch}{self.R}'
             f'{commit_part}{dirty}'
         )
 
-    def path_glyph_only(self) -> str:
+    def path_glyph_only(self, show_icons: bool = True) -> str:
         """Presence-glyph floor: the folder glyph alone (1 visible column).
 
         The overflow-safe terminal state of the path ladder — it can never
         exceed the available width or disturb the box border math.
+        ``show_icons`` (default on) gates the folder glyph itself; with icons
+        hidden there is nothing left to present, so the floor degrades to an
+        empty string (0 visible columns).
         """
+        if not show_icons:
+            return ''
         return f'{self.ICON_PATH}{GLYPH_FOLDER}{self.R}'
 
     def path_git_compact(self, short_pwd: str, git: GitInfo) -> str:
@@ -442,7 +449,7 @@ class Renderer:
 
     def fit_path(
         self, short_pwd: str, git: GitInfo, target_w: int,
-        *, compact_only: bool = False,
+        *, compact_only: bool = False, show_icons: bool = True,
     ) -> str:
         def fits(s: str) -> bool:
             return _visible_width(s) <= target_w
@@ -452,13 +459,16 @@ class Renderer:
         # branch-only (path omitted) → glyph-only floor. The path is never
         # middle-ellipsized: it is shown in full or dropped whole, and the
         # branch outlives the path. compact_only enters at the compact rung.
+        # show_icons gates the leading folder glyph (path_git / glyph-only
+        # floor); path_git_compact never carried the glyph, so it is
+        # unaffected either way.
         if not compact_only:
             for kwargs in (
                 {},
                 {'show_commit': False},
                 {'show_commit': False, 'show_dirty': False},
             ):
-                candidate = self.path_git(short_pwd, git, **kwargs)
+                candidate = self.path_git(short_pwd, git, show_icons=show_icons, **kwargs)
                 if fits(candidate):
                     return candidate
 
@@ -469,12 +479,13 @@ class Renderer:
         # Path omitted whole, branch retained (glyph + arrow + branch).
         branch_only = self.path_git(
             short_pwd, git, show_path=False, show_commit=False, show_dirty=False,
+            show_icons=show_icons,
         )
         if fits(branch_only):
             return branch_only
 
         # Glyph-only presence floor — 1 visible column, always within target.
-        return self.path_glyph_only()
+        return self.path_glyph_only(show_icons=show_icons)
 
     def model_colour(self, model_name: str) -> str:
         return self.theme.models[model_key(model_name)].label
@@ -486,14 +497,17 @@ class Renderer:
             return self.warn
         return self.safe
 
-    def elapsed_section(self, elapsed: str, clear_str: str = '') -> tuple[str, int]:
+    def elapsed_section(self, elapsed: str, clear_str: str = '', show_icons: bool = True) -> tuple[str, int]:
         """Compose the elapsed-cell content and its visible width.
 
         When *clear_str* is non-empty (session has been /clear-ed), the cell
-        shows the clear timer first — ``GLYPH_CLEAR  <accent><clear_str>`` —
+        shows the clear timer first — ``[GLYPH_CLEAR  ]<accent>+<clear_str>`` —
         followed by the grey right-justified session timer when *elapsed* is
-        also non-empty.  Passing ``elapsed=''`` with a non-empty *clear_str*
-        gives the clear-only degradation tier (no session timer).
+        also non-empty. Passing ``elapsed=''`` with a non-empty *clear_str*
+        gives the clear-only degradation tier (no session timer). ``show_icons``
+        gates the leading ``GLYPH_CLEAR`` glyph (matching every other
+        number-adjacent icon); the clear/session digits themselves always show,
+        signed ``+`` since both are count-up clocks.
 
         When both *clear_str* and *elapsed* follow their defaults (empty), the
         result is byte-identical to the pre-change single-timer form:
@@ -501,16 +515,17 @@ class Renderer:
         """
         if clear_str:
             sess_part = (
-                f'  {self.SESSION}{elapsed.rjust(8)}{self.R}'
+                f'  {self.SESSION}{("+" + elapsed).rjust(8)}{self.R}'
                 if elapsed else ''
             )
-            text = f'{GLYPH_CLEAR}  {CLR_CYAN}{clear_str}{RESET}{sess_part}'
+            glyph_part = f'{GLYPH_CLEAR}  ' if show_icons else ''
+            text = f'{glyph_part}{CLR_CYAN}+{clear_str}{RESET}{sess_part}'
             return text, _visible_width(text)
-        padded = elapsed.rjust(8)
+        padded = ('+' + elapsed).rjust(8) if elapsed else elapsed.rjust(8)
         text   = f'{self.SESSION}{padded}{self.R}'
         return text, _visible_width(text)
 
-    def cache_section(self, remaining: float, elapsed_pct: int) -> tuple[str, int]:
+    def cache_section(self, remaining: float, elapsed_pct: int, show_icons: bool = True) -> tuple[str, int]:
         total_s = int(remaining)
         if total_s >= 3600:
             h   = total_s // 3600
@@ -523,7 +538,8 @@ class Renderer:
             sec = total_s % 60
             dur = f'{m:02d}:{sec:02d}'
         colour = self.fill_colour(elapsed_pct)
-        text   = f'{GLYPH_CACHE}  {colour}{dur}{RESET}'
+        glyph_part = f'{GLYPH_CACHE}  ' if show_icons else ''
+        text   = f'{glyph_part}{colour}-{dur}{RESET}'
         return text, _visible_width(text)
 
     def risk_zone_color(self, tokens: int) -> str:
@@ -542,7 +558,10 @@ class Renderer:
             return self.yellow
         return self.safe
 
-    def model_section_compact(self, model_name: str, rate_limits: RateLimits, max_width: int, effort_level: str = '') -> tuple[str, int]:
+    def model_section_compact(
+        self, model_name: str, rate_limits: RateLimits, max_width: int,
+        effort_level: str = '', show_icons: bool = True,
+    ) -> tuple[str, int]:
         model_clr = self.model_colour(model_name)
         pct_bg    = self._model_bg_pct(effort_level)
         anchor, shift = self._model_anchor_pair(model_name) if pct_bg else ((0, 0, 0), (0, 0, 0))
@@ -567,10 +586,12 @@ class Renderer:
             pass
 
         def _build(name: str, rate: str) -> tuple[str, int]:
+            rate_icon = f'{c_helper}{BOLD}{ICON_LIMIT_5H}{self.R} ' if show_icons else ''
             if pct_bg:
                 cells: list[tuple[str, tuple[int, int, int] | None, bool, bool]] = []
-                cells.append((GLYPH_MODEL_LIGHT, anchor, False, False))
-                cells.append((' ', anchor, False, False))
+                if show_icons:
+                    cells.append((GLYPH_MODEL_LIGHT, anchor, False, False))
+                    cells.append((' ', anchor, False, False))
                 cells.append((' ', anchor, False, False))
                 for ch in name:
                     cells.append((ch, anchor, False, False))
@@ -582,12 +603,13 @@ class Renderer:
                 return (
                     f'{painted}'
                     f'{self.LABEL}|{self.R}'
-                    f' {c_helper}{BOLD}{ICON_LIMIT_5H}{self.R} {rate}'
+                    f' {rate_icon}{rate}'
                 ), pw
+            glyph_part = f'{GLYPH_MODEL_LIGHT}  ' if show_icons else ''
             return (
-                f'{model_clr}{GLYPH_MODEL_LIGHT}  {name}{self.R}'
+                f'{model_clr}{glyph_part}{name}{self.R}'
                 f' {self.LABEL}|{self.R}'
-                f' {c_helper}{BOLD}{ICON_LIMIT_5H}{self.R} {rate}'
+                f' {rate_icon}{rate}'
             ), 0
 
         if rate_with_time:
@@ -603,15 +625,21 @@ class Renderer:
         name_budget = max(3, max_width - base_w - 1)
         return _build(model_name[:name_budget] + ELLIPSIS, rate_pct)
 
-    def _rate_helpers(self, rate_limits: RateLimits, gap_5h: int = 1, gap_7d: int = 1) -> tuple[str, str]:
+    def _rate_helpers(self, rate_limits: RateLimits, gap_5h: int = 1, gap_7d: int = 1, show_icons: bool = True) -> tuple[str, str]:
         """Build the 5h and (optional) 7d limit sub-sections.
 
         ``gap_5h`` / ``gap_7d`` set the inter-stat separator width within each
         section (default 1). The justified top row widens them toward 3 to spend
         section slack as breathing room rather than only outer padding.
+
+        ``show_icons`` (default on) gates the 5h clock and 7d calendar glyphs
+        (and their trailing gap) beside the two rate-limit percentages. Widths
+        are always measured from the built strings, so callers threading
+        ``helper_5h``/``helper_7d`` widths downstream adapt automatically.
         """
         c_helper  = rainbow_at(rainbow_step(), 9)
-        helper_5h = f'{c_helper}{BOLD}{ICON_LIMIT_5H}{self.R}  {self.white_brt}{BOLD}{self.helper(rate_limits.five_hour, gap_5h)}{self.R}'
+        icon_5h   = f'{c_helper}{BOLD}{ICON_LIMIT_5H}{self.R}  ' if show_icons else ''
+        helper_5h = f'{icon_5h}{self.white_brt}{BOLD}{self.helper(rate_limits.five_hour, gap_5h, show_icons=show_icons)}{self.R}'
         helper_7d = ''
         seven_day = rate_limits.seven_day
         if seven_day.used_percentage != 0 or seven_day.resets_at != 0:
@@ -622,12 +650,17 @@ class Renderer:
                 seven_day.resets_at,
                 SEVEN_DAY_MINUTES,
                 SEVEN_DAY_WARMUP_MINUTES,
+                show_icons=show_icons,
             )
             seven_trend_part = f'{" " * gap_7d}{seven_trend}' if seven_trend else ''
-            helper_7d = f'{c_helper}{BOLD}{ICON_LIMIT_7D}{self.R}  {seven_clr}{seven_pct_str}%{self.R}{seven_trend_part}'
+            icon_7d   = f'{c_helper}{BOLD}{ICON_LIMIT_7D}{self.R}  ' if show_icons else ''
+            helper_7d = f'{icon_7d}{seven_clr}{seven_pct_str}%{self.R}{seven_trend_part}'
         return helper_5h, helper_7d
 
-    def model_right_section(self, model_name: str, model_thinking: str, rate_limits: RateLimits, effort_level: str = '', fast_mode: bool = False) -> tuple[str, str, str, int]:
+    def model_right_section(
+        self, model_name: str, model_thinking: str, rate_limits: RateLimits,
+        effort_level: str = '', fast_mode: bool = False, show_icons: bool = True,
+    ) -> tuple[str, str, str, int]:
         model_clr  = self.model_colour(model_name)
         pct        = self._model_bg_pct(effort_level)
         lead_glyph = GLYPH_BURN_FAST if fast_mode else GLYPH_MODEL_LIGHT
@@ -636,8 +669,9 @@ class Renderer:
             anchor, shift = self._model_anchor_pair(model_name)
             cells: list[tuple[str, tuple[int, int, int] | None, bool, bool]] = []
             cells.append((' ',          anchor, False, False))   # extra left padding
-            cells.append((lead_glyph,  anchor, False, False))
-            cells.append((' ',         anchor, False, False))
+            if show_icons:
+                cells.append((lead_glyph, anchor, False, False))
+                cells.append((' ',        anchor, False, False))
             cells.append((' ',         anchor, False, False))
             for ch in model_name:
                 cells.append((ch, anchor, False, False))
@@ -651,18 +685,23 @@ class Renderer:
             pill_l    = pill_gradient_fg(0, 0, len(cells), anchor, shift, pct) + PILL_LEFT
             pill_r    = pill_gradient_fg(len(cells), 0, len(cells), anchor, shift, pct) + PILL_RIGHT
             right_text = pill_l + paint_bg_span(cells, anchor, shift, pct, self.pill_fg_dark, self.pill_fg_light) + pill_r + RESET
-        elif model_thinking:
-            right_text = f'{model_clr} {lead_glyph}  {model_name}{self.R} {model_clr}({model_thinking}){RESET}'
         else:
-            right_text = f'{model_clr} {lead_glyph}  {model_name}{self.R}'
+            glyph_part = f' {lead_glyph}  ' if show_icons else '  '
+            if model_thinking:
+                right_text = f'{model_clr}{glyph_part}{model_name}{self.R} {model_clr}({model_thinking}){RESET}'
+            else:
+                right_text = f'{model_clr}{glyph_part}{model_name}{self.R}'
 
         right_w = _visible_width(right_text)
 
-        helper_5h, helper_7d = self._rate_helpers(rate_limits)
+        helper_5h, helper_7d = self._rate_helpers(rate_limits, show_icons=show_icons)
 
         return helper_5h, helper_7d, right_text, right_w
 
-    def model_right_section_compact(self, model_name: str, rate_limits: RateLimits, max_right_width: int, effort_level: str = '') -> tuple[str, str, int]:
+    def model_right_section_compact(
+        self, model_name: str, rate_limits: RateLimits, max_right_width: int,
+        effort_level: str = '', show_icons: bool = True,
+    ) -> tuple[str, str, int]:
         model_clr = self.model_colour(model_name)
         pct_bg    = self._model_bg_pct(effort_level)
         anchor, shift = self._model_anchor_pair(model_name) if pct_bg else ((0, 0, 0), (0, 0, 0))
@@ -679,6 +718,7 @@ class Renderer:
                         rate_limits.five_hour.resets_at,
                         FIVE_HOUR_MINUTES,
                         FIVE_HOUR_WARMUP_MINUTES,
+                        show_icons=show_icons,
                     )
                     trend_part = f' {trend}' if trend else ''
                     total_s = int(delta.total_seconds())
@@ -692,8 +732,9 @@ class Renderer:
         def _make_right(name: str) -> tuple[str, int]:
             if pct_bg:
                 cells: list[tuple[str, tuple[int, int, int] | None, bool, bool]] = []
-                cells.append((GLYPH_MODEL_LIGHT, anchor, False, False))
-                cells.append((' ', anchor, False, False))
+                if show_icons:
+                    cells.append((GLYPH_MODEL_LIGHT, anchor, False, False))
+                    cells.append((' ', anchor, False, False))
                 cells.append((' ', anchor, False, False))
                 for ch in name:
                     cells.append((ch, anchor, False, False))
@@ -702,7 +743,8 @@ class Renderer:
                 pill_r  = pill_gradient_fg(len(cells), 0, len(cells), anchor, shift, pct_bg) + PILL_RIGHT
                 painted = pill_l + paint_bg_span(cells, anchor, shift, pct_bg, self.pill_fg_dark, self.pill_fg_light) + pill_r + RESET
                 return painted, _visible_width(painted)
-            text = f'{model_clr}{GLYPH_MODEL_LIGHT}  {name}{self.R}'
+            glyph_part = f'{GLYPH_MODEL_LIGHT}  ' if show_icons else ''
+            text = f'{model_clr}{glyph_part}{name}{self.R}'
             return text, _visible_width(text)
 
         right_text, right_w = _make_right(model_name)
@@ -712,15 +754,17 @@ class Renderer:
             right_text, right_w = _make_right(model_name[:budget] + ELLIPSIS)
         return rate_text, right_text, right_w
 
-    def plugins_skills(self, skills_count: int, skills_names: str, plugin_names: str) -> str:
+    def plugins_skills(self, skills_count: int, skills_names: str, plugin_names: str, show_icons: bool = True) -> str:
         step = rainbow_step()
         c_skills = rainbow_at(step, 3)
         c_plugins = rainbow_at(step, 6)
         extras = []
         if skills_count > 0:
-            extras.append(f'{c_skills}{BOLD}{GLYPH_SKILLS}  {self.R}{self.SKILLS}{skills_names}{self.R}')
+            skills_glyph = f'{c_skills}{BOLD}{GLYPH_SKILLS}  {self.R}' if show_icons else ''
+            extras.append(f'{skills_glyph}{self.SKILLS}{skills_names}{self.R}')
         if plugin_names:
-            extras.append(f'{c_plugins}{BOLD}{GLYPH_PLUGINS}  {self.R}{self.SKILLS}{plugin_names}{self.R}')
+            plugins_glyph = f'{c_plugins}{BOLD}{GLYPH_PLUGINS}  {self.R}' if show_icons else ''
+            extras.append(f'{plugins_glyph}{self.SKILLS}{plugin_names}{self.R}')
         return f' {self.LABEL}|{self.R} '.join(extras)
 
     def tool_counts_row(self, counts: dict[str, tuple[int, int]], width: int, *, fill: float = 1.0) -> str:
@@ -1370,11 +1414,16 @@ class Renderer:
                 parts.append(f'{self.CTX_DIM}{title}{self.R}')
         return sep.join(parts)
 
-    def workflow_summary(self, run: RunningWorkflow, content_width: int, *, hidden_agents: int = 0) -> str:
+    def workflow_summary(
+        self, run: RunningWorkflow, content_width: int, *, hidden_agents: int = 0, show_icons: bool = True,
+    ) -> str:
         """Summary footer for a workflow run: ``└  N agents · M done · <tok>``.
 
         ``hidden_agents`` (agents beyond the per-run cap) appends ``+K hidden``.
         Token total is the run's aggregate from the per-agent transcript parse.
+        ``show_icons`` (default on) gates the leading corner glyph beside the
+        ``N agents`` count; the rest of the line (all number-bearing) is
+        unaffected since it carries no other glyphs.
         """
         step  = rainbow_step()
         c_sum = rainbow_at(step, 7)
@@ -1386,7 +1435,8 @@ class Renderer:
         ]
         if hidden_agents > 0:
             parts.append(f'{self.LABEL}+{hidden_agents} hidden{self.R}')
-        line = f'{c_sum}{GLYPH_WF_SUMMARY}{self.R}  {sep.join(parts)}'
+        lead = f'{c_sum}{GLYPH_WF_SUMMARY}{self.R}  ' if show_icons else ''
+        line = f'{lead}{sep.join(parts)}'
         if _visible_width(line) > content_width:
             line = _middle_ellipsis(line, content_width)
         return line
@@ -1539,7 +1589,7 @@ class Renderer:
     # after every cap is met still feeds the rate/sparkline leader (as before).
     JUSTIFY_PAD_CAP = 4
 
-    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, tok_rate: int, session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False, lines: tuple[int, int] | None = None) -> tuple[list[str], tuple[int, ...], int, int]:
+    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, tok_rate: int, session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False, lines: tuple[int, int] | None = None, show_icons: bool = True) -> tuple[list[str], tuple[int, ...], int, int]:
         """One content line: tokens │ [lines │] cost │ rate-and-sparkline.
 
         With ``show_day_stats`` (default), session and day figures merge per
@@ -1557,6 +1607,14 @@ class Renderer:
         at a realistic-widest budget), so the two ``│`` dividers always land on
         the rendered content's divider column — they never detach from the
         ┬/┴ elbows above/below.
+
+        ``show_icons`` (default on) gates every per-number glyph in this row —
+        the in/out token arrows, the cost icon, the lines read/changed icons,
+        and the rate-label gauge icon. When off, each icon (and its trailing
+        gap) is simply omitted from the builder closures below; every width
+        (``tokens_w``, ``cost_w``, ``lines_w``, ``rate_label_w``) is measured
+        from the *built* string via ``_visible_width``, so the column/vsep
+        math downstream adapts automatically — no separate width branch needed.
 
         ``lines``, when given, is a ``(read, changed)`` session-total pair
         rendered as a third segment between tokens and cost — but only when
@@ -1577,8 +1635,11 @@ class Renderer:
         """
         day_clr = self.day_cost_colour(day_cost)
         in_active, out_active = TokenRate.recently_active(session_id)
-        in_icon  = f'{ARROW_IN_ACTIVE} '  if in_active  else f'{ARROW_IN_IDLE} '   # both 2 cols
-        out_icon = f'{ARROW_OUT_ACTIVE} ' if out_active else f'{ARROW_OUT_IDLE} '  # both 2 cols
+        if show_icons:
+            in_icon  = f'{ARROW_IN_ACTIVE} '  if in_active  else f'{ARROW_IN_IDLE} '   # both 2 cols
+            out_icon = f'{ARROW_OUT_ACTIVE} ' if out_active else f'{ARROW_OUT_IDLE} '  # both 2 cols
+        else:
+            in_icon = out_icon = ''  # show_icons=False: number-only, no arrow glyph
 
         # Inter-group gaps in the tokens column and the cost/leader edge pads.
         # They start at their minimums (gaps 1 space, edge pads 0) so the
@@ -1604,7 +1665,8 @@ class Renderer:
                 )
 
             def build_cost() -> str:
-                return (f'{cost_lpad}{self.safe}{ICON_COST}{self.R}  {self.COST}${sess_cost:,.2f}{self.R}'
+                cost_icon = f'{self.safe}{ICON_COST}{self.R}  ' if show_icons else ''
+                return (f'{cost_lpad}{cost_icon}{self.COST}${sess_cost:,.2f}{self.R}'
                         f'{self.LABEL} / {self.R}{day_clr}${day_cost:,.2f}{self.R}{cost_rpad}')
 
             tokens_col = build_tokens()
@@ -1617,7 +1679,8 @@ class Renderer:
             tokens_col = (f'{self.LABEL}{self.BOLDY}{in_icon}{self.R}{self.TOK}{sess_in_s}{self.R} '
                           f'{self.TOK_DIM}({sess_cache_s}){self.R}{self.LABEL} '
                           f'{self.BOLDY}{out_icon}{self.R}{self.TOK}{sess_out_s}{self.R}')
-            cost_col = f'{self.safe}{ICON_COST}{self.R}  {self.COST}${sess_cost:,.2f}{self.R}'
+            cost_icon = f'{self.safe}{ICON_COST}{self.R}  ' if show_icons else ''
+            cost_col = f'{cost_icon}{self.COST}${sess_cost:,.2f}{self.R}'
 
         def build_lines() -> str:
             # Mirrors the tokens column's own glyph-pair convention (icon,
@@ -1635,8 +1698,16 @@ class Renderer:
             # alignment needed) — see fmt_lines_pair for why the subagent
             # tree row can't reuse this width policy wholesale.
             read_s, changed_s = fmt_lines_pair(read, changed)
-            return (f'{self.LABEL}{GLYPH_LINES_READ}  {self.R}{self.TOK}{read_s}{self.R}'
-                    f'{self.LABEL}  {GLYPH_LINES_CHANGED}  {self.R}{self.TOK}{changed_s}{self.R}')
+            if show_icons:
+                read_icon    = f'{self.LABEL}{GLYPH_LINES_READ}  {self.R}'
+                changed_icon = f'{self.LABEL}  {GLYPH_LINES_CHANGED}  {self.R}'
+            else:
+                # No glyphs: keep the same single inter-group gap the tokens
+                # column uses (gap1's minimum) so the two counters stay
+                # visually separated without a bare icon slot.
+                read_icon, changed_icon = '', '  '
+            return (f'{read_icon}{self.TOK}{read_s}{self.R}'
+                    f'{changed_icon}{self.TOK}{changed_s}{self.R}')
 
         vsep_w        = 4
         vsep_leader_w = 4
@@ -1661,7 +1732,8 @@ class Renderer:
         # The rate/spark leader can never compress below its bare ``<rate> t/m``
         # label; measure it here so the budget split and min_width are exact (when
         # bar_w<=0 below, the leader is the bare label, which may exceed label_w+1).
-        rate_label   = f'{self.TOK_ICON}{ICON_TOK_RATE}  {self.TOK}{fmt_tok(tok_rate)}{self.R}{self.LABEL} t/m{self.R}'
+        rate_icon    = f'{self.TOK_ICON}{ICON_TOK_RATE}  ' if show_icons else ''
+        rate_label   = f'{rate_icon}{self.TOK}{fmt_tok(tok_rate)}{self.R}{self.LABEL} t/m{self.R}'
         rate_label_w = _visible_width(rate_label)
         leader_min   = max(label_w + 1, rate_label_w)
 
@@ -1909,6 +1981,7 @@ class Renderer:
         exceeds_200k: bool = False,
         state_labels: Sequence[str] | None = None,
         state_thresholds: Sequence[int] = (),
+        show_icons: bool = True,
     ) -> str:
         fill_ratio, pct_soft = _ctx_fill_ratio(ctx, soft_limit)
         total_tokens         = _ctx_used_tokens(ctx)
@@ -1934,7 +2007,8 @@ class Renderer:
             filled = int(min(fill_ratio, 1.0) * bar_w)
             empty  = max(0, bar_w - filled - (1 if filled < bar_w else 0))
             bar    = f'{self.gradient_bar(filled, bar_w)}{self.R}{a}{BarChars.EMPTY * empty}{self.R}'
-            return f'{badge}{a}{GLYPH_HOURGLASS}{self.R} {prefix}{word_seg}{bar}'
+            icon = f'{a}{GLYPH_HOURGLASS}{self.R} ' if show_icons else ''
+            return f'{badge}{icon}{prefix}{word_seg}{bar}'
 
         bar_clr = self.risk_zone_color(total_tokens)
         # Fixed-width right-justified fields (rjust applied to the plain text
@@ -1952,7 +2026,8 @@ class Renderer:
         filled = int(fill_ratio * bar_w)
         empty  = max(0, bar_w - filled - (1 if filled < bar_w else 0))
         bar    = f'{self.gradient_bar(filled, bar_w)}{self.R}{self._empty_section(empty, blend=filled > 0)}{self.R}'
-        return f'{badge}{bar_clr}{GLYPH_HOURGLASS}{self.R} {prefix}{word_seg}{bar}'
+        icon = f'{bar_clr}{GLYPH_HOURGLASS}{self.R} ' if show_icons else ''
+        return f'{badge}{icon}{prefix}{word_seg}{bar}'
 
     def context_line_compact(
         self,
@@ -2056,7 +2131,10 @@ class Renderer:
             f' {self.LABEL}{done}/{total}{self.R} {BOLD}{pct:>3d}%{RESET}'
         )
 
-    def burndown_trend(self, used_pct: float, resets_at: int, window_minutes: int, warmup_minutes: int, now: float | None = None) -> str:
+    def burndown_trend(
+        self, used_pct: float, resets_at: int, window_minutes: int, warmup_minutes: int,
+        now: float | None = None, show_icons: bool = True,
+    ) -> str:
         delta = burndown_delta(used_pct, resets_at, window_minutes, warmup_minutes, now=now)
         if delta is None:
             return ''
@@ -2066,10 +2144,11 @@ class Renderer:
         t = max(0.0, min(1.0, 0.5 + delta / 50.0))
         colour = self.gradient.gradient_color(t)
         glyph = GLYPH_BURN_FAST if delta > 0 else GLYPH_BURN_SLOW  # colour modulation carries over/under-burn direction
+        glyph_part = f'{glyph} ' if show_icons else ''
         sign  = '-' if delta < 0 else '+'
-        return f'{colour}{glyph} {sign}{abs_delta:.1f}%{self.R}'
+        return f'{colour}{glyph_part}{sign}{abs_delta:.1f}%{self.R}'
 
-    def helper(self, five_hour: RateBucket, gap: int = 1) -> str:
+    def helper(self, five_hour: RateBucket, gap: int = 1, show_icons: bool = True) -> str:
         # ``gap`` is the inter-stat separator width (countdown↔pct, pct↔trend).
         # It widens to give the justified top row breathing room; the glyph→stat
         # spacing lives in the caller and is unaffected.
@@ -2096,6 +2175,7 @@ class Renderer:
                 five_hour.resets_at,
                 FIVE_HOUR_MINUTES,
                 FIVE_HOUR_WARMUP_MINUTES,
+                show_icons=show_icons,
             )
             trend_part = f'{sp}{trend}' if trend else ''
             return f'{self.COMMIT}{countdown}{self.R}{sp}{pct_clr}{pct_str}%{self.R}{trend_part}'

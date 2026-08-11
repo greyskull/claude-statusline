@@ -73,6 +73,15 @@
 # boolean and combines with any mode above. (env: YAS_GLYPH_SINGLE_WIDTH,
 # CLI: --glyph-single-width)
 # single_width = false
+#
+# show_icons, when false, drops essentially every icon/glyph the statusline
+# draws, including the top-left home/folder glyph. The exceptions — glyphs that
+# still render — are the task-plan checkboxes, the subagent status markers, and
+# the box/border and workflow structural glyphs (frame, sparkline blocks,
+# separators, row markers). Text and numbers still render; only the glyph
+# beside each is omitted, and column/border alignment is preserved.
+# (env: YAS_SHOW_ICONS)
+# show_icons = true
 
 # [context]
 # Context state word — a morphing Smart -> Coasting -> Foggy -> Cooked -> Dumb

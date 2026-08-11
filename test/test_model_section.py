@@ -4,12 +4,20 @@ from yas.config import Config
 from yas.info import SessionView
 from yas.constants import (
     GLYPH_BURN_FAST,
+    GLYPH_BURN_SLOW,
+    GLYPH_CACHE,
+    GLYPH_PLUGINS,
+    GLYPH_SKILLS,
     MEDIUM_WIDTH,
     NARROW_WIDTH,
     DEFAULT_MAX_WIDTH as MAX_WIDTH,
     PILL_LEFT,
     PILL_RIGHT,
     PILL_BR,
+    FIVE_HOUR_MINUTES,
+    FIVE_HOUR_WARMUP_MINUTES,
+    SEVEN_DAY_MINUTES,
+    SEVEN_DAY_WARMUP_MINUTES,
 )
 from yas.info.git import GitInfo
 from yas.session import CurrentUsage, Effort, Model, RateBucket, RateLimits, SessionInfo, Thinking
@@ -311,7 +319,7 @@ class TestNarrowLayoutNoBurndown:
 # Task 6.1 — single lightbulb glyph, leading padding, parenthesised effort
 # ---------------------------------------------------------------------------
 
-from yas.constants import GLYPH_MODEL_LIGHT  # noqa: E402 (after class defs)
+from yas.constants import GLYPH_MODEL_LIGHT, ICON_LIMIT_5H, ICON_LIMIT_7D  # noqa: E402 (after class defs)
 
 class TestModelGlyph:
     def test_model_right_section_uses_lightbulb_glyph(self) -> None:
@@ -340,6 +348,98 @@ class TestModelGlyph:
         _rate, right, _w = r.model_right_section_compact('Sonnet 4.6', RateLimits(), max_right_width=40)
         stripped = strip_ansi(right)
         assert GLYPH_MODEL_LIGHT in stripped
+
+
+class TestShowIconsModelRow:
+    """show_icons gates the model-pill lightbulb and the 5h/7d rate-limit
+    glyphs across all three model-row builders — default on preserves the
+    current glyphs, off drops every one while numbers/text stay intact."""
+
+    def test_model_right_section_show_icons_false_drops_all_glyphs(self) -> None:
+        r = Renderer()
+        rate = RateLimits(seven_day=RateBucket(used_percentage=12.5))
+        h5h, h7d, right, _w = r.model_right_section('Sonnet 4.6', '', rate, show_icons=False)
+        assert ICON_LIMIT_5H not in strip_ansi(h5h)
+        assert ICON_LIMIT_7D not in strip_ansi(h7d)
+        assert GLYPH_MODEL_LIGHT not in strip_ansi(right)
+        assert 'Sonnet 4.6' in strip_ansi(right)
+        assert '12.5%' in strip_ansi(h7d)
+
+    def test_model_right_section_pill_show_icons_false_drops_lightbulb(self) -> None:
+        r = Renderer()
+        _h5h, _h7d, right, _w = r.model_right_section(
+            'Opus 4.7 1M', 'high', RateLimits(), effort_level='high', show_icons=False,
+        )
+        stripped = strip_ansi(right)
+        assert GLYPH_MODEL_LIGHT not in stripped
+        assert '(high)' in stripped
+
+    def test_model_right_section_compact_show_icons_false_drops_lightbulb(self) -> None:
+        r = Renderer()
+        _rate, right, _w = r.model_right_section_compact(
+            'Sonnet 4.6', RateLimits(), max_right_width=40, show_icons=False,
+        )
+        stripped = strip_ansi(right)
+        assert GLYPH_MODEL_LIGHT not in stripped
+        assert 'Sonnet 4.6' in stripped
+
+    def test_model_section_compact_show_icons_false_drops_glyphs(self) -> None:
+        r = Renderer()
+        out, _ = r.model_section_compact('Sonnet 4.6', RateLimits(), max_width=55, show_icons=False)
+        stripped = strip_ansi(out)
+        assert GLYPH_MODEL_LIGHT not in stripped
+        assert ICON_LIMIT_5H not in stripped
+        assert 'Sonnet 4.6' in stripped
+
+    def test_burndown_trend_show_icons_false_drops_flame(self) -> None:
+        r = Renderer()
+        # resets_at far enough in the future, `now` past warmup so a delta computes.
+        now = 1_000_000_000.0
+        resets_at = int(now + FIVE_HOUR_MINUTES * 60 - FIVE_HOUR_WARMUP_MINUTES * 60 * 4)
+        on  = r.burndown_trend(90.0, resets_at, FIVE_HOUR_MINUTES, FIVE_HOUR_WARMUP_MINUTES, now=now, show_icons=True)
+        off = r.burndown_trend(90.0, resets_at, FIVE_HOUR_MINUTES, FIVE_HOUR_WARMUP_MINUTES, now=now, show_icons=False)
+        assert on and off
+        on_s, off_s = strip_ansi(on), strip_ansi(off)
+        assert GLYPH_BURN_FAST in on_s or GLYPH_BURN_SLOW in on_s
+        assert GLYPH_BURN_FAST not in off_s and GLYPH_BURN_SLOW not in off_s
+        # The sign+percentage text must survive intact.
+        assert on_s.split()[-1] == off_s.split()[-1] or on_s[-6:] == off_s[-6:]
+
+    def test_rate_helpers_show_icons_false_drops_flame_and_clock(self) -> None:
+        r = Renderer()
+        now = 1_000_000_000.0
+        resets_at = int(now + SEVEN_DAY_MINUTES * 60 - SEVEN_DAY_WARMUP_MINUTES * 60 * 4)
+        rate = RateLimits(seven_day=RateBucket(used_percentage=50.0, resets_at=resets_at))
+        h5h, h7d = r._rate_helpers(rate, show_icons=False)
+        h5h_s, h7d_s = strip_ansi(h5h), strip_ansi(h7d)
+        assert ICON_LIMIT_5H not in h5h_s
+        assert ICON_LIMIT_7D not in h7d_s
+        assert GLYPH_BURN_FAST not in h7d_s and GLYPH_BURN_SLOW not in h7d_s
+        assert '50.0%' in h7d_s
+
+    def test_cache_section_show_icons_false_drops_glyph(self) -> None:
+        r = Renderer()
+        on, _  = r.cache_section(125.0, 30, show_icons=True)
+        off, _ = r.cache_section(125.0, 30, show_icons=False)
+        assert GLYPH_CACHE in strip_ansi(on)
+        assert GLYPH_CACHE not in strip_ansi(off)
+        assert '-02:05' in strip_ansi(off)
+
+    def test_cache_section_countdown_is_signed(self) -> None:
+        """Cache TTL counts down, so the digits carry a leading `-` against
+        the clock (no space), same colour as the digits."""
+        r = Renderer()
+        text, _ = r.cache_section(125.0, 30, show_icons=True)
+        assert '-02:05' in strip_ansi(text)
+
+    def test_plugins_skills_show_icons_false_drops_glyphs(self) -> None:
+        r = Renderer()
+        on  = r.plugins_skills(2, 'foo,bar', 'baz', show_icons=True)
+        off = r.plugins_skills(2, 'foo,bar', 'baz', show_icons=False)
+        on_s, off_s = strip_ansi(on), strip_ansi(off)
+        assert GLYPH_SKILLS in on_s and GLYPH_PLUGINS in on_s
+        assert GLYPH_SKILLS not in off_s and GLYPH_PLUGINS not in off_s
+        assert 'foo,bar' in off_s and 'baz' in off_s
 
 
 class TestModelEffort:
