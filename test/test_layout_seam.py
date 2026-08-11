@@ -1184,6 +1184,33 @@ def test_helper_row_show_icons_false_drops_5h7d_and_flame_when_gaps_widen(
             assert glyph not in plain, f'{glyph!r} leaked at width={width} with show_icons=False'
 
 
+def test_path_row_show_icons_false_drops_folder_glyph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The leading folder glyph in the top-left path row is gated by
+    show_icons like every other number-adjacent icon. With icons off the
+    glyph must not leak into build_medium or build_wide, and the row must
+    still render (box stays square — widths are always _visible_width-derived,
+    so no separate shift bookkeeping is needed here)."""
+    from yas.constants import GLYPH_FOLDER
+    from helper import strip_ansi
+
+    _silence_dynamic(monkeypatch)
+    view = SessionView(_session(), Config(show_icons=False))
+    for width in (90, 120, 160, 200):
+        specs = [
+            ('build_medium', layout.build_medium(view, width, _r)),
+            ('build_wide', layout.build_wide(view, _tick(), width, _r)),
+        ]
+        for name, spec in specs:
+            out  = layout.render_layout(spec, _r)
+            plain = '\n'.join(strip_ansi(ln) for ln in out)
+            assert GLYPH_FOLDER not in plain, (
+                f'{GLYPH_FOLDER!r} leaked from {name} at width={width} '
+                'with show_icons=False'
+            )
+            for ln in out:
+                assert len(strip_ansi(ln)) > 0
+
+
 def tree_columns_for(view: SessionView) -> tuple[int, int, int]:
     """Recompute the same desc/stats/activity anchors `build_wide` used, so
     the test can assert the label's offset relative to them without

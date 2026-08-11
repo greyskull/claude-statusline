@@ -399,6 +399,7 @@ class Renderer:
     def path_git(
         self, short_pwd: str, git: GitInfo,
         *, show_path: bool = True, show_commit: bool = True, show_dirty: bool = True,
+        show_icons: bool = True,
     ) -> str:
         dirty = ''
         if show_dirty:
@@ -417,20 +418,26 @@ class Renderer:
         # middle-ellipsis). show_path=False yields the branch-only rung (glyph +
         # arrow + branch) used as a width-degradation step below the path forms.
         path_part = f'{self.PWD}{short_pwd}{self.R} ' if show_path else ''
+        glyph_part = f'{GLYPH_FOLDER}  ' if show_icons else ''
 
         return (
-            f'{self.ICON_PATH}{GLYPH_FOLDER}  {path_part}'
+            f'{self.ICON_PATH}{glyph_part}{path_part}'
             f'{self.LABEL}{self.ARROW}{BOLD}{GLYPH_IN}{self.R}'
             f' {self.BRANCH}{git.branch}{self.R}'
             f'{commit_part}{dirty}'
         )
 
-    def path_glyph_only(self) -> str:
+    def path_glyph_only(self, show_icons: bool = True) -> str:
         """Presence-glyph floor: the folder glyph alone (1 visible column).
 
         The overflow-safe terminal state of the path ladder — it can never
         exceed the available width or disturb the box border math.
+        ``show_icons`` (default on) gates the folder glyph itself; with icons
+        hidden there is nothing left to present, so the floor degrades to an
+        empty string (0 visible columns).
         """
+        if not show_icons:
+            return ''
         return f'{self.ICON_PATH}{GLYPH_FOLDER}{self.R}'
 
     def path_git_compact(self, short_pwd: str, git: GitInfo) -> str:
@@ -442,7 +449,7 @@ class Renderer:
 
     def fit_path(
         self, short_pwd: str, git: GitInfo, target_w: int,
-        *, compact_only: bool = False,
+        *, compact_only: bool = False, show_icons: bool = True,
     ) -> str:
         def fits(s: str) -> bool:
             return _visible_width(s) <= target_w
@@ -452,13 +459,16 @@ class Renderer:
         # branch-only (path omitted) → glyph-only floor. The path is never
         # middle-ellipsized: it is shown in full or dropped whole, and the
         # branch outlives the path. compact_only enters at the compact rung.
+        # show_icons gates the leading folder glyph (path_git / glyph-only
+        # floor); path_git_compact never carried the glyph, so it is
+        # unaffected either way.
         if not compact_only:
             for kwargs in (
                 {},
                 {'show_commit': False},
                 {'show_commit': False, 'show_dirty': False},
             ):
-                candidate = self.path_git(short_pwd, git, **kwargs)
+                candidate = self.path_git(short_pwd, git, show_icons=show_icons, **kwargs)
                 if fits(candidate):
                     return candidate
 
@@ -469,12 +479,13 @@ class Renderer:
         # Path omitted whole, branch retained (glyph + arrow + branch).
         branch_only = self.path_git(
             short_pwd, git, show_path=False, show_commit=False, show_dirty=False,
+            show_icons=show_icons,
         )
         if fits(branch_only):
             return branch_only
 
         # Glyph-only presence floor — 1 visible column, always within target.
-        return self.path_glyph_only()
+        return self.path_glyph_only(show_icons=show_icons)
 
     def model_colour(self, model_name: str) -> str:
         return self.theme.models[model_key(model_name)].label
