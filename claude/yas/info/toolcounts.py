@@ -27,9 +27,12 @@ cleanly to line counts.
 
 For each ``Read`` ``tool_use``, ``lines_read`` accumulates the newline count of
 the paired ``tool_result.content``, but only when that content is a string
-starting with ``1\t`` (the ``cat -n`` tabular format). Image and document reads
-have list-valued content and are skipped. This is the canonical sniff test for
-text-shaped reads.
+whose first line starts with a numeric ``cat -n``-style prefix (one or more
+digits followed by a tab). The numbering starts at the ``offset`` argument
+when one is given, not necessarily at line 1 — ``Read(offset=500)`` yields
+content beginning ``"500\t..."``, which still counts. Image and document
+reads have list-valued content and are skipped. This is the canonical sniff
+test for text-shaped reads.
 
 For each ``DesignSync`` ``tool_use`` with ``input.method == 'get_file'``,
 ``lines_read`` accumulates the newline count of the ``.content`` field inside
@@ -63,10 +66,20 @@ because tool_use ids are fully disjoint between the two files.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from yas.constants import META_EXCLUDE_TOOLS
 from yas.info.subagents import RunningSubagent, _parse_iso_to_epoch
+
+# Matches a cat -n style leading line number (any starting offset, not just
+# line 1 — Read(offset=N) numbers its cat -n blob starting at N).
+_CAT_N_PREFIX_RE = re.compile(r'^\d+\t')
+# Byte-level equivalent of the above, for the pre-filter below (cheaper than
+# json.loads; must not assume the numbering starts at 1). Matched against the
+# raw JSON-encoded line, where a tab is escaped as the two-byte sequence
+# b'\t' (backslash, t), not a literal tab byte.
+_CAT_N_PREFIX_BYTES_RE = re.compile(rb'\d\\t')
 
 
 @dataclass(slots=True)
@@ -130,10 +143,15 @@ def count_transcript(
                     continue
 
                 # (b) if line has tool_result but not tool_use, require either
-                #     the cat -n marker (JSON-escaped as '1\t', native Read) or
-                #     the DesignSync get_file marker before decoding.
+                #     a cat -n style digit-tab marker (JSON-escaped as e.g.
+                #     '500\t', native Read — numbering may start at any
+                #     offset, not just line 1) or the DesignSync get_file
+                #     marker before decoding.
                 if b'"tool_result"' in raw and b'"tool_use"' not in raw:
-                    if b'1\\t' not in raw and b'get_file' not in raw:
+                    if (
+                        not _CAT_N_PREFIX_BYTES_RE.search(raw)
+                        and b'get_file' not in raw
+                    ):
                         continue
 
                 # (c) if skip_sidechain, reject sidechain records before decoding.
@@ -173,8 +191,12 @@ def count_transcript(
                         content = block.get('content')
                         if tool_use_id in read_ids:
                             # Only count if content is a string starting with
-                            # '1\t' (the cat -n shape, Decision 2).
-                            if isinstance(content, str) and content.startswith('1\t'):
+                            # a cat -n style digit-tab prefix (Decision 2).
+                            # The numbering may start at any offset, not just
+                            # line 1 (Read(offset=N) numbers from N).
+                            if isinstance(content, str) and _CAT_N_PREFIX_RE.match(
+                                content
+                            ):
                                 lines_read += content.count('\n')
                             counted_read_ids.add(tool_use_id)
                         elif tool_use_id in designsync_read_ids:

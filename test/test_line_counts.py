@@ -136,6 +136,38 @@ def test_image_result_list_content_contributes_zero(tmp_path: Path) -> None:
     assert stats.lines_read == 0
 
 
+def test_offset_read_result_counts_newlines_into_lines_read(tmp_path: Path) -> None:
+    """Read(offset=500, limit=50) numbers its cat -n blob starting at 500, not 1.
+
+    Regression for the bug where content.startswith('1\\t') silently discarded
+    every offset read (and marked it as already counted, so it could never be
+    recovered).
+    """
+    content = '500\ta\n501\tb\n502\tc\n'
+    path = _write_file(tmp_path, 'main.jsonl', [
+        _assistant_line('m1', [_read_use('r1')]),
+        _user_line('u1', 'r1', content),
+    ])
+    stats = count_transcript(path, None, skip_sidechain=True)
+    assert stats.lines_read == 3
+
+
+def test_short_offset_read_not_dropped_by_byte_prefilter(tmp_path: Path) -> None:
+    """A short offset read whose numbering never contains a line ending in
+    '1' would have been silently dropped by the old byte-level pre-filter
+    (which only looked for the literal b'1\\t' marker). The relaxed
+    digit-tab pre-filter must still let this through.
+    """
+    content = '200\ta\n'  # no '1\t' substring anywhere in this blob
+    assert b'1\t' not in content.encode()
+    path = _write_file(tmp_path, 'main.jsonl', [
+        _assistant_line('m1', [_read_use('r1')]),
+        _user_line('u1', 'r1', content),
+    ])
+    stats = count_transcript(path, None, skip_sidechain=True)
+    assert stats.lines_read == 1
+
+
 def test_result_not_cat_n_shaped_contributes_zero(tmp_path: Path) -> None:
     path = _write_file(tmp_path, 'main.jsonl', [
         _assistant_line('m1', [_read_use('r1')]),
