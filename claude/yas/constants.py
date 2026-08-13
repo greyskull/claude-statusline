@@ -528,6 +528,13 @@ SUBAGENT_NAME_MAX              = 50
 # cohort's widest model width (see renderer.Renderer.subagent_row). Exactly
 # the ' · ' separator rendered in the gap — no extra padding.
 SUBAGENT_STATS_ACTIVITY_GAP    = 3
+# Tree-view box-drawing prefix staircase (see layout.subagent_cells): a
+# top-level agent's connector is padded to TREE_PREFIX_BASE_W visible
+# columns, each depth below that adds TREE_PREFIX_STEP_W more — so names
+# indent 2 columns per level rather than all lining up in one shared
+# gutter. Both include the single trailing separator space before the name.
+TREE_PREFIX_BASE_W             = 4
+TREE_PREFIX_STEP_W             = 2
 
 # Four-state subagent lifecycle: 'running' (live), 'completed' (normal finish),
 # 'killed'/'stopped' (ended early by intent — same glyph, see

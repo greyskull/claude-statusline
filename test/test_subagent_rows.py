@@ -12,12 +12,15 @@ import yas.info.subagents as subagents_mod
 from yas.config import Config
 
 from yas.constants import (
+    BOLD,
     ELLIPSIS,
     GLYPH_REPLYING,
     ITALIC,
     STRIKE,
     SUBAGENT_DESC_FLOOR,
     SUBAGENT_STATS_ACTIVITY_GAP,
+    TREE_PREFIX_BASE_W,
+    TREE_PREFIX_STEP_W,
     UNSTRIKE,
 )
 from yas.info import SessionView
@@ -1047,12 +1050,86 @@ def test_tree_order_unknown_parent_is_top_level() -> None:
 
 
 def test_subagent_cells_prefixes_branch_glyphs() -> None:
+    # root -> k1 (leaf, not last), k2 (last, has a child) -> gk (leaf, only
+    # child of k2). Top-level agents branch off the implicit, never-rendered
+    # main thread, so `root` itself gets an elbow too — here it's the only
+    # top-level agent, so it's "last" (`└`) and has children (`┬`). Box-
+    # drawing connectors: a node with children gets '┬' at its own
+    # position, a leaf gets '─'; ancestor columns render '│' only when that
+    # ancestor still has siblings following it (root is last and k2 is
+    # last, so gk's two ancestor columns are both blank, not '│'). Every
+    # raw connector is then padded with '─' up to the cohort's widest
+    # (gk's 4-char '  └─'), so every row's trailing separator space — and
+    # the name after it — lands one column past that shared width.
     root = _make_tree_sub('agent-a', agent_type='main')
     k1   = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
     k2   = _make_tree_sub('agent-c', parent_id='a', ts_off=2)
     gk   = _make_tree_sub('agent-d', parent_id='c', ts_off=3)
     cells = layout.subagent_cells([root, k1, k2, gk])
-    assert [p for _, p in cells] == ['', '├ ', '└ ', '  └ ']
+    assert [p for _, p, _ in cells] == ['└┬─ ', ' ├─── ', ' └┬── ', '  └──── ']
+    assert [d for _, _, d in cells] == [0, 1, 1, 2]
+
+
+def test_subagent_cells_ancestor_column_continues_past_uncle() -> None:
+    # root -> a (has a child, not last) -> b (leaf grandchild); root -> c
+    # (last sibling of a, leaf "uncle"). The grandchild's ancestor column
+    # must render '│' (not blank) because its parent `a` still has a
+    # sibling (`c`) following below — the vertical line has to keep
+    # running past the grandchild's row to reach it. `root` is the sole
+    # top-level agent, so its own column (both a's and b's leftmost
+    # column) stays blank — only `a`'s own not-last status feeds a '│'.
+    root = _make_tree_sub('agent-r', agent_type='root')
+    a    = _make_tree_sub('agent-a', parent_id='r', ts_off=1)
+    b    = _make_tree_sub('agent-b', parent_id='a', ts_off=2)
+    c    = _make_tree_sub('agent-c', parent_id='r', ts_off=3)
+    cells = layout.subagent_cells([root, a, b, c])
+    prefixes = {sub.agent_id: p for sub, p, _ in cells}
+    assert prefixes['agent-a'].startswith(' ├┬')   # not last, has a child
+    assert prefixes['agent-b'].startswith(' │└')   # ancestor column stays '│'
+    assert prefixes['agent-c'].startswith(' └─')   # last sibling, leaf
+
+
+def test_subagent_cells_single_child_gets_last_leaf_elbow() -> None:
+    root = _make_tree_sub('agent-a', agent_type='main')
+    only = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
+    cells = layout.subagent_cells([root, only])
+    assert [p for _, p, _ in cells] == ['└┬─ ', ' └─── ']
+
+
+def test_subagent_cells_multiple_siblings_only_last_gets_corner() -> None:
+    root = _make_tree_sub('agent-a', agent_type='main')
+    k1   = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
+    k2   = _make_tree_sub('agent-c', parent_id='a', ts_off=2)
+    k3   = _make_tree_sub('agent-d', parent_id='a', ts_off=3)
+    cells = layout.subagent_cells([root, k1, k2, k3])
+    prefixes = [p for _, p, _ in cells]
+    assert prefixes == ['└┬─ ', ' ├─── ', ' ├─── ', ' └─── ']
+
+
+def test_subagent_cells_multiple_top_level_agents_get_own_elbow() -> None:
+    # Two unrelated top-level agents (no parent/child relation between
+    # them): both branch directly off the implicit main thread and are
+    # ordered as siblings — only the second (last) gets '└'.
+    first  = _make_tree_sub('agent-a', agent_type='first')
+    second = _make_tree_sub('agent-b', agent_type='second', ts_off=1)
+    cells = layout.subagent_cells([first, second])
+    assert [p for _, p, d in cells] == ['├── ', '└── ']
+    assert [d for _, _, d in cells] == [0, 0]
+
+
+def test_subagent_cells_prefix_staircases_by_depth() -> None:
+    # Mixed-depth cohort (including the root): names STAIRCASE rather than
+    # sharing one column — each row's prefix visible width is exactly
+    # TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W, so a deeper row's
+    # name starts further right than a shallower one's, by a constant step
+    # per level.
+    root = _make_tree_sub('agent-r', agent_type='root')
+    a    = _make_tree_sub('agent-a', parent_id='r', ts_off=1)
+    b    = _make_tree_sub('agent-b', parent_id='a', ts_off=2)
+    c    = _make_tree_sub('agent-c', parent_id='r', ts_off=3)
+    cells = layout.subagent_cells([root, a, b, c])
+    for _, prefix, depth in cells:
+        assert _visible_width(prefix) == TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W
 
 
 def test_cap_tree_groups_keeps_active_parent_with_child() -> None:
@@ -1252,7 +1329,7 @@ def test_tree_single_type_and_model_never_shed_by_width() -> None:
     sub = _make_tree_sub('agent-a', agent_type='spec-author', model='claude-sonnet-4-6',
                          description='x' * 40,
                          last_activity=('tool_use', 'Bash', {'command': 'x'}))
-    cells = [(sub, '')]
+    cells = [(sub, '', 0)]
     model_w = layout.tree_model_width(cells)
     for width in range(40, 140, 5):
         desc_col, stats_col, activity_col = layout.tree_columns(cells, width, model_w=model_w)
@@ -1276,7 +1353,7 @@ def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     # cluster plus the activity floor.
     root = _make_tree_sub('agent-a', agent_type='spec-author', description='d' * 10)     # prefix '', long type
     kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api', description='d' * 3)  # prefix '├ ', short type
-    cells = [(root, ''), (kid, '├ ')]
+    cells = [(root, '', 0), (kid, '├ ', 1)]
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 140)
     # desc_col matches the widest row: '' + 5 + 1 + len('spec-author') + 1
     # (no leading marker column — the run-state glyph rides in the
@@ -1297,7 +1374,7 @@ def test_tree_columns_protects_cluster_before_shedding_description() -> None:
     # it wants" placement would leave no room for the cluster, stats_col must
     # still clear desc_col + 3 + SUBAGENT_DESC_FLOOR (never less).
     root  = _make_tree_sub('agent-a', agent_type='spec-author', description='x' * 200)
-    cells = [(root, '')]
+    cells = [(root, '', 0)]
     cluster_w = 40
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 90, cluster_full_w=cluster_w)
     assert stats_col >= desc_col + 3 + SUBAGENT_DESC_FLOOR
@@ -1314,14 +1391,14 @@ def test_tree_single_description_aligned_across_depths_and_names() -> None:
                           last_activity=('tool_use', 'Bash', {'command': 'openspec show'}))
     kid  = _make_tree_sub('agent-b', parent_id='a', agent_type='api', description='Make tmp dir',
                           last_activity=('tool_use', 'Bash', {'command': 'mkdir -p /tmp'}))
-    cells = [(root, ''), (kid, '├ ')]
+    cells = [(root, '', 0), (kid, '├ ', 1)]
     model_w = layout.tree_model_width(cells)
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 140, model_w=model_w)
     lines = [
         strip_ansi(_r.subagent_row(sub, 140, twoline=True, tree_single=True, tree_prefix=prefix,
                                    stats_col=stats_col, tree_desc_col=desc_col,
                                    tree_activity_col=activity_col, tree_model_w=model_w))
-        for sub, prefix in cells
+        for sub, prefix, _ in cells
     ]
     # Locate each row's description text directly (rather than the first
     # ' · ' substring, which now belongs to the front-embedded model
@@ -1354,7 +1431,7 @@ def test_tree_columns_desc_grows_to_content_at_wide_width_no_hard_cap() -> None:
     # ellipsis-truncated just because the terminal is wide.
     long_desc = 'x' * 120
     root = _make_tree_sub('agent-a', agent_type='spec-implementer', description=long_desc)
-    cells = [(root, '')]
+    cells = [(root, '', 0)]
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 260, cluster_full_w=40)
     assert stats_col == desc_col + 3 + len(long_desc)
     assert activity_col <= 260
@@ -1367,7 +1444,7 @@ def test_tree_columns_degrades_gracefully_at_narrow_width() -> None:
     # non-overlapping column offsets: the activity-gap invariant always
     # holds, even if that means pulling stats_col back below the floor.
     root = _make_tree_sub('agent-a', agent_type='spec-implementer')
-    cells = [(root, '')]
+    cells = [(root, '', 0)]
     desc_col, stats_col, activity_col = layout.tree_columns(cells, 50)
     assert activity_col >= stats_col + 16
     assert activity_col <= 50
@@ -1382,7 +1459,7 @@ def test_tree_columns_short_description_leaves_no_dead_gutter_at_wide_width() ->
     # content width and stay put as the terminal widens, handing the freed
     # space to the activity column instead of leaving it as a gap.
     root = _make_tree_sub('agent-a', agent_type='spec-implementer', description='short')
-    cells = [(root, '')]
+    cells = [(root, '', 0)]
     desc_col_140, stats_col_140, activity_col_140 = layout.tree_columns(cells, 140, cluster_full_w=40)
     desc_col_300, stats_col_300, activity_col_300 = layout.tree_columns(cells, 300, cluster_full_w=40)
     assert desc_col_140 == desc_col_300
@@ -1396,8 +1473,8 @@ def test_tree_model_width_measures_cohort_max() -> None:
     # reserves exactly 5 columns; a cohort with a longer bracket-suffixed
     # label reserves exactly that label's width. It no longer pins to a
     # fixed constant regardless of content.
-    short_only = [(_make_tree_sub('agent-a', model='claude-haiku-4-5-20251001'), '')]
-    long_only  = [(_make_tree_sub('agent-a', model='claude-sonnet-4-6[1m]'), '')]
+    short_only = [(_make_tree_sub('agent-a', model='claude-haiku-4-5-20251001'), '', 0)]
+    long_only  = [(_make_tree_sub('agent-a', model='claude-sonnet-4-6[1m]'), '', 0)]
     assert layout.tree_model_width(short_only) == len('haiku')
     assert layout.tree_model_width(long_only) == len('sonnet[1m]')
     assert layout.tree_model_width([]) == 0
@@ -1413,7 +1490,7 @@ def test_tree_single_description_truncates_before_cluster_sheds() -> None:
 
     sub = _make_tree_sub('agent-a', agent_type='spec-implementer',
                          description='x' * 80, last_activity=('tool_use', 'Bash', {'command': 'x'}))
-    cells = [(sub, '')]
+    cells = [(sub, '', 0)]
     model_w = layout.tree_model_width(cells)
     lines_w = layout.tree_lines_width(cells, {})
     si = 1000
@@ -1448,7 +1525,7 @@ def test_tree_columns_label_anchors_follow_elastic_desc_growth() -> None:
     from yas.render.metrics import subagent_cluster_field_offsets, subagent_cluster_width
 
     root = _make_tree_sub('agent-a', agent_type='spec-implementer', description='Fetch things for the task')
-    cells = [(root, '')]
+    cells = [(root, '', 0)]
     model_w = layout.tree_model_width(cells)
     lines_w = layout.tree_lines_width(cells, {})
     cluster_w = subagent_cluster_width(lines_w)
@@ -1473,7 +1550,7 @@ def test_tree_row_stats_cluster_aligns_across_long_and_short_duration_rows() -> 
 
     parent = _make_tree_sub('agent-a', agent_type='spec-implementer', ts_off=-2360)  # ~40:23 elapsed
     child  = _make_tree_sub('agent-b', parent_id='a', agent_type='ui', ts_off=0)      # ~1:40 elapsed
-    cells  = [(parent, ''), (child, '└ ')]
+    cells  = [(parent, '', 0), (child, '└ ', 1)]
     width  = 290
     model_w   = layout.tree_model_width(cells)
     lines_w   = layout.tree_lines_width(cells, {})
@@ -1508,7 +1585,7 @@ def test_tree_single_constant_gap_with_model_padded_to_cohort_width() -> None:
                            last_activity=('tool_use', 'Bash', {'command': 'x'}))
     long  = _make_tree_sub('agent-b', agent_type='api', model='claude-sonnet-4-6',
                            last_activity=('tool_use', 'Read', {'file_path': 'y.py'}))
-    cells = [(short, ''), (long, '')]
+    cells = [(short, '', 0), (long, '', 0)]
     model_w = layout.tree_model_width(cells)
     assert model_w == len('sonnet')
     l_short = strip_ansi(_r.subagent_row(short, 136, twoline=True, tree_single=True, tree_model_w=model_w))
@@ -1558,14 +1635,16 @@ def test_build_wide_tree_mode_renders_branches(monkeypatch: pytest.MonkeyPatch) 
     out     = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
     kid_lines = [ln for ln in out if 'kid-one' in ln or 'kid-two' in ln]
     assert len(kid_lines) == 2                     # one line per subagent
-    assert '├ ' in kid_lines[0] and 'kid-one' in kid_lines[0] and 'Bash[' in kid_lines[0]
-    assert '└ ' in kid_lines[1] and 'kid-two' in kid_lines[1] and 'Read[' in kid_lines[1]
+    assert ' ├─── ' in kid_lines[0] and 'kid-one' in kid_lines[0] and 'Bash[' in kid_lines[0]
+    assert ' └─── ' in kid_lines[1] and 'kid-two' in kid_lines[1] and 'Read[' in kid_lines[1]
     # tree mode stacks single-column even above TWO_COL_SUBAGENT_WIDTH; the root
     # is a single line carrying its own activity, no separate continuation row.
+    # The root branches off the implicit main thread and — as the sole
+    # top-level agent with two children — gets its own '└┬' elbow.
     root_lines = [ln for ln in out if 'root-agent' in ln]
-    assert len(root_lines) == 1 and '├ ' not in root_lines[0] and 'Task[' in root_lines[0]
-    # Description and activity columns line up across depths: root (no
-    # prefix, longer type name) vs the indented children (shorter names).
+    assert len(root_lines) == 1 and '└┬─ ' in root_lines[0] and 'Task[' in root_lines[0]
+    # Description and activity columns line up across depths: root (its own
+    # elbow, longer type name) vs the indented children (shorter names).
     all_rows  = root_lines + kid_lines
     desc_cols = [ln.index(' · ') for ln in all_rows]
     assert len(set(desc_cols)) == 1, f'description column drifted: {desc_cols}'
@@ -1836,7 +1915,7 @@ def test_header_labels_anchor_over_measured_columns() -> None:
     # data rows use — never a hardcoded guess.
     from yas.render.metrics import subagent_cluster_field_offsets, subagent_cluster_width
     root = _make_tree_sub('agent-a', agent_type='spec-implementer')
-    cells = [(root, '')]
+    cells = [(root, '', 0)]
     model_w  = layout.tree_model_width(cells)
     lines_w  = layout.tree_lines_width(cells, {})
     cluster_w = subagent_cluster_width(lines_w)
@@ -1858,7 +1937,7 @@ def test_tree_lines_width_measures_cohort_max() -> None:
     a.jsonl_path = 'a.jsonl'
     b = _make_tree_sub('agent-b', parent_id='a')
     b.jsonl_path = 'b.jsonl'
-    cells = [(a, ''), (b, '')]
+    cells = [(a, '', 0), (b, '', 0)]
     per_agent = {a.jsonl_path: (50, 194), b.jsonl_path: (3, 0)}
     assert layout.tree_lines_width(cells, per_agent) == len(fmt_tok(194))  # '194' -> 3
     # A cohort with no lines data at all falls back to 1 (matches the blank
@@ -1883,7 +1962,7 @@ def test_tree_lines_w_tightens_gap_vs_hardcoded_five() -> None:
     line_default = strip_ansi(_r.subagent_row(
         sub, 140, twoline=True, session_inout=si, tree_single=True, lines=(50, 194),
     ).split('\n')[0])
-    measured_w = layout.tree_lines_width([(sub, '')], {sub.jsonl_path: (50, 194)})
+    measured_w = layout.tree_lines_width([(sub, '', 0)], {sub.jsonl_path: (50, 194)})
     line_measured = strip_ansi(_r.subagent_row(
         sub, 140, twoline=True, session_inout=si, tree_single=True, lines=(50, 194),
         tree_lines_w=measured_w,
@@ -1907,7 +1986,7 @@ def test_tree_lines_w_alignment_holds_across_mixed_digit_widths() -> None:
     short.jsonl_path = 'short.jsonl'
     long  = _make_tree_sub('agent-b', parent_id='a')
     long.jsonl_path = 'long.jsonl'
-    cells = [(short, ''), (long, '')]
+    cells = [(short, '', 0), (long, '', 0)]
     per_agent = {short.jsonl_path: (5, 0), long.jsonl_path: (500, 12)}
     w = layout.tree_lines_width(cells, per_agent)
     si = 1_000_000
@@ -2032,6 +2111,39 @@ def test_tree_single_name_and_description_are_italic() -> None:
     line1 = _r.subagent_row(sub, 136, twoline=True, tree_single=True).split('\n')[0]
     assert f'{ITALIC}spec-implementer' in line1
     assert f'{ITALIC}Implement task 4' in line1
+
+
+def test_tree_single_depth0_name_is_bold_not_italic() -> None:
+    # Top-level agents (tree_depth 0 — direct children of the implicit main
+    # thread) render the agent name BOLD instead of ITALIC.
+    sub = _make_sub(agent_type='spec-implementer', description='Sidechain work')
+    line1 = _r.subagent_row(
+        sub, 156, twoline=True, tree_single=True, tree_prefix='├── ', tree_depth=0,
+    ).split('\n')[0]
+    assert f'{BOLD}spec-implementer' in line1
+    assert f'{ITALIC}spec-implementer' not in line1
+
+
+def test_tree_single_depth1_plus_name_stays_italic() -> None:
+    # Descendants of a top-level agent (tree_depth 1+) keep the
+    # pre-existing ITALIC treatment.
+    sub = _make_sub(agent_type='general-purpose', description='Sidechain section')
+    line1 = _r.subagent_row(
+        sub, 156, twoline=True, tree_single=True, tree_prefix='├── ', tree_depth=1,
+    ).split('\n')[0]
+    assert f'{ITALIC}general-purpose' in line1
+    assert f'{BOLD}general-purpose' not in line1
+
+
+def test_tree_single_no_tree_depth_stays_italic() -> None:
+    # A tree row rendered without an explicit tree_depth (the default,
+    # None) falls back to ITALIC rather than being mistaken for depth 0.
+    sub = _make_sub(agent_type='fork', description='grandchild work')
+    line1 = _r.subagent_row(
+        sub, 156, twoline=True, tree_single=True, tree_prefix=' └─ ',
+    ).split('\n')[0]
+    assert f'{ITALIC}fork' in line1
+    assert f'{BOLD}fork' not in line1
 
 
 def test_one_line_collapse_name_is_italic() -> None:

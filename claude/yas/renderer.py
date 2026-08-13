@@ -901,6 +901,7 @@ class Renderer:
         session_inout: int = 0,
         stats_col: int | None = None,
         tree_prefix: str = '',
+        tree_depth: int | None = None,
         tree_single: bool = False,
         tree_desc_col: int | None = None,
         tree_activity_col: int | None = None,
@@ -924,6 +925,16 @@ class Renderer:
         # `tree_desc_col`/`tree_activity_col` (already absolute, row-start-
         # relative offsets per `layout.tree_columns`) are used as-is.
         prefix_w = _visible_width(tree_prefix)
+        # Top-level agents (tree_depth 0 — direct children of the implicit,
+        # never-rendered main thread) render their name BOLD instead of
+        # ITALIC; depth-1+ rows (their descendants) keep ITALIC. `tree_depth`
+        # is threaded through explicitly from `layout.subagent_cells`
+        # (`tree_order_full`'s own depth) rather than re-derived from the
+        # prefix string — every tree row's prefix now starts with an elbow
+        # glyph regardless of depth, so the glyph alone can't disambiguate.
+        # A flat (non-tree) row passes no `tree_depth` at all and falls
+        # through to ITALIC, matching its pre-existing look.
+        name_style = BOLD if tree_depth == 0 else ITALIC
         now         = time.time()
         status      = subagent_status(sub)
         is_done     = subagent_is_terminal(status)
@@ -1110,9 +1121,9 @@ class Renderer:
             # agent's timer is frozen, so keeping it in a live colour read as
             # if it were still ticking.
             if is_done:
-                front_c = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{mark(type_text)}{self.R}'
+                front_c = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow}{self.CTX_DIM}{name_style}{mark(type_text)}{self.R}'
             else:
-                front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
+                front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{name_style}{type_text}{self.R}'
             if tree_single:
                 # Model sits in the front field now (see `front_model_str`
                 # above), immediately after the name/type. The single-glyph
@@ -1366,9 +1377,9 @@ class Renderer:
             # Frozen timer and name/type both grey, same as the twoline tree
             # form above; the ✓/✗ marker below is the only field that keeps
             # done_clr, so pass-vs-fail stays readable.
-            front_n = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow_n}{self.CTX_DIM}{ITALIC}{mark(type_text)}{self.R}'
+            front_n = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow_n}{self.CTX_DIM}{name_style}{mark(type_text)}{self.R}'
         else:
-            front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{ITALIC}{type_text}{self.R}'
+            front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{name_style}{type_text}{self.R}'
         model_n_clr = self.CTX_DIM if is_done else model_clr
         if is_done:
             mid_n = f'{done_clr}{subagent_marker_glyph(status)}{self.R}'

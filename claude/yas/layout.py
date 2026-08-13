@@ -33,12 +33,19 @@ from yas.constants import (
     TOKENS_COST_MIN_WIDTH,
     TOPROW_JUSTIFY_OUTER_CAP,
     TOOL_COUNTS_LABEL,
+    TREE_PREFIX_BASE_W,
+    TREE_PREFIX_STEP_W,
     TWO_COL_WF_WIDTH,
     WORKFLOW_AGENT_CAP,
     WORKFLOW_RUN_CAP,
 )
 from yas.info import SessionView, _fmt_elapsed_clock
-from yas.info.subagents import RunningSubagent, cap_tree_groups, read_last_prompt_ts, tree_order
+from yas.info.subagents import (
+    RunningSubagent,
+    cap_tree_groups,
+    read_last_prompt_ts,
+    tree_order_full,
+)
 from yas.render.metrics import (
     subagent_cluster_field_offsets,
     subagent_cluster_width,
@@ -306,24 +313,52 @@ def select_visible_cohort(
 
 def subagent_cells(
     visible_subs: list[RunningSubagent],
-) -> list[tuple[RunningSubagent, str]]:
-    """Pair each visible subagent with its tree-branch prefix.
+) -> list[tuple[RunningSubagent, str, int]]:
+    """Pair each visible subagent with its box-drawing tree prefix and depth.
 
-    Reorders parent-first via ``tree_order`` and builds the branch prefix:
-    depth-0 roots carry none; a child gets ``'├ '`` (``'└ '`` when it is its
-    parent's last child), indented two spaces per extra nesting level.
+    Reorders parent-first via ``tree_order_full`` and draws a real connector
+    per node — including depth-0 top-level agents, which branch off the
+    main thread (an implicit parent that's never rendered as a row of its
+    own), so they draw an elbow/branch glyph exactly like any other
+    sibling group:
+
+    - one ``│``/``' '`` column per ancestor above the parent, ``│`` when
+      that ancestor has more siblings following it (the line must keep
+      running to reach them), else a blank column;
+    - the node's own elbow, ``└`` for a last child, ``├`` otherwise;
+    - the node's own branch glyph, ``┬`` when it has children, ``─`` for a
+      leaf.
+
+    Names STAIRCASE rather than all lining up in one shared column: each
+    row's raw connector (ancestor columns + elbow + branch) is padded with
+    ``─`` up to ``TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W`` (own
+    depth, not the cohort max), so a top-level agent's name starts 2
+    columns left of its own children's, which starts 2 columns left of
+    THEIR children's, and so on — the classic indented-tree look, not a
+    single shared gutter. The trailing ``int`` is the node's own
+    ``tree_order_full`` depth (0 for a top-level agent), threaded through to
+    ``Renderer.subagent_row`` as ``tree_depth`` so it can choose BOLD (depth
+    0) vs ITALIC (depth 1+) for the name without re-deriving depth by
+    sniffing the prefix string, and to callers like ``tree_columns`` that
+    need the cohort's widest prefix (the deepest row's) to anchor the
+    description/model/stats columns straight despite the staircase.
     """
-    cells: list[tuple[RunningSubagent, str]] = []
-    for sub, depth, last in tree_order(visible_subs):
-        if depth == 0:
-            prefix = ''
-        else:
-            prefix = '  ' * (depth - 1) + ('└ ' if last else '├ ')
-        cells.append((sub, prefix))
+    cells: list[tuple[RunningSubagent, str, int]] = []
+    for sub, depth, last, has_children, ancestor_continues in tree_order_full(visible_subs):
+        cols   = ''.join('│' if cont else ' ' for cont in ancestor_continues)
+        elbow  = '└' if last else '├'
+        branch = '┬' if has_children else '─'
+        raw    = cols + elbow + branch
+        # +1 reserves the single trailing separator space (not fill) ahead
+        # of the name, so the raw connector + fill + that space together
+        # land on exactly the target width.
+        target_w = TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W
+        fill     = '─' * max(0, target_w - _visible_width(raw) - 1)
+        cells.append((sub, f'{raw}{fill} ', depth))
     return cells
 
 
-def tree_desc_content_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+def tree_desc_content_width(cells: list[tuple[RunningSubagent, str, int]]) -> int:
     """Widest `sub.description` string across a tree cohort's visible rows.
 
     Used by `tree_columns` to size the description column to what the cohort
@@ -334,11 +369,11 @@ def tree_desc_content_width(cells: list[tuple[RunningSubagent, str]]) -> int:
     (unlike `last_activity`, which does), so measuring it here carries none
     of the jitter risk that measuring the activity snippet would.
     """
-    return max((_visible_width(sub.description or '') for sub, _ in cells), default=0)
+    return max((_visible_width(sub.description or '') for sub, _, _ in cells), default=0)
 
 
 def tree_columns(
-    cells: list[tuple[RunningSubagent, str]],
+    cells: list[tuple[RunningSubagent, str, int]],
     width: int,
     *,
     cluster_full_w: int = 0,
@@ -375,7 +410,7 @@ def tree_columns(
     now      = time.time()
     desc_col = 0
     desc_content_w = tree_desc_content_width(cells)
-    for sub, prefix in cells:
+    for sub, prefix, _ in cells:
         prefix_w = _visible_width(prefix)
         # dur_s is NOT fixed-width (fmt_dur grows an extra digit past 9
         # minutes/hours: '3m36s' is 5 chars, '40m23s' is 6) — measure the
@@ -432,7 +467,7 @@ def tree_columns(
     return desc_col, stats_col, activity_col
 
 
-def oneline_name_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+def oneline_name_width(cells: list[tuple[RunningSubagent, str, int]]) -> int:
     """Widest branch-prefix + type-label run across a cohort's rows.
 
     Passed to `Renderer.subagent_row` as `oneline_name_w` so the one-line
@@ -443,12 +478,12 @@ def oneline_name_width(cells: list[tuple[RunningSubagent, str]]) -> int:
     return max(
         (_visible_width(prefix)
          + min(_visible_width(subagent_type_label(sub)), SUBAGENT_NAME_MAX)
-         for sub, prefix in cells),
+         for sub, prefix, _ in cells),
         default=0,
     )
 
 
-def tree_model_width(cells: list[tuple[RunningSubagent, str]]) -> int:
+def tree_model_width(cells: list[tuple[RunningSubagent, str, int]]) -> int:
     """Widest model label actually present in this tree cohort (measured,
     not fixed).
 
@@ -460,10 +495,10 @@ def tree_model_width(cells: list[tuple[RunningSubagent, str]]) -> int:
     width sized for a worst-case label like `'sonnet[1m]'` regardless of
     cohort content. `default=0` covers the empty-cohort case.
     """
-    return max((_visible_width(model_display(sub.model)) for sub, _ in cells), default=0)
+    return max((_visible_width(model_display(sub.model)) for sub, _, _ in cells), default=0)
 
 
-def tree_lines_width(cells: list[tuple[RunningSubagent, str]], per_agent: dict[str, tuple[int, int]]) -> int:
+def tree_lines_width(cells: list[tuple[RunningSubagent, str, int]], per_agent: dict[str, tuple[int, int]]) -> int:
     """Widest `fmt_tok` string any cohort row's read/changed count needs.
 
     Passed to `Renderer.subagent_row` as `tree_lines_w` so the Lines Read/
@@ -475,7 +510,7 @@ def tree_lines_width(cells: list[tuple[RunningSubagent, str]], per_agent: dict[s
     all), so a idle row's blank-field width still matches a populated one.
     """
     widths = []
-    for sub, _ in cells:
+    for sub, _, _ in cells:
         pair = per_agent.get(sub.jsonl_path)
         if pair is None:
             continue
@@ -485,7 +520,7 @@ def tree_lines_width(cells: list[tuple[RunningSubagent, str]], per_agent: dict[s
     return max(widths, default=1)
 
 
-def oneline_right_floor(cells: list[tuple[RunningSubagent, str]], now: float | None = None) -> int:
+def oneline_right_floor(cells: list[tuple[RunningSubagent, str, int]], now: float | None = None) -> int:
     """Untruncated content width for the narrow-tier oneline subagent column.
 
     Mirrors ``Renderer.subagent_row``'s own oneline-form width formula
@@ -503,7 +538,7 @@ def oneline_right_floor(cells: list[tuple[RunningSubagent, str]], now: float | N
         return 0
     if now is None:
         now = time.time()
-    dur_w   = max(_visible_width(subagent_dur_str(sub, now)) for sub, _ in cells)
+    dur_w   = max(_visible_width(subagent_dur_str(sub, now)) for sub, _, _ in cells)
     name_w  = oneline_name_width(cells)
     model_w = tree_model_width(cells)
     # +1: the space between duration and name/elbow; +3: ' <marker> ' between
@@ -694,9 +729,9 @@ def build_narrow(
             model_w = tree_model_width(cells)
             right_lines = [
                 r.subagent_row(sub, right_w, twoline=False, session_inout=0,
-                                tree_prefix=prefix, oneline_name_w=name_w,
+                                tree_prefix=prefix, tree_depth=depth, oneline_name_w=name_w,
                                 oneline_model_w=model_w)
-                for sub, prefix in cells
+                for sub, prefix, depth in cells
             ]
             div_color = r.grad_at(divider_col - 1, width, fill=fill)
             divider   = f'{div_color}{BOX_V}{RESET}'
@@ -714,10 +749,10 @@ def build_narrow(
             cells = subagent_cells(visible_subs)
             name_w = oneline_name_width(cells)
             model_w = tree_model_width(cells)
-            for sub, prefix in cells:
+            for sub, prefix, depth in cells:
                 for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
                                            stats_col=100 if width >= 125 else None,
-                                           tree_prefix=prefix, oneline_name_w=name_w,
+                                           tree_prefix=prefix, tree_depth=depth, oneline_name_w=name_w,
                                            oneline_model_w=model_w).split('\n'):
                     rows.append(RowSpec('content', content=line))
             rows.append(RowSpec('separator_dim'))
@@ -805,10 +840,10 @@ def build_medium(
         cells = subagent_cells(visible_subs)
         name_w = oneline_name_width(cells)
         model_w = tree_model_width(cells)
-        for sub, prefix in cells:
+        for sub, prefix, depth in cells:
             for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
                                        stats_col=100 if width >= 125 else None,
-                                       tree_prefix=prefix, oneline_name_w=name_w,
+                                       tree_prefix=prefix, tree_depth=depth, oneline_name_w=name_w,
                                        oneline_model_w=model_w).split('\n'):
                 rows.append(RowSpec('content', content=line))
         rows.append(RowSpec('separator_dim'))
@@ -1509,10 +1544,10 @@ def build_wide(
                 right_cells, right_w, cluster_full_w=right_cluster_w, model_w=right_model_w,
             )
             right_lines: list[str] = []
-            for sub, prefix in right_cells:
+            for sub, prefix, depth in right_cells:
                 right_lines.extend(
                     r.subagent_row(sub, right_w, twoline=True, session_inout=session_inout,
-                                   stats_col=right_stats_col, tree_prefix=prefix,
+                                   stats_col=right_stats_col, tree_prefix=prefix, tree_depth=depth,
                                    tree_single=True, tree_desc_col=right_desc_col,
                                    tree_activity_col=right_activity_col, tree_model_w=right_model_w,
                                    tree_lines_w=right_lines_w,
@@ -1603,10 +1638,10 @@ def build_wide(
                 ])
             name_w = oneline_name_width(sub_cells)
             oneline_model_w = tree_model_width(sub_cells)
-            for sub, prefix in sub_cells:
+            for sub, prefix, depth in sub_cells:
                 for line in r.subagent_row(sub, inner, twoline=width > 100, session_inout=session_inout,
                                            stats_col=stats_col_v,
-                                           tree_prefix=prefix, tree_single=True,
+                                           tree_prefix=prefix, tree_depth=depth, tree_single=True,
                                            tree_desc_col=desc_col, tree_activity_col=activity_col,
                                            tree_model_w=model_w, tree_lines_w=lines_w,
                                            oneline_name_w=name_w, oneline_model_w=oneline_model_w,

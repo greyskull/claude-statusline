@@ -618,6 +618,50 @@ def tree_order(subs: list[RunningSubagent]) -> list[tuple[RunningSubagent, int, 
     return out
 
 
+def tree_order_full(
+    subs: list[RunningSubagent],
+) -> list[tuple[RunningSubagent, int, bool, bool, tuple[bool, ...]]]:
+    '''Like ``tree_order``, plus the extra shape info the box-drawing prefix
+    needs: whether the node itself has children, and — for each ancestor
+    between this node and the (implicit, never-rendered) main thread —
+    whether that ancestor still has siblings following it below (the
+    classic ``tree``-command rule for when an ancestor column keeps drawing
+    ``│`` vs goes blank).
+
+    Top-level agents (depth 0) branch directly off the main thread, which
+    is itself an implicit parent that's never rendered as a row — so
+    depth-0 agents are treated as siblings of each other (ordered the same
+    way ``_build_tree_index`` returns ``roots``) exactly like any other
+    sibling group, and DO get their own elbow/branch glyph. Only the main
+    thread itself contributes no prefix column.
+
+    Returns ``(sub, depth, is_last_child, has_children, ancestor_continues)``
+    tuples. ``is_last_child`` is real at every depth, including 0 (True iff
+    this is the last visible top-level agent). ``ancestor_continues`` has
+    one entry per ancestor level from depth 0 up to (not including) this
+    node's own depth. Entry ``k`` (0-indexed, ancestor at depth ``k``) is
+    ``True`` when that ancestor is *not* its own parent's/siblings-group's
+    last child (so the vertical line must keep running past that depth to
+    reach a later sibling).
+    '''
+    children, roots = _build_tree_index(subs)
+    out: list[tuple[RunningSubagent, int, bool, bool, tuple[bool, ...]]] = []
+
+    def walk(sub: RunningSubagent, depth: int, last: bool, ancestors: tuple[bool, ...]) -> None:
+        kids = children.get(id(sub), [])
+        out.append((sub, depth, last, bool(kids), ancestors))
+        # This node's own continuation (not-last) becomes an ancestor column
+        # for its children, at every depth — including depth 0, since
+        # top-level agents now draw their own elbow too.
+        child_ancestors = ancestors + (not last,)
+        for i, kid in enumerate(kids):
+            walk(kid, depth + 1, i == len(kids) - 1, child_ancestors)
+
+    for i, root in enumerate(roots):
+        walk(root, 0, i == len(roots) - 1, ())
+    return out
+
+
 def group_trees(subs: list[RunningSubagent]) -> list[list[RunningSubagent]]:
     '''Group a candidate cohort into parent-rooted trees.
 
