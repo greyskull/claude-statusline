@@ -544,3 +544,93 @@ class TestParseModelName:
         )
         assert result.rate_limits.five_hour == RateBucket(used_percentage=33.0, resets_at=1700000001)
         assert result.rate_limits.seven_day == RateBucket(used_percentage=10.5, resets_at=1700000002)
+
+
+class TestModelFormShortHelpers:
+    """Pure unit tests for `render.gradient.model_form_short`/`thinking_form_short`
+    — the helpers behind `model_right_section(model_form='short')` (see the
+    layout agent's narrow-width plan/subagent side-by-side, which now
+    exercises this)."""
+
+    def test_model_form_short_family_and_version(self) -> None:
+        from yas.render.gradient import model_form_short
+        assert model_form_short('Opus 5') == 'O5'
+        assert model_form_short('Sonnet 4.6') == 'S4'
+
+    def test_model_form_short_1m_suffix(self) -> None:
+        from yas.render.gradient import model_form_short
+        assert model_form_short('Opus 5 1M') == 'O5-1m'
+
+    def test_model_form_short_no_version(self) -> None:
+        from yas.render.gradient import model_form_short
+        assert model_form_short('Haiku') == 'H'
+
+    def test_model_form_short_empty(self) -> None:
+        from yas.render.gradient import model_form_short
+        assert model_form_short('') == '?'
+
+    def test_thinking_form_short_single(self) -> None:
+        from yas.render.gradient import thinking_form_short
+        assert thinking_form_short('low') == 'l'
+        assert thinking_form_short('fast') == 'f'
+
+    def test_thinking_form_short_compound(self) -> None:
+        from yas.render.gradient import thinking_form_short
+        assert thinking_form_short('low/fast') == 'l/f'
+
+    def test_thinking_form_short_empty(self) -> None:
+        from yas.render.gradient import thinking_form_short
+        assert thinking_form_short('') == ''
+
+
+class TestModelRightSectionShortForm:
+    """`model_right_section(model_form='short', include_7d=...)` — the frozen
+    kwargs the layout agent's shed ladder calls under width pressure."""
+
+    def test_model_form_short_abbreviates_pill_text(self) -> None:
+        r = Renderer()
+        _h5h, _h7d, right, _w = r.model_right_section(
+            'Opus 5 1M', 'low', RateLimits(), model_form='short',
+        )
+        stripped = strip_ansi(right)
+        assert 'O5-1m' in stripped
+        assert '(l)' in stripped
+        assert 'Opus 5' not in stripped
+
+    def test_model_form_short_is_narrower_than_full(self) -> None:
+        r = Renderer()
+        _h5h, _h7d, _right_full, w_full = r.model_right_section(
+            'Opus 5 1M', 'low', RateLimits(), model_form='full',
+        )
+        _h5h, _h7d, _right_short, w_short = r.model_right_section(
+            'Opus 5 1M', 'low', RateLimits(), model_form='short',
+        )
+        assert w_short < w_full
+
+    def test_model_form_defaults_to_full(self) -> None:
+        r = Renderer()
+        default = r.model_right_section('Opus 5 1M', 'low', RateLimits())
+        explicit_full = r.model_right_section('Opus 5 1M', 'low', RateLimits(), model_form='full')
+        assert default == explicit_full
+
+    def test_include_7d_false_zeroes_helper_7d(self) -> None:
+        r = Renderer()
+        rate = RateLimits(seven_day=RateBucket(used_percentage=42.0, resets_at=1_700_000_000))
+        _h5h, h7d_on, _right, _w = r.model_right_section(
+            'Sonnet 4.6', '', rate, include_7d=True,
+        )
+        _h5h, h7d_off, _right, _w = r.model_right_section(
+            'Sonnet 4.6', '', rate, include_7d=False,
+        )
+        assert h7d_on != ''
+        assert h7d_off == ''
+
+    def test_include_7d_true_still_respects_content_gate(self) -> None:
+        # include_7d=True (the default) does not manufacture a 7d helper when
+        # there's no 7d data at all -- the content-driven has_7d gate in
+        # `_rate_helpers` still applies first.
+        r = Renderer()
+        _h5h, h7d, _right, _w = r.model_right_section(
+            'Sonnet 4.6', '', RateLimits(), include_7d=True,
+        )
+        assert h7d == ''

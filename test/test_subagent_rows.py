@@ -12,6 +12,7 @@ import yas.info.subagents as subagents_mod
 from yas.config import Config
 
 from yas.constants import (
+    ELLIPSIS,
     GLYPH_REPLYING,
     ITALIC,
     STRIKE,
@@ -267,6 +268,9 @@ def test_shed_order_lines_then_tok_narrow_range() -> None:
 
 
 def test_shed_all_levels_reachable() -> None:
+    # Decision 10 inverted: tok + loc are now the PROTECTED unit (never shed
+    # independently or together) — model is the only field this cluster ever
+    # drops. lines/tok therefore stay present at every width in this sweep.
     sub = _make_sub(agent_type='general-purpose', description='x' * 80,
                     total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
@@ -275,21 +279,28 @@ def test_shed_all_levels_reachable() -> None:
     for w in range(30, 80):
         plain = strip_ansi(_two(sub, w, session_inout=si, lines=(5, 3))[0])
         seen.add((_has_lines_field(plain), tok in plain))
-    assert (True, True) in seen    # nothing shed
-    assert (False, True) in seen   # lines shed, tok kept
-    assert (False, False) in seen  # lines and tok shed
+    assert seen == {(True, True)}  # lines + tok never shed, at any width
 
 
-def test_shed_model_and_duration_always_kept() -> None:
+def test_shed_model_and_duration_kept_duration_never_shed() -> None:
+    # Duration is never shed. Model is now the field this cluster sheds under
+    # width pressure (inverted Decision 10) -- it survives at generous widths
+    # and is the first thing dropped as the row narrows.
     sub = _make_sub(agent_type='general-purpose', description='x' * 80,
                     first_timestamp=time.time() - 47, model='claude-sonnet-4-6',
                     total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
+    seen_model_present = seen_model_absent = False
     for w in range(30, 80):
         line1, _ = _two(sub, w, session_inout=si)
         plain = strip_ansi(line1)
-        assert 'sonnet' in plain, f'width={w} dropped model'
         assert '0:47' in plain, f'width={w} dropped duration'
+        if 'sonnet' in plain:
+            seen_model_present = True
+        else:
+            seen_model_absent = True
+    assert seen_model_present  # kept at generous widths
+    assert seen_model_absent   # shed under pressure (was never true pre-inversion)
 
 
 # D2. Line-1 stats anchoring (stats_col) -------------------------------------
@@ -613,6 +624,74 @@ def test_one_line_done_frozen_duration() -> None:
     sub = _make_done_sub()
     out = strip_ansi(_one(sub))
     assert '1:30' in out
+
+
+# E3. LOC (opportunistic, oneline form) ---------------------------------------
+#
+# The oneline branch has no reserved LOC column (unlike twoline/tree_single,
+# which always reserves it) — LOC only appears once there's genuine slack
+# past the (already-safe) front field, using the same '<read> / <written>'
+# format as the twoline form. Threshold determined empirically (see the
+# renderer-precedence report addendum) for this fixture: a short
+# ('grep-bot'/'haiku', oneline_name_w=8, oneline_model_w=5) cohort-aligned
+# row first shows LOC cleanly at content_width=44; nothing below that width
+# shows it, and no width in the sweep garbles (no doubled ellipsis).
+
+def _make_loc_sub(**kw) -> RunningSubagent:
+    defaults = dict(agent_type='grep-bot', model='claude-haiku-4-5',
+                    last_activity=('tool_use', 'Bash', {'command': 'pytest -q'}))
+    defaults.update(kw)
+    return _make_sub(**defaults)
+
+
+def test_one_line_loc_absent_below_threshold_no_garbling() -> None:
+    sub = _make_loc_sub()
+    for w in range(24, 44):
+        out = strip_ansi(_r.subagent_row(
+            sub, w, twoline=False, lines=(1234, 567),
+            oneline_name_w=8, oneline_model_w=5,
+        ))
+        assert ' / ' not in out, f'width={w}: LOC shown below the measured threshold'
+        # No doubled-ellipsis garbling: at most one '…' run in the front field.
+        assert out.count(ELLIPSIS) <= 2, f'width={w}: garbled ({out!r})'
+
+
+def test_one_line_loc_present_at_and_above_threshold() -> None:
+    sub = _make_loc_sub()
+    for w in range(44, 60):
+        out = strip_ansi(_r.subagent_row(
+            sub, w, twoline=False, lines=(1234, 567),
+            oneline_name_w=8, oneline_model_w=5,
+        ))
+        assert ' / ' in out, f'width={w}: LOC missing at/above the measured threshold'
+        assert '1.23K / 567' in out
+
+
+def test_one_line_loc_absent_without_lines_data() -> None:
+    # No `lines=` at all -- LOC never appears regardless of width, even well
+    # past the threshold.
+    sub = _make_loc_sub()
+    out = strip_ansi(_r.subagent_row(sub, 60, twoline=False, oneline_name_w=8, oneline_model_w=5))
+    assert ' / ' not in out
+
+
+def test_one_line_loc_absent_when_lines_are_zero() -> None:
+    # (0, 0) is treated the same as "no data" -- opportunistic, not forced.
+    sub = _make_loc_sub()
+    out = strip_ansi(_r.subagent_row(
+        sub, 60, twoline=False, lines=(0, 0), oneline_name_w=8, oneline_model_w=5,
+    ))
+    assert ' / ' not in out
+
+
+def test_one_line_loc_never_overflows_target_width() -> None:
+    sub = _make_loc_sub()
+    for w in range(24, 70):
+        out = strip_ansi(_r.subagent_row(
+            sub, w, twoline=False, lines=(1234, 567),
+            oneline_name_w=8, oneline_model_w=5,
+        ))
+        assert _visible_width(out) == w, f'width={w}: row padding/width mismatch ({out!r})'
 
 
 def test_one_line_done_no_activity_verb() -> None:
@@ -1163,6 +1242,29 @@ def test_tree_single_activity_column_aligned_across_prefix_depths() -> None:
     assert len(set(cols)) == 1, f'activity column drifted across prefixes: {cols}'
 
 
+def test_tree_single_type_and_model_never_shed_by_width() -> None:
+    # Full precedence (highest-retained first): (1) timer+tok+loc protected,
+    # (2) type, (3) model, (4) log, (5) name(description). In tree_single
+    # mode, type and model are baked into the front field (never width-shed
+    # at all — only capped at a fixed SUBAGENT_NAME_MAX/tree_model_w), so
+    # they must survive at every width the row is asked to render at, even
+    # widths so narrow the log/description have nothing left to give.
+    sub = _make_tree_sub('agent-a', agent_type='spec-author', model='claude-sonnet-4-6',
+                         description='x' * 40,
+                         last_activity=('tool_use', 'Bash', {'command': 'x'}))
+    cells = [(sub, '')]
+    model_w = layout.tree_model_width(cells)
+    for width in range(40, 140, 5):
+        desc_col, stats_col, activity_col = layout.tree_columns(cells, width, model_w=model_w)
+        line = strip_ansi(_r.subagent_row(
+            sub, width, twoline=True, tree_single=True,
+            stats_col=stats_col, tree_desc_col=desc_col,
+            tree_activity_col=activity_col, tree_model_w=model_w,
+        ))
+        assert 'spec-author' in line, f'width={width}: type shed'
+        assert 'sonnet' in line, f'width={width}: model shed'
+
+
 def test_tree_columns_common_anchor_across_names_and_prefixes() -> None:
     # layout.tree_columns: desc_col is the widest (prefix + duration + type)
     # across the cohort, so the shortest names/prefixes get padded up to it.
@@ -1657,24 +1759,21 @@ def test_lines_field_cluster_width_identical_idle_vs_populated() -> None:
     assert _visible_width(line1_idle) == _visible_width(line1_full) == 136
 
 
-def test_shed_order_lines_then_tok() -> None:
-    # Shed ladder under decreasing width: lines is dropped first, then tok —
-    # never lines kept while tok is shed.
+def test_shed_order_lines_and_tok_protected_together() -> None:
+    # Inverted Decision 10: lines + tok form one protected unit and are
+    # never shed, together or independently, at any width in this sweep.
     sub = _make_sub(agent_type='general-purpose', description='x' * 80,
                     total_input=12345, output=678)
     si  = (sub.total_input + sub.output) * 2
     tok = fmt_tok(sub.total_input)
-    valid = {(True, True), (False, True), (False, False)}
     seen = set()
     for w in range(30, 90):
         line1, _ = _two(sub, w, session_inout=si, lines=(1234, 567))
         plain = strip_ansi(line1)
         state = (_has_lines_field(plain), tok in plain)
-        assert state in valid, f'width={w}: out-of-order shed {state}'
+        assert state == (True, True), f'width={w}: protected lines/tok shed {state}'
         seen.add(state)
-    # every rung of the ladder is reachable across this width sweep
-    assert (True, True) in seen
-    assert (False, True) in seen
+    assert seen == {(True, True)}
 
 
 def test_tok_field_has_no_percent_suffix() -> None:

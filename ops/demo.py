@@ -1079,6 +1079,25 @@ SCENARIOS: list[ScenarioConfig] = [
         cache_anchor_secs_ago = 240.0,
     ),
     ScenarioConfig(
+        # Exercises the top-row shed ladder's last-resort rung
+        # (model_form='short', see layout.py build_wide's `model_form` local):
+        # a long display name + effort parenthetical ('Opus 5 1M (low)') is
+        # wide enough that narrowing forces the pill down to 'O5-1m (l)'
+        # before the 5h/7d stats would otherwise get dropped. See
+        # render/gradient.py model_form_short()/thinking_form_short().
+        name        = 'long-model-name',
+        model_id    = 'claude-opus-5[1m]',
+        model_name  = 'Opus 5 Extended Thinking Reasoning Deep Research Preview 1M',
+        effort      = 'low',
+        thinking    = True,
+        context_pct = 0.30,
+        skills      = ['grill-me', 'caveman'],
+        plugins     = ['openspec@0.1.0'],
+        five_hour_pct = 35.0,
+        seven_day_pct = 24.0,
+        cache_anchor_secs_ago = 60.0,
+    ),
+    ScenarioConfig(
         name        = 'config-error',
         model_id    = 'claude-opus-4-7',
         model_name  = 'Opus 4.7',

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import NamedTuple
 
 from yas.config import Config
 from yas.constants import (
@@ -16,10 +17,13 @@ from yas.constants import (
     GLYPH_RENAMED,
     GLYPH_WF_DIVIDER,
     LINES_LABEL,
+    NARROW_SIDE_BY_SIDE_MIN_WIDTH,
+    PLAN_ONELINE_MIN_W,
     RESET,
     SUBAGENT_DESC_FLOOR,
     SUBAGENT_DISPLAY_CAP,
     SUBAGENT_NAME_MAX,
+    SUBAGENT_ONELINE_MIN_W,
     SUBAGENT_RETENTION_SECONDS,
     SUBAGENT_STATS_ACTIVITY_GAP,
     subagent_is_terminal,
@@ -27,6 +31,7 @@ from yas.constants import (
     SUBAGENT_TREE_PLAN_PAD,
     SUBAGENT_TREE_PLAN_WIDTH,
     TOKENS_COST_MIN_WIDTH,
+    TOPROW_JUSTIFY_OUTER_CAP,
     TOOL_COUNTS_LABEL,
     TWO_COL_WF_WIDTH,
     WORKFLOW_AGENT_CAP,
@@ -53,6 +58,27 @@ _DIRTY_CHARS = frozenset('•*-' + GLYPH_RENAMED)
 
 # The branch-separator glyph used in path_git / path_git_compact.
 _BRANCH_SEP = '∈'   # U+2208 ELEMENT OF (plain Unicode, not PUA)
+
+
+class _TopRowShed(NamedTuple):
+    """Winning state from `build_wide`'s top-row shed ladder.
+
+    Every return point in `_resolve_toprow_shed` constructs one of these
+    explicitly, so the "does the loop always assign before use" question is
+    answered by the return type itself rather than left for a reader (or
+    mypy) to prove by tracing `break`/`continue` edges.
+    """
+    line_path:         str
+    target_w:          int
+    right_w:           int
+    right_text:        str
+    helper_5h:         str
+    helper_7d:         str
+    has_7d:            bool
+    cache_content:     str
+    cache_section_w:   int
+    elapsed_content:   str
+    elapsed_section_w: int
 
 
 def _ansi_byte_offset(ansi: str, plain_idx: int) -> int:
@@ -153,6 +179,32 @@ def plan_content_width(lines: list[str]) -> int:
     return max((_visible_width(_ANSI_RE.sub('', line).rstrip()) for line in lines), default=0)
 
 
+def _fit_column(line: str, col_w: int) -> str:
+    """Pad or truncate *line* to exactly ``col_w`` visible columns.
+
+    A rendered column is normally already `<= col_w` (it was asked to render
+    at that width), and the common case is a pad. But some renderer helpers
+    apply their own internal floor to a sub-field — e.g. `Renderer.task_row`'s
+    per-item ``avail = max(1, field_w - _visible_width(num))`` guarantees at
+    least 1 subject character even when the numbered-prefix alone already
+    consumes the whole `field_w` — which can render 1 column WIDER than the
+    `content_width` it was handed. Left unguarded, that single overlong row
+    desyncs the shared column width every other row in the block agrees on,
+    which is exactly what shifts the interior divider `│` by a column for
+    just the affected rows (header/border stay put; only the overlong rows
+    drift). Truncating here keeps every row in the zipped block agreeing on
+    the same column width regardless of what an individual renderer call
+    produced, without touching the renderer.
+    """
+    vis = _visible_width(line)
+    if vis > col_w:
+        cut = _ansi_byte_offset(line, col_w)
+        return f'{line[:cut]}{RESET}'
+    if vis < col_w:
+        return f'{line}{" " * (col_w - vis)}'
+    return line
+
+
 def zip_columns(
     left_lines: list[str],
     right_lines: list[str],
@@ -167,15 +219,19 @@ def zip_columns(
     column with blank rows of its own width so the divider and the right edge
     stay straight. Every combined row is ``{left} {divider} {right}`` — one pad
     space on each side of the gradient ``│`` — and spans the full inner width.
-    Padding uses ``_visible_width`` so ANSI/glyph runs don't skew the columns.
+    Width is enforced via ``_fit_column`` (pads short lines, truncates any
+    that overran their column) so ``left_w``/``right_w`` are a hard contract
+    every zipped row agrees on — see ``_fit_column`` for why a row can arrive
+    overlong. Padding/truncation uses ``_visible_width`` so ANSI/glyph runs
+    don't skew the columns.
     """
     height = max(len(left_lines), len(right_lines))
     rows: list[str] = []
     for i in range(height):
         left  = left_lines[i]  if i < len(left_lines)  else ''
         right = right_lines[i] if i < len(right_lines) else ''
-        left  = f'{left}{" " * max(0, left_w - _visible_width(left))}'
-        right = f'{right}{" " * max(0, right_w - _visible_width(right))}'
+        left  = _fit_column(left, left_w)
+        right = _fit_column(right, right_w)
         rows.append(f'{left} {divider} {right}')
     return rows
 
@@ -341,10 +397,13 @@ def tree_columns(
     # Everything after `desc_col + 3` (the ' · ' before the description) is up
     # for grabs between the description, the cluster, and the activity gap.
     # Reserve the full cluster plus a minimal activity gap (room for at least
-    # the model-only fallback) first; whatever's left is what the description
-    # is allowed to grow into, capped by what it actually needs so a short
-    # cohort of descriptions never gets padded out into a gutter.
-    activity_floor = 16  # model-only fallback + a breath of activity text
+    # a bare activity glyph plus a few characters of text) first; whatever's
+    # left is what the description is allowed to grow into, capped by what it
+    # actually needs so a short cohort of descriptions never gets padded out
+    # into a gutter. (The model field lives in the front cluster now, not
+    # here — see `render.metrics.subagent_cluster_width` — so this floor is
+    # sized for the activity segment alone, independent of tok/loc.)
+    activity_floor = 16  # bare activity glyph + a few characters of text
     room_after_desc_col = max(0, width - desc_col - 3)
     room_for_desc        = max(0, room_after_desc_col - cluster_full_w - activity_floor)
     desc_w = min(desc_content_w, max(SUBAGENT_DESC_FLOOR, room_for_desc))
@@ -357,8 +416,8 @@ def tree_columns(
     # didn't need all its "room for full cluster" allotment — hand the extra
     # space straight to the activity column instead of leaving it as a dead
     # gutter between the description and the cluster. Floored at
-    # `stats_col + activity_floor` (room for the model-only fallback) and
-    # capped at the row's own width.
+    # `stats_col + activity_floor` (room for a bare activity glyph plus a few
+    # characters of text) and capped at the row's own width.
     activity_col = max(stats_col + activity_floor, stats_col + cluster_full_w + SUBAGENT_STATS_ACTIVITY_GAP)
     activity_col = min(activity_col, width)  # never past the row's target width
     # Degenerate very-narrow case: clamping activity_col down to `width` can
@@ -424,6 +483,33 @@ def tree_lines_width(cells: list[tuple[RunningSubagent, str]], per_agent: dict[s
         widths.append(len(fmt_tok_fixed(read)))
         widths.append(len(fmt_tok_fixed(changed)))
     return max(widths, default=1)
+
+
+def oneline_right_floor(cells: list[tuple[RunningSubagent, str]], now: float | None = None) -> int:
+    """Untruncated content width for the narrow-tier oneline subagent column.
+
+    Mirrors ``Renderer.subagent_row``'s own oneline-form width formula
+    (``<dur> <elbow> <name> <marker> <model> · <tok>``) so the caller can hand
+    the column exactly the width needed to render every row's duration, type
+    label, and model with no truncation — before falling back to letting the
+    row's own internal ladder shrink name/model under further pressure. Used
+    by ``build_narrow``'s plan/subagent side-by-side split to give the
+    subagent column priority 3 (type, model) precedence over the plan
+    column's priority 4 (item name): the plan column is squeezed toward its
+    own floor first, and this column only drops below its natural width once
+    that floor is hit and there still isn't enough room.
+    """
+    if not cells:
+        return 0
+    if now is None:
+        now = time.time()
+    dur_w   = max(_visible_width(subagent_dur_str(sub, now)) for sub, _ in cells)
+    name_w  = oneline_name_width(cells)
+    model_w = tree_model_width(cells)
+    # +1: the space between duration and name/elbow; +3: ' <marker> ' between
+    # name and model; +8: ' · ' plus the fixed 5-wide tok field (mirrors
+    # `tok_n_w` in `Renderer.subagent_row`'s oneline branch).
+    return dur_w + 1 + name_w + 3 + model_w + 8
 
 
 def workflow_divider_col(width: int) -> int:
@@ -576,25 +662,75 @@ def build_narrow(
             RowSpec('content', content=full),
             RowSpec('separator_dim'),
         ]
-    if tasks.is_visible():
-        for line in r.task_row(tasks, width - 4, compact=True):
-            rows.append(RowSpec('content', content=line))
-        rows.append(RowSpec('separator_dim'))
-    if visible_subs:
+    # Plan + subagent side-by-side (narrow tier). Declarative cross-column
+    # precedence (highest retained first): 1 subagent timer/tokens/LOC,
+    # 2 plan timers/tickboxes/numbers, 3 subagent type/model, 4 plan item
+    # name, 5 remaining subagent fields (activity/log). Both `task_row`
+    # (non-compact) and `subagent_row`'s oneline form already shed their OWN
+    # elastic field (item name; type/model then emergency-ellipsis) ahead of
+    # their own protected fields as their column narrows, and the activity/
+    # log segment (item 5) is opportunistic — it only appears with >=12 cols
+    # of slack past the token field, so at these column widths it is already
+    # absent in practice. What's left to drive here is the split between the
+    # two columns: give the subagent column its untruncated (type+model
+    # visible in full) floor first, so the plan column's item name is what
+    # shrinks under pressure (4 sheds before 3) — matching the required
+    # "plan item name -> subagent type+model" drop order.
+    side_by_side = False
+    tail_ups: tuple[int, ...] = ()
+    if tasks.is_visible() and visible_subs:
+        inner = width - 4
+        avail = inner - 3  # minus the '  │  '-style one-space-each-side divider
         cells = subagent_cells(visible_subs)
-        name_w = oneline_name_width(cells)
-        model_w = tree_model_width(cells)
-        for sub, prefix in cells:
-            for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
-                                       stats_col=100 if width >= 125 else None,
-                                       tree_prefix=prefix, oneline_name_w=name_w,
-                                       oneline_model_w=model_w).split('\n'):
+        right_floor = oneline_right_floor(cells)
+        if width >= NARROW_SIDE_BY_SIDE_MIN_WIDTH:
+            side_by_side = True
+            right_w = min(right_floor, avail - PLAN_ONELINE_MIN_W)
+            right_w = max(right_w, SUBAGENT_ONELINE_MIN_W)
+            left_w  = avail - right_w
+            divider_col = 3 + left_w + 1  # 1-indexed visual column of the │
+            left_lines  = r.task_row(tasks, left_w)
+            name_w  = oneline_name_width(cells)
+            model_w = tree_model_width(cells)
+            right_lines = [
+                r.subagent_row(sub, right_w, twoline=False, session_inout=0,
+                                tree_prefix=prefix, oneline_name_w=name_w,
+                                oneline_model_w=model_w)
+                for sub, prefix in cells
+            ]
+            div_color = r.grad_at(divider_col - 1, width, fill=fill)
+            divider   = f'{div_color}{BOX_V}{RESET}'
+            rows.append(RowSpec('separator_dim', downs=(divider_col,)))
+            for line in zip_columns(left_lines, right_lines, left_w, right_w, divider):
                 rows.append(RowSpec('content', content=line))
-        rows.append(RowSpec('separator_dim'))
+            tail_ups = (divider_col,)
+
+    if not side_by_side:
+        if tasks.is_visible():
+            for line in r.task_row(tasks, width - 4, compact=True):
+                rows.append(RowSpec('content', content=line))
+            rows.append(RowSpec('separator_dim'))
+        if visible_subs:
+            cells = subagent_cells(visible_subs)
+            name_w = oneline_name_width(cells)
+            model_w = tree_model_width(cells)
+            for sub, prefix in cells:
+                for line in r.subagent_row(sub, width - 4, twoline=width > 100, session_inout=0,
+                                           stats_col=100 if width >= 125 else None,
+                                           tree_prefix=prefix, oneline_name_w=name_w,
+                                           oneline_model_w=model_w).split('\n'):
+                    rows.append(RowSpec('content', content=line))
+            rows.append(RowSpec('separator_dim'))
     wf_rows = build_workflow_rows(view, width, r, per_agent=False)
     if wf_rows:
         rows.extend(wf_rows)
-        rows.append(RowSpec('separator_dim'))
+        rows.append(RowSpec('separator_dim', ups=tail_ups))
+        tail_ups = ()
+    if tail_ups:
+        # No workflow rows to close the divider's elbow: fold the closing ┴
+        # into the context line's own leading edge via a bare separator_dim,
+        # matching the wide layout's pending_ups pattern.
+        rows.append(RowSpec('separator_dim', ups=tail_ups))
     rows.append(RowSpec('content', content=line_context))
     rows.append(RowSpec('bottom_border'))
     append_error_row(rows, view.cfg, width, r)
@@ -718,12 +854,6 @@ def build_wide(
     skill_display = ','.join(s.split(':', 1)[-1] for s in skills.names)
     session_inout = view.session_inout
 
-    helper_5h, helper_7d, right_text, right_w = r.model_right_section(
-        session.model_name, session.model_thinking, session.rate_limits,
-        session.effort.level if session.thinking.enabled else '',
-        fast_mode=session.fast_mode,
-        show_icons=view.cfg.show_icons,
-    )
     # Reading `view.tool_counts` here forces its transcript scan on every wide
     # render (previously only when `cfg.show_tool_uses` was on, for the
     # per-tool row further down) — needed to feed the session-total lines
@@ -749,6 +879,20 @@ def build_wide(
     plugins_line = r.plugins_skills(len(skills.names), skill_display, session.workspace.plugins, show_icons=view.cfg.show_icons)
     # border_line pads to width - 3 ('│ ' + content + '│') but never truncates;
     # a long plugin list would overflow the box, so clip it here.
+    #
+    # Width-gap audit Finding A: at very wide boxes this row's trailing pad
+    # (skills/plugin names are short, fixed content, already shown in full)
+    # grows into a large blank run — up to ~282 cols at width=350. Considered
+    # centering it under `cfg.justify` (implemented and measured); reverted:
+    # centering only relocates the dead space into two roughly-equal runs,
+    # it does not reduce it (measured 283 total post-centering vs 282
+    # before, at width=350 — a wash, not an improvement), and each half is
+    # still individually a "large gap" by the audit's own threshold. There is
+    # no more information this row can show — the names are already fully
+    # rendered — so there is no fix here that doesn't either invent new
+    # content (out of scope) or edit `border_line`'s own padding behaviour
+    # (a different, riskier layer). Leaving this row's original left-aligned
+    # + trailing-pad behaviour as-is.
     plugins_avail = width - 3
     if _visible_width(plugins_line) > plugins_avail:
         cut = _ansi_byte_offset(plugins_line, plugins_avail - 1)
@@ -770,52 +914,144 @@ def build_wide(
     spec = LayoutSpec(width=width, fill=fill, session_id=session.session_id)
     rows: list[RowSpec] = []
 
-    vsep_w     = 5
-    helper_5h_w = _visible_width(helper_5h)
-    has_7d      = bool(helper_7d)
-    helper_7d_w = _visible_width(helper_7d) if has_7d else 0
-    helper_w    = helper_5h_w + (4 + helper_7d_w if has_7d else 0)
+    vsep_w = 5
 
-    # Cache countdown section: glyph + time, vsep-delimited, sheds before path truncates.
-    cache_cd = view.cache_countdown
-    cache_section_w = 0      # vsep_w + glyph+space+time width; 0 when shed/hidden
-    cache_content   = ''     # rendered text (no vsep); empty when not shown
-    if cache_cd is not None:
-        _cache_txt, _cache_w = r.cache_section(*cache_cd, show_icons=view.cfg.show_icons)
-        _cache_section_w = vsep_w + _cache_w
-        # Width-shed: drop if path would get fewer than 5 visible chars.
-        if (width - 4) - vsep_w - helper_w - _cache_section_w - right_w >= 5:
-            cache_section_w = _cache_section_w
-            cache_content   = _cache_txt
-
-    # Elapsed section: session clock + optional since-/clear timer.
-    # Degradation: both timers → clear-only → shed entirely (path protection outermost).
+    # --- Declarative top-row precedence -----------------------------------
+    # HIGHEST retained first (dropped LAST): 1 five-hour token stats,
+    # 2 cache countdown, 3 branch name, 4 dir name, 5 session timer,
+    # 6 seven-day token stats, 7 changes (dirty), 8 commit. So the drop order
+    # as width shrinks is: commit -> changes -> 7d -> timer -> dir -> branch
+    # -> cache -> 5h. Priorities 3/4/7/8 (branch/dir/changes/commit) live
+    # inside `Renderer.fit_path`'s own include/omit ladder (renderer.py) —
+    # driven here in two phases so 6/5 (7d/timer) get a chance to shed
+    # BEFORE the path itself starts shrinking past "commit+changes dropped,
+    # dir still full width" (phase 1), and only fall to the path's own
+    # compact -> branch-only -> glyph-only rungs (phase 2, `compact_only`)
+    # once 7d and the timer are both gone. Cache (2) and the model pill (1)
+    # are the last resorts, applied only once the path has hit its
+    # glyph-only floor and there is still nothing left to shed.
+    cache_cd    = view.cache_countdown
     clear_epoch = view.clear_epoch
     clear_str   = ''
     if clear_epoch is not None:
         clear_ms  = max(0.0, view.now - clear_epoch) * 1000
         clear_str = _fmt_elapsed_clock(int(clear_ms))
 
-    elapsed_content, _elapsed_cw = r.elapsed_section(elapsed, clear_str, show_icons=view.cfg.show_icons)
-    elapsed_section_w = 0
-    if elapsed or clear_str:
-        _sw = _elapsed_cw + 3
-        if (width - 4) - vsep_w - _sw - helper_w - cache_section_w - right_w >= 5:
-            elapsed_section_w = _sw
-        elif clear_str:
-            # Try clear-only (drop session timer)
-            _co, _cw = r.elapsed_section('', clear_str, show_icons=view.cfg.show_icons)
-            _sw_c = _cw + 3
-            if (width - 4) - vsep_w - _sw_c - helper_w - cache_section_w - right_w >= 5:
-                elapsed_content, _elapsed_cw = _co, _cw
-                elapsed_section_w = _sw_c
+    include_7d = True          # priority 6 — shed before the path shrinks
+    timer_mode = 'full' if (elapsed or clear_str) else 'none'  # priority 5
+    cache_on   = cache_cd is not None                          # priority 2
+    model_form = 'full'                                        # priority 1
 
-    target_w = (width - 4) - vsep_w - elapsed_section_w - helper_w - cache_section_w - right_w
-    line_path = r.fit_path(
-        session.short_pwd, git, target_w, compact_only=False,
-        show_icons=view.cfg.show_icons,
-    )
-    path_w   = _visible_width(line_path)
+    def _resolve_toprow_shed() -> _TopRowShed:
+        # Closes over `session`, `git`, `r`, `view`, `elapsed`, `clear_str`,
+        # `cache_cd`, `width`, `vsep_w` from the enclosing `build_wide` scope;
+        # `include_7d`/`timer_mode`/`cache_on`/`model_form` are the mutable
+        # shed state, local to this call.
+        include_7d_ = include_7d
+        timer_mode_ = timer_mode
+        cache_on_   = cache_on
+        model_form_ = model_form
+
+        while True:
+            helper_5h, helper_7d, right_text, right_w = r.model_right_section(
+                session.model_name, session.model_thinking, session.rate_limits,
+                session.effort.level if session.thinking.enabled else '',
+                fast_mode=session.fast_mode, show_icons=view.cfg.show_icons,
+                include_7d=include_7d_, model_form=model_form_,
+            )
+            helper_5h_w = _visible_width(helper_5h)
+            has_7d      = bool(helper_7d)
+            helper_7d_w = _visible_width(helper_7d) if has_7d else 0
+            helper_w    = helper_5h_w + (4 + helper_7d_w if has_7d else 0)
+
+            cache_content   = ''
+            cache_section_w = 0
+            if cache_on_ and cache_cd is not None:
+                _cache_txt, _cache_w = r.cache_section(*cache_cd, show_icons=view.cfg.show_icons)
+                cache_content   = _cache_txt
+                cache_section_w = vsep_w + _cache_w
+
+            if timer_mode_ == 'full':
+                elapsed_content, _elapsed_cw = r.elapsed_section(elapsed, clear_str, show_icons=view.cfg.show_icons)
+            elif timer_mode_ == 'clearonly':
+                elapsed_content, _elapsed_cw = r.elapsed_section('', clear_str, show_icons=view.cfg.show_icons)
+            else:
+                elapsed_content, _elapsed_cw = '', 0
+            elapsed_section_w = (_elapsed_cw + 3) if timer_mode_ != 'none' else 0
+
+            target_w = (width - 4) - vsep_w - elapsed_section_w - helper_w - cache_section_w - right_w
+
+            # Phase 1: try the path with dir still at full width (priorities 8/7
+            # — commit, then commit+changes — shed within this phase; the dir
+            # itself, priority 4, is not touched yet).
+            _dirfull_candidates = (
+                r.path_git(session.short_pwd, git, show_icons=view.cfg.show_icons),
+                r.path_git(session.short_pwd, git, show_commit=False, show_icons=view.cfg.show_icons),
+                r.path_git(session.short_pwd, git, show_commit=False, show_dirty=False, show_icons=view.cfg.show_icons),
+            )
+            _dirfull_fit = next((c for c in _dirfull_candidates if _visible_width(c) <= target_w), None)
+            if _dirfull_fit is not None:
+                return _TopRowShed(
+                    _dirfull_fit, target_w, right_w, right_text, helper_5h, helper_7d,
+                    has_7d, cache_content, cache_section_w, elapsed_content, elapsed_section_w,
+                )
+
+            # Dir-full path doesn't fit even with commit+changes dropped: shed
+            # the next lower-priority section (7d, then the timer) before
+            # letting the path itself shrink.
+            if include_7d_:
+                include_7d_ = False
+                continue
+            if timer_mode_ == 'full':
+                timer_mode_ = 'clearonly' if clear_str else 'none'
+                continue
+            if timer_mode_ == 'clearonly':
+                timer_mode_ = 'none'
+                continue
+
+            # 7d and the timer are both gone; the path now degrades through its
+            # own compact -> branch-only -> glyph-only ladder (priorities 4, 3).
+            _compact_path = r.fit_path(
+                session.short_pwd, git, target_w, compact_only=True,
+                show_icons=view.cfg.show_icons,
+            )
+            if _visible_width(_compact_path) <= target_w:
+                return _TopRowShed(
+                    _compact_path, target_w, right_w, right_text, helper_5h, helper_7d,
+                    has_7d, cache_content, cache_section_w, elapsed_content, elapsed_section_w,
+                )
+
+            # Even the glyph-only floor overflows: shed cache (2), then narrow
+            # the model pill (1) — the last resorts. The five-hour stats
+            # themselves are never dropped, only the pill around them.
+            if cache_on_:
+                cache_on_ = False
+                continue
+            if model_form_ == 'full':
+                model_form_ = 'short'
+                continue
+            # Nothing left to shed (extreme-narrow edge case): accept the
+            # glyph-only-floor overflow rather than fall through with no
+            # path at all — this is the guaranteed last resort.
+            return _TopRowShed(
+                _compact_path, target_w, right_w, right_text, helper_5h, helper_7d,
+                has_7d, cache_content, cache_section_w, elapsed_content, elapsed_section_w,
+            )
+
+    _shed = _resolve_toprow_shed()
+    line_path         = _shed.line_path
+    target_w          = _shed.target_w
+    right_w           = _shed.right_w
+    right_text        = _shed.right_text
+    helper_5h         = _shed.helper_5h
+    helper_7d         = _shed.helper_7d
+    has_7d            = _shed.has_7d
+    cache_content     = _shed.cache_content
+    cache_section_w   = _shed.cache_section_w
+    elapsed_content   = _shed.elapsed_content
+    elapsed_section_w = _shed.elapsed_section_w
+
+    path_w = _visible_width(line_path)
 
     # Justify: distribute horizontal slack evenly across active top-row sections
     # (path, [elapsed], 5h, [7d], [cache], last-slot). Gate on cfg.justify and
@@ -828,7 +1064,25 @@ def build_wide(
         _N           = 3 + (1 if _has_elapsed else 0) + (1 if has_7d else 0) + (1 if _has_cache else 0)
         _extra_per   = total_slack // _N
         _remainder   = total_slack % _N
-        _extras      = [_extra_per + (1 if i < _remainder else 0) for i in range(_N)]
+        # Cap every slot except the last at TOPROW_JUSTIFY_OUTER_CAP: without
+        # a cap, `total_slack` scales linearly with `width` once nothing is
+        # being shed (proven — see constants.py's docstring on this constant
+        # for the empirical A/B evidence), so an equal N-way split turns into
+        # several individually-growing, uncapped blank runs scattered across
+        # the row. Any slack a capped slot can't absorb rolls forward into
+        # the LAST slot (`last_extra`, ahead of the model pill) instead of
+        # widening its own run — so there is at most one uncapped run in this
+        # row, not N of them.
+        _extras      = []
+        _rollover    = 0
+        for i in range(_N):
+            _share = _extra_per + (1 if i < _remainder else 0) + _rollover
+            if i < _N - 1:
+                _capped   = min(TOPROW_JUSTIFY_OUTER_CAP, _share)
+                _rollover = _share - _capped
+                _extras.append(_capped)
+            else:
+                _extras.append(_share)  # last slot: uncapped, absorbs all rollover
         _idx         = 0
         path_extra   = _extras[_idx]
         _idx += 1
@@ -860,7 +1114,22 @@ def build_wide(
             h7_left  = (h7_outer + 2) // 2
             h7_right = h7_outer - h7_left
         if gap_5h != 1 or gap_7d != 1:
-            helper_5h, helper_7d = r._rate_helpers(session.rate_limits, gap_5h, gap_7d, show_icons=view.cfg.show_icons)
+            # `_rate_helpers` always computes BOTH helpers regardless of
+            # `include_7d` (that gate lives in the caller, `model_right_section`,
+            # not here) -- so unconditionally reassigning `helper_7d` from this
+            # call would resurrect a 7d section the shed loop already dropped
+            # for width (`has_7d=False`), and since `padded_7d` falls back to
+            # the raw `helper_7d` whenever h7_left/h7_right are both 0 (the
+            # not-has_7d case), that resurrected text would leak straight into
+            # `helper_text` un-padded -- silently overflowing the row by the
+            # 7d section's full width. Only accept the widened helper_7d when
+            # 7d is actually still active.
+            new_helper_5h, new_helper_7d = r._rate_helpers(
+                session.rate_limits, gap_5h, gap_7d, show_icons=view.cfg.show_icons,
+            )
+            helper_5h = new_helper_5h
+            if has_7d:
+                helper_7d = new_helper_7d
         if _has_cache:
             cache_extra = _extras[_idx]
             _idx += 1

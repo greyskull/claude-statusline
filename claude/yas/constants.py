@@ -56,6 +56,35 @@ SUBAGENT_TREE_PLAN_WIDTH = 68
 # in the tree-mode side-by-side split. `zip_columns` already puts one space on
 # each side of the `│`, so this is the extra breathing room on top of that.
 SUBAGENT_TREE_PLAN_PAD = 1
+# Narrow-tier plan + subagent side-by-side (build_narrow). Unlike the wide
+# tier's tree-mode split, both columns use their *one-line* forms
+# (task_row's non-compact per-item list, subagent_row's oneline collapse) —
+# there is no room at 40-54 total columns for the twoline tree form.
+#
+# SUBAGENT_ONELINE_MIN_W: absolute floor for the subagent (right) column
+# below which `Renderer.subagent_row`'s oneline form degrades to a double-
+# ellipsis mess (the front cluster's own emergency `_middle_ellipsis` kicks
+# in on top of the name/model fields already being crushed) rather than a
+# single clean truncation. Measured empirically: rendering a one-subagent
+# cohort (type 'Explore', model 'sonnet') at content widths 10-39 shows the
+# front cluster garble below 26 ('Exp…s… · 1.00K') and settle into a single
+# clean truncation at 26 ('Explore · s… · 1.00K'); the fully untruncated form
+# ('Explore · sonnet · 1.00K') needs 30. 26 is picked as the floor — cohorts
+# with longer type/model labels only need more, never less.
+SUBAGENT_ONELINE_MIN_W = 26
+# PLAN_ONELINE_MIN_W: floor for the plan (left) column below which the
+# per-item checklist (`task_row(..., compact=False)`) still renders something
+# legible (glyph + item number + a couple of subject characters + ellipsis)
+# rather than being crushed to an empty subject. task_row degrades gracefully
+# at any width (it never garbles like the subagent oneline form does), so
+# this floor is a readability choice, not a hard failure boundary.
+PLAN_ONELINE_MIN_W = 12
+# Total `width` floor below which build_narrow's plan + subagent split falls
+# back to stacking (plan above subagents) instead of side-by-side: the inner
+# content area (width - 4) minus the 3-col ' │ ' divider must fit both
+# column floors above. width - 4 - 3 >= PLAN_ONELINE_MIN_W +
+# SUBAGENT_ONELINE_MIN_W => width >= 7 + 12 + 26 = 45.
+NARROW_SIDE_BY_SIDE_MIN_WIDTH = PLAN_ONELINE_MIN_W + SUBAGENT_ONELINE_MIN_W + 7
 # Floor for the wide layout's three-segment tokens │ cost │ rate row. Below this
 # the row cannot hold both columns at full size plus the rate/spark leader, so
 # build_wide drops it for the compact context line instead of overflowing the
@@ -64,6 +93,23 @@ SUBAGENT_TREE_PLAN_PAD = 1
 # realistic-widest floor (the wide layout owns box >= MEDIUM_WIDTH=80, and the
 # row first fits around box 84-85 for typical 6-7 digit token magnitudes).
 TOKENS_COST_MIN_WIDTH = 85
+# Cap, in columns, on each individually-distributed justify "extra" slot in
+# the wide top row (path/elapsed/5h/7d/cache breathing room — see
+# `build_wide`'s justify block). Below `Renderer.JUSTIFY_PAD_CAP=4`'s sibling
+# for the tokens/cost row, this is the same idea applied one level up: without
+# a cap, `total_slack` (which scales linearly with `width` once nothing is
+# being shed — proven unbounded above width~150 by direct comparison against
+# the pre-refactor renderer) turns into several UNCAPPED, individually-large
+# blank runs scattered across the row, one per stat block, each growing
+# without bound as the box widens. Capping every slot except the last funnels
+# any slack beyond what these slots can absorb into a single trailing run
+# (`last_extra`, ahead of the model pill) instead of multiple scattered ones.
+# 8 is chosen so the per-section inner-gap-widening feature (separators
+# widen up to a 3-char cap — 4 inner columns for the two-separator 5h
+# section) still reaches its own cap before any outer padding is left over,
+# while the residual outer padding this constant permits (well under 6 cols
+# per side) stays below the width-gap audit's own gap-detection threshold.
+TOPROW_JUSTIFY_OUTER_CAP = 8
 # Floor for the wide layout's four-segment tokens │ lines │ cost │ rate row.
 # This constant gates ONLY the lines segment; TOKENS_COST_MIN_WIDTH must stay
 # at 85 because bumping it would regress every 85–103-column terminal into the
