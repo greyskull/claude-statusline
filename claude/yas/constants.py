@@ -270,6 +270,7 @@ BOX_V       = '\u2502'  # U+2502 light vertical
 BOX_H_DASH  = '\u2504'  # U+2504 light triple-dash horizontal
 BOX_H_DASH2 = '\u254c'  # U+254C light double-dash horizontal
 BOX_H_DASH4 = '\u2508'  # U+2508 light quadruple-dash horizontal
+BOX_V_DASH4 = '\u250a'  # U+250A light quadruple-dash vertical
 BOX_T_RIGHT = '\u251c'  # U+251C vertical and right
 BOX_T_LEFT  = '\u2524'  # U+2524 vertical and left
 BOX_T_DOWN  = '\u252c'  # U+252C down and horizontal (top elbow)
@@ -339,6 +340,7 @@ ASCII_GLYPHS: dict[str, str] = {
     BOX_H_DASH:         '-',
     BOX_H_DASH2:        '-',
     BOX_H_DASH4:        '-',
+    BOX_V_DASH4:        '|',
     BOX_T_RIGHT:        '+',
     BOX_T_LEFT:         '+',
     BOX_T_DOWN:         '+',

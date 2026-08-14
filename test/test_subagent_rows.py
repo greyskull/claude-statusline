@@ -13,9 +13,14 @@ from yas.config import Config
 
 from yas.constants import (
     BOLD,
+    BOX_H,
+    BOX_H_DASH4,
+    CLR_GREY_DIM,
+    CLR_WHITE_BRT,
     ELLIPSIS,
     GLYPH_REPLYING,
     ITALIC,
+    RESET,
     STRIKE,
     SUBAGENT_DESC_FLOOR,
     SUBAGENT_STATS_ACTIVITY_GAP,
@@ -1055,18 +1060,20 @@ def test_subagent_cells_prefixes_branch_glyphs() -> None:
     # main thread, so `root` itself gets an elbow too — here it's the only
     # top-level agent, so it's "last" (`└`) and has children (`┬`). Box-
     # drawing connectors: a node with children gets '┬' at its own
-    # position, a leaf gets '─'; ancestor columns render '│' only when that
-    # ancestor still has siblings following it (root is last and k2 is
-    # last, so gk's two ancestor columns are both blank, not '│'). Every
-    # raw connector is then padded with '─' up to the cohort's widest
-    # (gk's 4-char '  └─'), so every row's trailing separator space — and
-    # the name after it — lands one column past that shared width.
+    # position, a leaf gets '─' (or '┈' when not active); ancestor columns
+    # render '│'/'┊' only when that ancestor still has siblings following it
+    # (root is last and k2 is last, so gk's two ancestor columns are both
+    # blank, not '│'). Every raw connector is then padded with '─'/'┈' up to
+    # the cohort's widest (gk's 4-char '  └─'), so every row's trailing
+    # separator space — and the name after it — lands one column past that
+    # shared width. All four agents default to still-running here, so every
+    # segment paints active (solid '─'/'│') rather than dashed.
     root = _make_tree_sub('agent-a', agent_type='main')
     k1   = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
     k2   = _make_tree_sub('agent-c', parent_id='a', ts_off=2)
     gk   = _make_tree_sub('agent-d', parent_id='c', ts_off=3)
     cells = layout.subagent_cells([root, k1, k2, gk])
-    assert [p for _, p, _ in cells] == ['└┬─ ', ' ├─── ', ' └┬── ', '  └──── ']
+    assert [strip_ansi(p) for _, p, _ in cells] == ['└┬─ ', ' ├─── ', ' └┬── ', '  └──── ']
     assert [d for _, _, d in cells] == [0, 1, 1, 2]
 
 
@@ -1078,22 +1085,26 @@ def test_subagent_cells_ancestor_column_continues_past_uncle() -> None:
     # running past the grandchild's row to reach it. `root` is the sole
     # top-level agent, so its own column (both a's and b's leftmost
     # column) stays blank — only `a`'s own not-last status feeds a '│'.
+    # All four default to still-running, so a's own leaf/elbow glyphs (and
+    # c's) render active (solid); but the column a contributes for b's row
+    # tracks LATER siblings past b (there are none), not b's own activity,
+    # so that column stays inactive (dashed '┊') here.
     root = _make_tree_sub('agent-r', agent_type='root')
     a    = _make_tree_sub('agent-a', parent_id='r', ts_off=1)
     b    = _make_tree_sub('agent-b', parent_id='a', ts_off=2)
     c    = _make_tree_sub('agent-c', parent_id='r', ts_off=3)
     cells = layout.subagent_cells([root, a, b, c])
-    prefixes = {sub.agent_id: p for sub, p, _ in cells}
+    prefixes = {sub.agent_id: strip_ansi(p) for sub, p, _ in cells}
     assert prefixes['agent-a'].startswith(' ├┬')   # not last, has a child
-    assert prefixes['agent-b'].startswith(' │└')   # ancestor column stays '│'
-    assert prefixes['agent-c'].startswith(' └─')   # last sibling, leaf
+    assert prefixes['agent-b'].startswith(' ┊└')   # ancestor column stays '┊'
+    assert prefixes['agent-c'].startswith(' └─')   # last sibling, leaf, active
 
 
 def test_subagent_cells_single_child_gets_last_leaf_elbow() -> None:
     root = _make_tree_sub('agent-a', agent_type='main')
     only = _make_tree_sub('agent-b', parent_id='a', ts_off=1)
     cells = layout.subagent_cells([root, only])
-    assert [p for _, p, _ in cells] == ['└┬─ ', ' └─── ']
+    assert [strip_ansi(p) for _, p, _ in cells] == ['└┬─ ', ' └─── ']
 
 
 def test_subagent_cells_multiple_siblings_only_last_gets_corner() -> None:
@@ -1102,7 +1113,7 @@ def test_subagent_cells_multiple_siblings_only_last_gets_corner() -> None:
     k2   = _make_tree_sub('agent-c', parent_id='a', ts_off=2)
     k3   = _make_tree_sub('agent-d', parent_id='a', ts_off=3)
     cells = layout.subagent_cells([root, k1, k2, k3])
-    prefixes = [p for _, p, _ in cells]
+    prefixes = [strip_ansi(p) for _, p, _ in cells]
     assert prefixes == ['└┬─ ', ' ├─── ', ' ├─── ', ' └─── ']
 
 
@@ -1113,7 +1124,7 @@ def test_subagent_cells_multiple_top_level_agents_get_own_elbow() -> None:
     first  = _make_tree_sub('agent-a', agent_type='first')
     second = _make_tree_sub('agent-b', agent_type='second', ts_off=1)
     cells = layout.subagent_cells([first, second])
-    assert [p for _, p, d in cells] == ['├── ', '└── ']
+    assert [strip_ansi(p) for _, p, d in cells] == ['├── ', '└── ']
     assert [d for _, _, d in cells] == [0, 0]
 
 
@@ -1130,6 +1141,74 @@ def test_subagent_cells_prefix_staircases_by_depth() -> None:
     cells = layout.subagent_cells([root, a, b, c])
     for _, prefix, depth in cells:
         assert _visible_width(prefix) == TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W
+
+
+def test_subagent_cells_finished_leaf_paints_grey() -> None:
+    # A lone, finished top-level agent's whole connector — elbow, branch, and
+    # fill — is grey, not bright white, since nothing downstream is running.
+    root = _make_tree_sub('agent-a', agent_type='main', end_ts=100.0, status='completed')
+    cells = layout.subagent_cells([root])
+    prefix = [p for _, p, _ in cells][0]
+    assert CLR_WHITE_BRT not in prefix
+    assert prefix.count(CLR_GREY_DIM) == 3   # elbow + branch + 1-char fill
+    assert strip_ansi(prefix) == '└┈┈ '
+
+
+def test_subagent_cells_running_leaf_paints_bright_white() -> None:
+    # Same shape, but still running: the connector paints bright white
+    # instead of grey.
+    root = _make_tree_sub('agent-a', agent_type='main', status='running')
+    cells = layout.subagent_cells([root])
+    prefix = [p for _, p, _ in cells][0]
+    assert CLR_GREY_DIM not in prefix
+    assert CLR_WHITE_BRT in prefix
+
+
+def test_subagent_cells_active_wins_on_shared_ancestor_column() -> None:
+    # root -> a (finished, not last) -> b (finished leaf); root -> c (last
+    # sibling, still running). The trunk column shared by b's row (root's
+    # own elbow/branch, drawn on root's row) must paint white AND solid
+    # because a live descendant (`c`) is reachable through it, even though
+    # the finished branch (`a`/`b`) itself stays grey + dashed throughout.
+    root = _make_tree_sub('agent-r', agent_type='root', status='running')
+    a    = _make_tree_sub('agent-a', parent_id='r', ts_off=1, status='completed', end_ts=1.0)
+    b    = _make_tree_sub('agent-b', parent_id='a', ts_off=2, status='completed', end_ts=2.0)
+    c    = _make_tree_sub('agent-c', parent_id='r', ts_off=3, status='running')
+    cells = layout.subagent_cells([root, a, b, c])
+    prefixes = {sub.agent_id: p for sub, p, _ in cells}
+    # root itself: elbow/branch white, since it has a running descendant (c).
+    assert CLR_WHITE_BRT in prefixes['agent-r'] and CLR_GREY_DIM not in prefixes['agent-r']
+    # a's ancestor column (root's own not-last flag) is shared with c's
+    # subtree, which is still running, so it stays white (and solid) even on
+    # a's own row — but a's OWN elbow ('├') and branch ('┬') are grey, since
+    # a is finished and its only descendant (b) is too (corners stay solid
+    # glyph-wise regardless of activity, only their colour follows it).
+    assert f'{CLR_WHITE_BRT} {RESET}' in prefixes['agent-a']          # ancestor column, active wins
+    assert f'{CLR_GREY_DIM}├{RESET}' in prefixes['agent-a']           # a's own elbow, grey
+    assert f'{CLR_GREY_DIM}┬{RESET}' in prefixes['agent-a']           # a's own branch, grey
+    # b (leaf, finished): its own elbow is grey; its own branch is grey AND
+    # dashed since b itself isn't active. Its ancestor columns (root's and
+    # a's not-last flags) are both blank here (root is last sibling-wise
+    # relative to a... actually a is not last, so root's column renders '│'
+    # white+solid, active wins via c; a is last child of its own group so
+    # contributes no further column).
+    assert f'{CLR_GREY_DIM}└{RESET}' in prefixes['agent-b']
+    assert f'{CLR_GREY_DIM}{BOX_H_DASH4}{RESET}' in prefixes['agent-b']
+    # c: still running, own elbow is bright white; own branch (leaf) is
+    # bright white AND solid, since c itself is active (its lone ancestor
+    # column is an invisible blank space, coloured grey since no later
+    # top-level sibling follows root — colour there is moot, nothing to see).
+    assert f'{CLR_WHITE_BRT}└{RESET}' in prefixes['agent-c']
+    assert f'{CLR_WHITE_BRT}{BOX_H}{RESET}' in prefixes['agent-c']
+    # Structure: a's ancestor column carries no glyph of its own (blank);
+    # b's visible ancestor column (contributed by `a`, tracking whether any
+    # LATER SIBLING of b under `a` is still running — there is none) stays
+    # inactive/dashed '┊' even though `a`'s own blank column (shared with
+    # c's subtree) is coloured active; c's own leaf branch is active so it's
+    # solid '─', not dashed '┈'.
+    assert strip_ansi(prefixes['agent-a']).startswith(' ├┬')
+    assert strip_ansi(prefixes['agent-b']).startswith(' ┊└')
+    assert strip_ansi(prefixes['agent-c']).startswith(' └─')
 
 
 def test_cap_tree_groups_keeps_active_parent_with_child() -> None:
@@ -1635,6 +1714,8 @@ def test_build_wide_tree_mode_renders_branches(monkeypatch: pytest.MonkeyPatch) 
     out     = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
     kid_lines = [ln for ln in out if 'kid-one' in ln or 'kid-two' in ln]
     assert len(kid_lines) == 2                     # one line per subagent
+    # All three default to still-running, so every connector segment is
+    # active (solid '─'/'│'), not dashed.
     assert ' ├─── ' in kid_lines[0] and 'kid-one' in kid_lines[0] and 'Bash[' in kid_lines[0]
     assert ' └─── ' in kid_lines[1] and 'kid-two' in kid_lines[1] and 'Read[' in kid_lines[1]
     # tree mode stacks single-column even above TWO_COL_SUBAGENT_WIDTH; the root

@@ -8,8 +8,13 @@ from typing import NamedTuple
 from yas.config import Config
 from yas.constants import (
     _ANSI_RE,
+    BOX_H,
+    BOX_H_DASH4,
     BOX_V,
+    BOX_V_DASH4,
+    CLR_GREY_DIM,
     CLR_WARN,
+    CLR_WHITE_BRT,
     DEFAULT_SOFT_LIMIT,
     ELLIPSIS,
     GLYPH_CONFIG_WARN,
@@ -322,16 +327,29 @@ def subagent_cells(
     own), so they draw an elbow/branch glyph exactly like any other
     sibling group:
 
-    - one ``│``/``' '`` column per ancestor above the parent, ``│`` when
-      that ancestor has more siblings following it (the line must keep
+    - one ``│``/``┊``/``' '`` column per ancestor above the parent, drawn
+      when that ancestor has more siblings following it (the line must keep
       running to reach them), else a blank column;
     - the node's own elbow, ``└`` for a last child, ``├`` otherwise;
-    - the node's own branch glyph, ``┬`` when it has children, ``─`` for a
-      leaf.
+    - the node's own branch glyph, ``┬`` when it has children, ``─``/``┈``
+      for a leaf.
+
+    Each column/branch/fill run is coloured AND styled per its own
+    ``tree_order_full``-supplied activity: a segment that still leads to a
+    running subagent paints bright white (``CLR_WHITE_BRT``) using the SOLID
+    box-drawing glyphs (``─`` horizontal, ``│`` vertical); a segment that
+    leads only to finished subagents paints grey (``CLR_GREY_DIM``) using the
+    DASHED glyphs (``┈`` horizontal, ``┊`` vertical). Corners/junctions
+    (``└``/``├``/``┬``) stay solid glyph-wise regardless (a dashed corner
+    reads worse and there's no ambiguity to resolve there) — only their
+    colour follows activity. Where a column is shared across multiple rows
+    (a trunk that later forks toward both a finished and a still-running
+    branch), active wins — that shared segment paints solid + white because
+    at least one downstream row needs it to.
 
     Names STAIRCASE rather than all lining up in one shared column: each
     row's raw connector (ancestor columns + elbow + branch) is padded with
-    ``─`` up to ``TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W`` (own
+    ``┈`` up to ``TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W`` (own
     depth, not the cohort max), so a top-level agent's name starts 2
     columns left of its own children's, which starts 2 columns left of
     THEIR children's, and so on — the classic indented-tree look, not a
@@ -344,16 +362,25 @@ def subagent_cells(
     description/model/stats columns straight despite the staircase.
     """
     cells: list[tuple[RunningSubagent, str, int]] = []
-    for sub, depth, last, has_children, ancestor_continues in tree_order_full(visible_subs):
-        cols   = ''.join('│' if cont else ' ' for cont in ancestor_continues)
-        elbow  = '└' if last else '├'
-        branch = '┬' if has_children else '─'
+    for sub, depth, last, has_children, ancestor_continues, ancestor_active, own_active in tree_order_full(
+        visible_subs,
+    ):
+        own_clr = CLR_WHITE_BRT if own_active else CLR_GREY_DIM
+        own_h   = BOX_H if own_active else BOX_H_DASH4
+        cols = ''.join(
+            f'{CLR_WHITE_BRT if active else CLR_GREY_DIM}'
+            f'{(BOX_V if active else BOX_V_DASH4) if cont else " "}{RESET}'
+            for cont, active in zip(ancestor_continues, ancestor_active)
+        )
+        elbow  = f'{own_clr}{"└" if last else "├"}{RESET}'
+        branch = f'{own_clr}{"┬" if has_children else own_h}{RESET}'
         raw    = cols + elbow + branch
         # +1 reserves the single trailing separator space (not fill) ahead
         # of the name, so the raw connector + fill + that space together
         # land on exactly the target width.
         target_w = TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W
-        fill     = '─' * max(0, target_w - _visible_width(raw) - 1)
+        fill_n   = max(0, target_w - _visible_width(raw) - 1)
+        fill     = f'{own_clr}{own_h * fill_n}{RESET}' if fill_n else ''
         cells.append((sub, f'{raw}{fill} ', depth))
     return cells
 

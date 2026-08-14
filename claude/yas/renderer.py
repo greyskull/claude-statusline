@@ -1107,9 +1107,11 @@ class Renderer:
                 model_str = short_model.rjust(6)
 
             # Elbow sits between the duration and the name — '<time> <elbow>
-            # <name>' — dim-coloured like the old prepended branch, whichever
-            # run state colours the rest of the front field.
-            elbow = f'{self.CTX_DIM}{tree_prefix}{self.R}' if prefix_w else ''
+            # <name>'. `tree_prefix` (built by `layout.subagent_cells`)
+            # already carries its own per-segment bright-white/grey colour
+            # codes and RESETs — active ancestry paints white, finished paths
+            # grey — so it's used as-is, not force-tinted with CTX_DIM.
+            elbow = tree_prefix if prefix_w else ''
             # Agent name (type_text) renders italic — ITALIC is opened right
             # before the text and self.R (RESET) closes it along with the
             # colour, matching the existing BOLD convention elsewhere in
@@ -1338,7 +1340,8 @@ class Renderer:
         # marker rides in the name/model separator, matching the tree
         # twoline form: '✓'/'✗' when finished, '↺' on a resumed run, a
         # plain '·' while running.
-        elbow_n   = f'{self.CTX_DIM}{tree_prefix}{self.R}' if prefix_w else ''
+        # `tree_prefix` self-colours (see the twoline branch above) — used as-is.
+        elbow_n   = tree_prefix if prefix_w else ''
         dot_n_clr = self.CTX_DIM if is_done else self.LABEL
         tok_n_clr = self.CTX_DIM if is_done else ctx_clr
         tok_n     = fmt_tok_fixed(sub.total_input).rjust(5)

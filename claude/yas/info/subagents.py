@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from yas.constants import CLAUDE_DIR, _sanitize
+from yas.constants import CLAUDE_DIR, _sanitize, subagent_is_terminal, subagent_status
 
 
 def read_last_prompt_ts(session_id: str) -> float | None:
@@ -618,9 +618,20 @@ def tree_order(subs: list[RunningSubagent]) -> list[tuple[RunningSubagent, int, 
     return out
 
 
+def _subtree_has_active(sub: RunningSubagent, children: dict[int, list[RunningSubagent]]) -> bool:
+    '''True if ``sub`` itself is still running, or any transitive descendant is.
+
+    Used to decide tree-connector colour (bright white vs grey) — a column
+    stays white as long as it can still lead a viewer's eye to a live agent.
+    '''
+    if not subagent_is_terminal(subagent_status(sub)):
+        return True
+    return any(_subtree_has_active(kid, children) for kid in children.get(id(sub), []))
+
+
 def tree_order_full(
     subs: list[RunningSubagent],
-) -> list[tuple[RunningSubagent, int, bool, bool, tuple[bool, ...]]]:
+) -> list[tuple[RunningSubagent, int, bool, bool, tuple[bool, ...], tuple[bool, ...], bool]]:
     '''Like ``tree_order``, plus the extra shape info the box-drawing prefix
     needs: whether the node itself has children, and — for each ancestor
     between this node and the (implicit, never-rendered) main thread —
@@ -635,30 +646,53 @@ def tree_order_full(
     sibling group, and DO get their own elbow/branch glyph. Only the main
     thread itself contributes no prefix column.
 
-    Returns ``(sub, depth, is_last_child, has_children, ancestor_continues)``
-    tuples. ``is_last_child`` is real at every depth, including 0 (True iff
-    this is the last visible top-level agent). ``ancestor_continues`` has
-    one entry per ancestor level from depth 0 up to (not including) this
-    node's own depth. Entry ``k`` (0-indexed, ancestor at depth ``k``) is
-    ``True`` when that ancestor is *not* its own parent's/siblings-group's
-    last child (so the vertical line must keep running past that depth to
-    reach a later sibling).
+    Returns ``(sub, depth, is_last_child, has_children, ancestor_continues,
+    ancestor_active, own_active)`` tuples. ``is_last_child`` is real at every
+    depth, including 0 (True iff this is the last visible top-level agent).
+    ``ancestor_continues`` has one entry per ancestor level from depth 0 up to
+    (not including) this node's own depth. Entry ``k`` (0-indexed, ancestor at
+    depth ``k``) is ``True`` when that ancestor is *not* its own parent's/
+    siblings-group's last child (so the vertical line must keep running past
+    that depth to reach a later sibling).
+
+    ``ancestor_active`` mirrors ``ancestor_continues`` one-for-one: entry
+    ``k`` is ``True`` when the vertical run at that ancestor level still has
+    a *running* agent somewhere ahead of it (a later, not-yet-visited sibling
+    subtree at that level, or a live descendant reached through this row's
+    own path) — so the connector column should paint bright white instead of
+    grey. ``own_active`` is ``True`` when this node itself, or any of its own
+    descendants, is still running — the colour for this row's own elbow +
+    branch glyph. Where a column is shared by multiple rows (the classic
+    tree "trunk"), active wins: it only takes one live descendant anywhere
+    under that column to keep the whole run white.
     '''
     children, roots = _build_tree_index(subs)
-    out: list[tuple[RunningSubagent, int, bool, bool, tuple[bool, ...]]] = []
+    out: list[tuple[RunningSubagent, int, bool, bool, tuple[bool, ...], tuple[bool, ...], bool]] = []
 
-    def walk(sub: RunningSubagent, depth: int, last: bool, ancestors: tuple[bool, ...]) -> None:
+    def walk(
+        sub: RunningSubagent,
+        depth: int,
+        last: bool,
+        ancestors: tuple[bool, ...],
+        ancestors_active: tuple[bool, ...],
+    ) -> None:
         kids = children.get(id(sub), [])
-        out.append((sub, depth, last, bool(kids), ancestors))
+        own_active = _subtree_has_active(sub, children)
+        out.append((sub, depth, last, bool(kids), ancestors, ancestors_active, own_active))
         # This node's own continuation (not-last) becomes an ancestor column
         # for its children, at every depth — including depth 0, since
         # top-level agents now draw their own elbow too.
         child_ancestors = ancestors + (not last,)
         for i, kid in enumerate(kids):
-            walk(kid, depth + 1, i == len(kids) - 1, child_ancestors)
+            # This column stays white for the child's row as long as a later
+            # sibling in this group (or the child itself, checked once
+            # `walk` recurses) still has a live descendant.
+            later_active = any(_subtree_has_active(sib, children) for sib in kids[i + 1:])
+            child_ancestors_active = ancestors_active + (later_active,)
+            walk(kid, depth + 1, i == len(kids) - 1, child_ancestors, child_ancestors_active)
 
     for i, root in enumerate(roots):
-        walk(root, 0, i == len(roots) - 1, ())
+        walk(root, 0, i == len(roots) - 1, (), ())
     return out
 
 
