@@ -673,6 +673,7 @@ def tree_order_full(
         sub: RunningSubagent,
         depth: int,
         last: bool,
+        own_later_active: bool,
         ancestors: tuple[bool, ...],
         ancestors_active: tuple[bool, ...],
     ) -> None:
@@ -681,18 +682,28 @@ def tree_order_full(
         out.append((sub, depth, last, bool(kids), ancestors, ancestors_active, own_active))
         # This node's own continuation (not-last) becomes an ancestor column
         # for its children, at every depth — including depth 0, since
-        # top-level agents now draw their own elbow too.
+        # top-level agents now draw their own elbow too. The colour of that
+        # column, for a given child `i`, is TWO conditions OR'd: (a) does
+        # `sub` have a later CHILD (after `i`) with a live descendant — the
+        # original "shared trunk, active wins" case a sibling fork needs; or
+        # (b) does `sub` ITSELF have a later SIBLING (in `sub`'s own group)
+        # with a live descendant, i.e. `own_later_active` — a fixed property
+        # of `sub`'s own position, computed once by the caller below. Using
+        # only (a) left a vertical spine dashed under `sub`'s LAST child even
+        # though the branch `sub` belongs to continues on, active, via a
+        # later sibling of `sub` itself — the column has to answer BOTH
+        # "more active children below `sub`" and "more active content below
+        # `sub`'s own row", since both draw through the same column.
         child_ancestors = ancestors + (not last,)
         for i, kid in enumerate(kids):
-            # This column stays white for the child's row as long as a later
-            # sibling in this group (or the child itself, checked once
-            # `walk` recurses) still has a live descendant.
-            later_active = any(_subtree_has_active(sib, children) for sib in kids[i + 1:])
-            child_ancestors_active = ancestors_active + (later_active,)
-            walk(kid, depth + 1, i == len(kids) - 1, child_ancestors, child_ancestors_active)
+            kid_later_active   = any(_subtree_has_active(sib, children) for sib in kids[i + 1:])
+            column_active      = kid_later_active or own_later_active
+            child_ancestors_active = ancestors_active + (column_active,)
+            walk(kid, depth + 1, i == len(kids) - 1, kid_later_active, child_ancestors, child_ancestors_active)
 
     for i, root in enumerate(roots):
-        walk(root, 0, i == len(roots) - 1, (), ())
+        root_later_active = any(_subtree_has_active(r, children) for r in roots[i + 1:])
+        walk(root, 0, i == len(roots) - 1, root_later_active, (), ())
     return out
 
 

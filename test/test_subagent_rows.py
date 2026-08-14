@@ -1085,10 +1085,12 @@ def test_subagent_cells_ancestor_column_continues_past_uncle() -> None:
     # running past the grandchild's row to reach it. `root` is the sole
     # top-level agent, so its own column (both a's and b's leftmost
     # column) stays blank — only `a`'s own not-last status feeds a '│'.
-    # All four default to still-running, so a's own leaf/elbow glyphs (and
-    # c's) render active (solid); but the column a contributes for b's row
-    # tracks LATER siblings past b (there are none), not b's own activity,
-    # so that column stays inactive (dashed '┊') here.
+    # All four default to still-running, so the column `a` contributes for
+    # b's row is active/solid '│': it ORs together "does `a` have a later
+    # active CHILD past b" (no) with "does `a` itself have a later active
+    # SIBLING" (yes — `c` is running) — the same OR that fixes the
+    # spurious-dashed-spine bug (a live branch reached only via a parent's
+    # later sibling must not paint its child's spine dashed).
     root = _make_tree_sub('agent-r', agent_type='root')
     a    = _make_tree_sub('agent-a', parent_id='r', ts_off=1)
     b    = _make_tree_sub('agent-b', parent_id='a', ts_off=2)
@@ -1096,7 +1098,7 @@ def test_subagent_cells_ancestor_column_continues_past_uncle() -> None:
     cells = layout.subagent_cells([root, a, b, c])
     prefixes = {sub.agent_id: strip_ansi(p) for sub, p, _ in cells}
     assert prefixes['agent-a'].startswith(' ├┬')   # not last, has a child
-    assert prefixes['agent-b'].startswith(' ┊└')   # ancestor column stays '┊'
+    assert prefixes['agent-b'].startswith(' │└')   # ancestor column stays active via `c`
     assert prefixes['agent-c'].startswith(' └─')   # last sibling, leaf, active
 
 
@@ -1143,72 +1145,79 @@ def test_subagent_cells_prefix_staircases_by_depth() -> None:
         assert _visible_width(prefix) == TREE_PREFIX_BASE_W + depth * TREE_PREFIX_STEP_W
 
 
-def test_subagent_cells_finished_leaf_paints_grey() -> None:
+def test_subagent_cells_finished_leaf_dashed_but_white() -> None:
     # A lone, finished top-level agent's whole connector — elbow, branch, and
-    # fill — is grey, not bright white, since nothing downstream is running.
+    # fill — is DASHED (nothing downstream is running) but still renders
+    # bright white: colour no longer differentiates finished from running,
+    # only the dashed-vs-solid glyph does.
     root = _make_tree_sub('agent-a', agent_type='main', end_ts=100.0, status='completed')
     cells = layout.subagent_cells([root])
     prefix = [p for _, p, _ in cells][0]
-    assert CLR_WHITE_BRT not in prefix
-    assert prefix.count(CLR_GREY_DIM) == 3   # elbow + branch + 1-char fill
+    assert CLR_GREY_DIM not in prefix
+    assert prefix.count(CLR_WHITE_BRT) == 3   # elbow + branch + 1-char fill
     assert strip_ansi(prefix) == '└┈┈ '
 
 
-def test_subagent_cells_running_leaf_paints_bright_white() -> None:
-    # Same shape, but still running: the connector paints bright white
-    # instead of grey.
+def test_subagent_cells_running_leaf_paints_bright_white_solid() -> None:
+    # Same shape, but still running: solid glyphs, still bright white.
     root = _make_tree_sub('agent-a', agent_type='main', status='running')
     cells = layout.subagent_cells([root])
     prefix = [p for _, p, _ in cells][0]
     assert CLR_GREY_DIM not in prefix
     assert CLR_WHITE_BRT in prefix
+    assert strip_ansi(prefix) == '└── '
 
 
 def test_subagent_cells_active_wins_on_shared_ancestor_column() -> None:
     # root -> a (finished, not last) -> b (finished leaf); root -> c (last
     # sibling, still running). The trunk column shared by b's row (root's
-    # own elbow/branch, drawn on root's row) must paint white AND solid
-    # because a live descendant (`c`) is reachable through it, even though
-    # the finished branch (`a`/`b`) itself stays grey + dashed throughout.
+    # own elbow/branch, drawn on root's row) must render SOLID because a
+    # live descendant (`c`) is reachable through it, even though the
+    # finished branch (`a`/`b`) itself renders dashed throughout. Colour is
+    # bright white everywhere, regardless of activity — only the glyph
+    # (solid vs dashed) follows activity now.
     root = _make_tree_sub('agent-r', agent_type='root', status='running')
     a    = _make_tree_sub('agent-a', parent_id='r', ts_off=1, status='completed', end_ts=1.0)
     b    = _make_tree_sub('agent-b', parent_id='a', ts_off=2, status='completed', end_ts=2.0)
     c    = _make_tree_sub('agent-c', parent_id='r', ts_off=3, status='running')
     cells = layout.subagent_cells([root, a, b, c])
     prefixes = {sub.agent_id: p for sub, p, _ in cells}
-    # root itself: elbow/branch white, since it has a running descendant (c).
-    assert CLR_WHITE_BRT in prefixes['agent-r'] and CLR_GREY_DIM not in prefixes['agent-r']
-    # a's ancestor column (root's own not-last flag) is shared with c's
-    # subtree, which is still running, so it stays white (and solid) even on
-    # a's own row — but a's OWN elbow ('├') and branch ('┬') are grey, since
-    # a is finished and its only descendant (b) is too (corners stay solid
-    # glyph-wise regardless of activity, only their colour follows it).
+    # No row anywhere in this cohort uses CLR_GREY_DIM.
+    for prefix in prefixes.values():
+        assert CLR_GREY_DIM not in prefix
     assert f'{CLR_WHITE_BRT} {RESET}' in prefixes['agent-a']          # ancestor column, active wins
-    assert f'{CLR_GREY_DIM}├{RESET}' in prefixes['agent-a']           # a's own elbow, grey
-    assert f'{CLR_GREY_DIM}┬{RESET}' in prefixes['agent-a']           # a's own branch, grey
-    # b (leaf, finished): its own elbow is grey; its own branch is grey AND
-    # dashed since b itself isn't active. Its ancestor columns (root's and
-    # a's not-last flags) are both blank here (root is last sibling-wise
-    # relative to a... actually a is not last, so root's column renders '│'
-    # white+solid, active wins via c; a is last child of its own group so
-    # contributes no further column).
-    assert f'{CLR_GREY_DIM}└{RESET}' in prefixes['agent-b']
-    assert f'{CLR_GREY_DIM}{BOX_H_DASH4}{RESET}' in prefixes['agent-b']
-    # c: still running, own elbow is bright white; own branch (leaf) is
-    # bright white AND solid, since c itself is active (its lone ancestor
-    # column is an invisible blank space, coloured grey since no later
-    # top-level sibling follows root — colour there is moot, nothing to see).
-    assert f'{CLR_WHITE_BRT}└{RESET}' in prefixes['agent-c']
-    assert f'{CLR_WHITE_BRT}{BOX_H}{RESET}' in prefixes['agent-c']
+    assert f'{CLR_WHITE_BRT}├{RESET}' in prefixes['agent-a']          # a's own elbow, white
+    assert f'{CLR_WHITE_BRT}┬{RESET}' in prefixes['agent-a']          # a's own branch, white
+    assert f'{CLR_WHITE_BRT}└{RESET}' in prefixes['agent-b']          # b's own elbow, white
+    assert f'{CLR_WHITE_BRT}{BOX_H_DASH4}{RESET}' in prefixes['agent-b']  # b's branch dashed, but white
+    assert f'{CLR_WHITE_BRT}└{RESET}' in prefixes['agent-c']          # c's own elbow, white
+    assert f'{CLR_WHITE_BRT}{BOX_H}{RESET}' in prefixes['agent-c']    # c's branch solid, white
     # Structure: a's ancestor column carries no glyph of its own (blank);
-    # b's visible ancestor column (contributed by `a`, tracking whether any
-    # LATER SIBLING of b under `a` is still running — there is none) stays
-    # inactive/dashed '┊' even though `a`'s own blank column (shared with
-    # c's subtree) is coloured active; c's own leaf branch is active so it's
-    # solid '─', not dashed '┈'.
+    # b's visible ancestor column (contributed by `a`) ALSO tracks whether
+    # `a` itself has a later active SIBLING (`c`, running) — not just later
+    # siblings of `b` under `a` (there are none) — so it renders active/solid
+    # '│', the fix for the spurious-dashed-spine bug; c's own leaf branch is
+    # active so it's solid '─', not dashed '┈'.
     assert strip_ansi(prefixes['agent-a']).startswith(' ├┬')
-    assert strip_ansi(prefixes['agent-b']).startswith(' ┊└')
-    assert strip_ansi(prefixes['agent-c']).startswith(' └─')
+    assert strip_ansi(prefixes['agent-b']).startswith(' │└')
+
+
+def test_subagent_cells_ancestor_column_active_via_parents_later_sibling() -> None:
+    # root1 -> two finished children (last one, `n2`, is the deepest row of
+    # its group); root2 -> a running child (`m1`). Because root1 has a
+    # later ACTIVE sibling (root2), the vertical spine `root1` contributes
+    # to `n2`'s row must render active/solid '│', not dashed '┊' — the
+    # branch it belongs to still leads somewhere live, just not through
+    # root1's own children.
+    root1 = _make_tree_sub('agent-r1', agent_type='root1', ts_off=0, status='completed', end_ts=1.0)
+    n1    = _make_tree_sub('agent-n1', parent_id='r1', ts_off=1, status='completed', end_ts=2.0)
+    n2    = _make_tree_sub('agent-n2', parent_id='r1', ts_off=2, status='completed', end_ts=3.0)
+    root2 = _make_tree_sub('agent-r2', agent_type='root2', ts_off=3, status='completed', end_ts=4.0)
+    m1    = _make_tree_sub('agent-m1', parent_id='r2', ts_off=4, status='running')
+    cells = layout.subagent_cells([root1, n1, n2, root2, m1])
+    prefixes = {sub.agent_id: strip_ansi(p) for sub, p, _ in cells}
+    assert prefixes['agent-n1'].startswith('│├')  # not last, spine active via root2
+    assert prefixes['agent-n2'].startswith('│└')  # last child, spine STILL active via root2
 
 
 def test_cap_tree_groups_keeps_active_parent_with_child() -> None:
