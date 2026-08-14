@@ -99,11 +99,13 @@ from yas.constants import (
 from yas.render.gradient import (
     GradientEngine,
     model_display,
+    model_form_short,
     model_key,
     paint_bg_span,
     pill_gradient_fg,
     rainbow_at,
     rainbow_step,
+    thinking_form_short,
     _scale,
 )
 from yas.context_state import context_state
@@ -188,21 +190,23 @@ def _ctx_fill_ratio(ctx: ContextWindow, soft_limit: int) -> tuple[float, float]:
 
 
 def _best_fit_cluster(
-    build_cluster: Callable[[bool, bool], str],
+    build_cluster: Callable[[bool, bool, bool], str],
     fits: Callable[[str], bool],
 ) -> str:
     """Pick the richest subagent stats cluster that satisfies `fits`.
 
-    Shared shed ladder (Decision 10) for `Renderer.subagent_row`'s anchored
-    and right-aligned branches: start from the model-only fallback, then try
-    progressively richer clusters (lines+tok, then tok-only), keeping the
-    first candidate that fits. The two branches differ only in what "fits"
+    Shared shed ladder (Decision 10, inverted) for `Renderer.subagent_row`'s
+    anchored and right-aligned branches: timer + tok + loc is now the
+    PROTECTED unit — start from the richest form (lines+tok+model), and the
+    only rung this cluster ever sheds down to is dropping model (lines+tok
+    survive). There is no model-only or empty fallback any more; loc/tok are
+    never shed from here. The two call sites differ only in what "fits"
     means (slack past a fixed anchor column vs. slack alongside the front
     field), which is why `fits` is a caller-supplied predicate.
     """
-    cluster = build_cluster(False, False)  # model-only fallback
-    for show_lines, show_tok in ((True, True), (False, True)):
-        cand = build_cluster(show_lines, show_tok)
+    cluster = build_cluster(True, True, False)  # protected floor: tok + loc, no model
+    for show_lines, show_tok, show_model in ((True, True, True),):
+        cand = build_cluster(show_lines, show_tok, show_model)
         if fits(cand):
             cluster = cand
             break
@@ -660,7 +664,14 @@ class Renderer:
     def model_right_section(
         self, model_name: str, model_thinking: str, rate_limits: RateLimits,
         effort_level: str = '', fast_mode: bool = False, show_icons: bool = True,
+        *, include_7d: bool = True, model_form: str = 'full',
     ) -> tuple[str, str, str, int]:
+        # model_form == 'short': abbreviate to e.g. 'O5-1m (l)' via the pure
+        # helpers in render/gradient.py -- keep this a display-only swap so
+        # everything below (pill painting, width) is unaffected by the form.
+        if model_form == 'short':
+            model_name     = model_form_short(model_name)
+            model_thinking = thinking_form_short(model_thinking)
         model_clr  = self.model_colour(model_name)
         pct        = self._model_bg_pct(effort_level)
         lead_glyph = GLYPH_BURN_FAST if fast_mode else GLYPH_MODEL_LIGHT
@@ -695,6 +706,10 @@ class Renderer:
         right_w = _visible_width(right_text)
 
         helper_5h, helper_7d = self._rate_helpers(rate_limits, show_icons=show_icons)
+        if not include_7d:
+            # Content-driven has_7d gate in _rate_helpers still applies first;
+            # this just lets a caller under width pressure force it off too.
+            helper_7d = ''
 
         return helper_5h, helper_7d, right_text, right_w
 
@@ -886,6 +901,7 @@ class Renderer:
         session_inout: int = 0,
         stats_col: int | None = None,
         tree_prefix: str = '',
+        tree_depth: int | None = None,
         tree_single: bool = False,
         tree_desc_col: int | None = None,
         tree_activity_col: int | None = None,
@@ -894,6 +910,7 @@ class Renderer:
         lines: tuple[int, int] | None = None,
         oneline_name_w: int | None = None,
         oneline_model_w: int | None = None,
+        oneline_lines_w: int | None = None,
     ) -> str:
         # Tree view: a plain branch prefix ('├ ', '└ ', indented deeper) eats
         # visible columns out of the front-field budget (between the duration
@@ -908,6 +925,26 @@ class Renderer:
         # `tree_desc_col`/`tree_activity_col` (already absolute, row-start-
         # relative offsets per `layout.tree_columns`) are used as-is.
         prefix_w = _visible_width(tree_prefix)
+        # Top-level agents (tree_depth 0 — direct children of the implicit,
+        # never-rendered main thread) render their name BOLD; depth-1+ rows
+        # (their descendants) render REGULAR — no BOLD, no ITALIC. Both
+        # depths share the exact same colour (self.SKILLS while running,
+        # self.CTX_DIM once finished — set where `name_style` is used below);
+        # bold-vs-regular is the ONLY remaining visual distinction between a
+        # top-level agent and its descendants. `tree_depth` is threaded
+        # through explicitly from `layout.subagent_cells` (`tree_order_full`'s
+        # own depth) rather than re-derived from the prefix string — every
+        # tree row's prefix now starts with an elbow glyph regardless of
+        # depth, so the glyph alone can't disambiguate. A flat (non-tree) row
+        # passes NO `tree_depth` at all (``None``) and keeps its pre-existing
+        # ITALIC look — that code path is untouched, only the tree view's
+        # depth-1+ style changed from ITALIC to regular.
+        if tree_depth == 0:
+            name_style = BOLD
+        elif tree_depth is None:
+            name_style = ITALIC
+        else:
+            name_style = ''
         now         = time.time()
         status      = subagent_status(sub)
         is_done     = subagent_is_terminal(status)
@@ -1080,13 +1117,16 @@ class Renderer:
                 model_str = short_model.rjust(6)
 
             # Elbow sits between the duration and the name — '<time> <elbow>
-            # <name>' — dim-coloured like the old prepended branch, whichever
-            # run state colours the rest of the front field.
-            elbow = f'{self.CTX_DIM}{tree_prefix}{self.R}' if prefix_w else ''
-            # Agent name (type_text) renders italic — ITALIC is opened right
-            # before the text and self.R (RESET) closes it along with the
-            # colour, matching the existing BOLD convention elsewhere in
-            # this method (open code, then a bare RESET at the end).
+            # <name>'. `tree_prefix` (built by `layout.subagent_cells`)
+            # already carries its own per-segment bright-white/grey colour
+            # codes and RESETs — active ancestry paints white, finished paths
+            # grey — so it's used as-is, not force-tinted with CTX_DIM.
+            elbow = tree_prefix if prefix_w else ''
+            # Agent name (type_text) renders BOLD at depth 0, regular at
+            # depth 1+ (`name_style`, computed above) — the style code is
+            # opened right before the text and self.R (RESET) closes it
+            # along with the colour (open code, then a bare RESET at the
+            # end).
             # The type/name text greys via CTX_DIM when finished, same as the
             # model field below — only the ✓/✗ status marker keeps done_clr
             # (green/alert) so pass-vs-fail stays visually distinguishable.
@@ -1094,9 +1134,9 @@ class Renderer:
             # agent's timer is frozen, so keeping it in a live colour read as
             # if it were still ticking.
             if is_done:
-                front_c = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow}{self.CTX_DIM}{ITALIC}{mark(type_text)}{self.R}'
+                front_c = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow}{self.CTX_DIM}{name_style}{mark(type_text)}{self.R}'
             else:
-                front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{ITALIC}{type_text}{self.R}'
+                front_c = f'{self.CTX}{dur_s}{self.R} {elbow}{self.SKILLS}{name_style}{type_text}{self.R}'
             if tree_single:
                 # Model sits in the front field now (see `front_model_str`
                 # above), immediately after the name/type. The single-glyph
@@ -1123,7 +1163,7 @@ class Renderer:
             # (unchanged legacy '· lines · tok · model' order).
             dot = f'{MIDDLE_DOT} '
 
-            def build_cluster(show_lines: bool, show_tok: bool) -> str:
+            def build_cluster(show_lines: bool, show_tok: bool, show_model: bool = True) -> str:
                 d = self.CTX_DIM if is_done else self.LABEL
                 # The loc read/changed field renders in the SAME grey as the
                 # activity/log column at the end of the row (`self.CTX_DIM`,
@@ -1150,8 +1190,9 @@ class Renderer:
                     if show_tok:
                         tok_clr = d if is_done else ctx_clr
                         fields.append(f'{tok_clr}{mark(tok_field)}{self.R}')
-                    model_clr_use = d if is_done else model_clr
-                    fields.append(f'{model_clr_use}{mark(model_str)}{self.R}')
+                    if show_model:
+                        model_clr_use = d if is_done else model_clr
+                        fields.append(f'{model_clr_use}{mark(model_str)}{self.R}')
                 if not fields:
                     return ''
                 sep = f' {d}{dot}{self.R}'
@@ -1159,19 +1200,28 @@ class Renderer:
 
             # Decide whether the stats cluster anchors at a fixed content
             # column (wide layouts) or right-aligns to the content edge. The
-            # anchor only applies when even the model-only fallback fits within
-            # the slack to the right of `stats_col`; otherwise we fall through
-            # to the right-aligned path so very narrow widths stay sane.
-            model_only_w = _visible_width(build_cluster(False, False))
-            anchored     = stats_col is not None and (stats_w - stats_col) >= model_only_w
+            # anchor only applies when even the protected floor fits within
+            # the slack to the right of `stats_col`; otherwise we fall
+            # through to the right-aligned path so very narrow widths stay
+            # sane. In tree_single mode the model field already lives in the
+            # front (not this cluster), so its own floor is unchanged (``''``,
+            # same as before); in flat mode this cluster's floor is now
+            # tok + loc with model dropped (see Decision 10 below).
+            floor_w  = _visible_width(build_cluster(False, False, False) if tree_single
+                                       else build_cluster(True, True, False))
+            anchored = stats_col is not None and (stats_w - stats_col) >= floor_w
 
             if anchored:
                 assert stats_col is not None  # narrowed by `anchored`
                 avail = stats_w - stats_col  # slack to the right of the anchor
                 # Pick the richest cluster that fits within the anchored slack.
-                # Shed ladder (Decision 10): lines is the FIRST field dropped
-                # under width pressure, then tok — model and duration are
-                # never shed.
+                # Shed ladder (Decision 10, inverted from the original):
+                # timer + tok + loc is now a PROTECTED unit that is never
+                # shed — model is the only field this cluster ever drops
+                # under width pressure. (type/name and the activity/log
+                # column shed even earlier, ahead of model — see
+                # `subagent_row`'s front-field and activity handling above/
+                # below; they are not part of this cluster.)
                 cluster = _best_fit_cluster(
                     build_cluster, lambda cand: _visible_width(cand) <= avail,
                 )
@@ -1189,8 +1239,9 @@ class Renderer:
                 line1 += ' ' * max(0, stats_w - _visible_width(line1))
             else:
                 # Pick the richest cluster that fits alongside the front + a 1-col gap.
-                # Same shed ladder as the anchored branch above: lines first,
-                # then tok.
+                # Same shed ladder as the anchored branch above: model is the
+                # only field ever dropped from this cluster (tok + loc are
+                # protected — see Decision 10 above).
                 cluster = _best_fit_cluster(
                     build_cluster,
                     lambda cand: front_w + 1 + _visible_width(cand) <= stats_w,
@@ -1206,6 +1257,23 @@ class Renderer:
                 line1 = f'{front_c}{sep_desc}{" " * pad1}{cluster}'
 
             if tree_single:
+                # Full row precedence (highest-retained first): (1) timer +
+                # tokens + loc — the protected cluster, never shed; (2) type
+                # (`type_text`, baked into the front field below and only
+                # ever hard-capped at SUBAGENT_NAME_MAX, never width-shed);
+                # (3) model (also baked into the front field in tree_single
+                # mode via `front_model_str` — never width-shed here either;
+                # only the FLAT/non-tree_single cluster in `build_cluster`
+                # above sheds model, per Decision 10); (4) log — this
+                # activity column, appended below only when `avail_act`
+                # allows; (5) name (`sub.description`, rendered above as
+                # `sep_desc`) — the row's genuinely elastic field, truncated
+                # via `desc_max`/`stats_col` before anything else gives way.
+                # `layout.tree_columns` reserves this activity column's floor
+                # (`activity_floor`) ahead of the description's extra growth,
+                # so (4) already outranks (5) by construction; (2)/(3) never
+                # varying with width in tree_single mode trivially outranks
+                # everything that does.
                 # Append the current-activity column after the stats cluster.
                 # The model label (and, when tree_single, the share field) is
                 # now padded to a fixed width, so the cluster's own width is
@@ -1283,7 +1351,8 @@ class Renderer:
         # marker rides in the name/model separator, matching the tree
         # twoline form: '✓'/'✗' when finished, '↺' on a resumed run, a
         # plain '·' while running.
-        elbow_n   = f'{self.CTX_DIM}{tree_prefix}{self.R}' if prefix_w else ''
+        # `tree_prefix` self-colours (see the twoline branch above) — used as-is.
+        elbow_n   = tree_prefix if prefix_w else ''
         dot_n_clr = self.CTX_DIM if is_done else self.LABEL
         tok_n_clr = self.CTX_DIM if is_done else ctx_clr
         tok_n     = fmt_tok_fixed(sub.total_input).rjust(5)
@@ -1322,9 +1391,9 @@ class Renderer:
             # Frozen timer and name/type both grey, same as the twoline tree
             # form above; the ✓/✗ marker below is the only field that keeps
             # done_clr, so pass-vs-fail stays readable.
-            front_n = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow_n}{self.CTX_DIM}{ITALIC}{mark(type_text)}{self.R}'
+            front_n = f'{self.CTX_DIM}{mark(dur_s)}{self.R} {elbow_n}{self.CTX_DIM}{name_style}{mark(type_text)}{self.R}'
         else:
-            front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{ITALIC}{type_text}{self.R}'
+            front_n = f'{self.CTX}{dur_s}{self.R} {elbow_n}{self.SKILLS}{name_style}{type_text}{self.R}'
         model_n_clr = self.CTX_DIM if is_done else model_clr
         if is_done:
             mid_n = f'{done_clr}{subagent_marker_glyph(status)}{self.R}'
@@ -1342,6 +1411,29 @@ class Renderer:
         if front_n_w > target_w:
             front_n   = _middle_ellipsis(front_n, target_w)
             front_n_w = _visible_width(front_n)
+
+        # LOC (read/write lines): opportunistic, not forced. The oneline form
+        # has no reserved LOC column — unlike the twoline/tree_single form,
+        # which always reserves it — so it only appears past the front
+        # (already safely fitted above) when there's genuine slack, using the
+        # SAME read/write pair format as the twoline form
+        # (`fmt_lines_pair(..., fixed=True)`) for visual consistency. Once it
+        # DOES fit, it's part of the row's rank-1 protected cluster
+        # (timer + tokens + loc) — it's placed and measured BEFORE the
+        # activity/log segment below, so activity (rank 4, sheds first) is
+        # the one that loses out to LOC for the row's remaining slack, never
+        # the other way around.
+        read_lc_n, changed_lc_n = lines if lines is not None else (0, 0)
+        has_lines_n = lines is not None and bool(read_lc_n or changed_lc_n)
+        if has_lines_n:
+            lines_w_n = oneline_lines_w if oneline_lines_w is not None else 0
+            read_s_n, changed_s_n = fmt_lines_pair(read_lc_n, changed_lc_n, width=lines_w_n, fixed=True)
+            loc_field_n = f'{mark(read_s_n)} / {mark(changed_s_n)}'
+            loc_field_w = _visible_width(loc_field_n)
+            avail_loc   = target_w - front_n_w - 3  # ' · '
+            if avail_loc >= loc_field_w:
+                front_n   += f' {dot_n_clr}{MIDDLE_DOT}{self.R} {self.CTX_DIM}{loc_field_n}{self.R}'
+                front_n_w += 3 + loc_field_w
 
         # Activity/log segment: last column, running agents only, and only
         # when at least 12 columns of slack remain past the token field — so
@@ -1625,13 +1717,22 @@ class Renderer:
         checked by the caller) is unaffected by this shed rule — it is
         computed from the without-segment ``min_width`` only.
 
-        Returns ``([line], vsep_cols, 0, min_width)``: ``vsep_cols`` is
-        ``(col1, col2)`` when the lines segment is shed, or ``(col1, col2,
-        col3)`` when it is included — the divider columns for the builder's
-        elbow threading — the dead mark_col (the old 60s tick marker is gone,
-        =0), and ``min_width`` — the smallest box width at which this row fits
-        without overflow (always the without-segment floor, so the builder's
-        ``tokens_fits`` gate never depends on whether ``lines`` is present).
+        Shed ladder (highest-retained first): tokens sess/day, then loc r/w,
+        then cost, then tokens-over-time (the rate label + sparkline leader).
+        The richest form (everything the box has room for, per the existing
+        gates above) is tried first; if IT overflows ``box_width``, the row
+        falls through progressively leaner rungs that each drop exactly one
+        segment in shed order (tokens-over-time first, then cost, then loc)
+        until only tokens sess/day remains — the protected segment that is
+        never shed. ``vsep_cols`` shrinks by one column per rung dropped.
+
+        Returns ``([line], vsep_cols, 0, min_width)``: ``vsep_cols`` has 0-3
+        entries depending on which rung was used — the divider columns for
+        the builder's elbow threading — the dead mark_col (the old 60s tick
+        marker is gone, =0), and ``min_width`` — the smallest box width at
+        which this row fits without overflow, i.e. the floor of the
+        surviving-minimum form (tokens sess/day alone), independent of
+        whether ``lines``/cost/the leader end up shown at a given width.
         """
         day_clr = self.day_cost_colour(day_cost)
         in_active, out_active = TokenRate.recently_active(session_id)
@@ -1729,6 +1830,10 @@ class Renderer:
         # back to a compact form rather than overflow the box.
         tokens_w = _visible_width(tokens_col)
         cost_w   = _visible_width(cost_col)
+        # Unpadded (pre-justify) tokens width -- this is the row's true floor:
+        # tokens sess/day is the protected survivor of the shed ladder below,
+        # so `min_width` is derived from THIS, not from the richest form.
+        tokens_base_w = tokens_w
         # The rate/spark leader can never compress below its bare ``<rate> t/m``
         # label; measure it here so the budget split and min_width are exact (when
         # bar_w<=0 below, the leader is the bare label, which may exceed label_w+1).
@@ -1874,6 +1979,30 @@ class Renderer:
         else:
             line = f'{tokens_col}{vsep}{cost_col}{vsep_leader}{leader}'
             vsep_cols = (col1, col2)
+
+        # Shed ladder (highest-retained first): tokens sess/day -> loc r/w ->
+        # cost -> tokens-over-time (rate label + sparkline). The richest form
+        # built above is tried first; if it overflows the box, fall through
+        # progressively leaner rungs that each drop exactly one segment, in
+        # the order tokens-over-time -> cost -> loc, until we land on tokens
+        # sess/day alone, which is the protected survivor and is never shed.
+        # `min_width` (below) reflects THIS floor, not the richest form's.
+        content_w = box_width - 3
+        if _visible_width(line) > content_w:
+            if include_lines:
+                rung_b = f'{tokens_col}{vsep}{lines_col}{vsep_lines}{cost_col}'
+                rung_b_cols: tuple[int, ...] = (col1, col2)
+            else:
+                rung_b = f'{tokens_col}{vsep}{cost_col}'
+                rung_b_cols = (col1,)
+            if _visible_width(rung_b) <= content_w:
+                line, vsep_cols = rung_b, rung_b_cols
+            elif include_lines and _visible_width(f'{tokens_col}{vsep}{lines_col}') <= content_w:
+                line, vsep_cols = f'{tokens_col}{vsep}{lines_col}', (col1,)
+            else:
+                line, vsep_cols = tokens_col, ()
+
+        min_width = tokens_base_w + 3
 
         return [line], vsep_cols, 0, min_width
 

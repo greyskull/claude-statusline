@@ -70,6 +70,50 @@ def model_display(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Top-right pill abbreviation ('short' model_form)
+# ---------------------------------------------------------------------------
+
+_MODEL_VERSION_RE = re.compile(r'^(\d+)')
+
+
+def model_form_short(name: str) -> str:
+    """Semantic abbreviation for the top-right pill's 'short' model_form.
+
+    'Opus 5 1M' -> 'O5-1m'. First letter of the family, the major version
+    number if present, and a '-1m' suffix when the 1M-context variant is
+    named. Unlike model_key(), this keeps the version digit instead of
+    collapsing to a bare family name.
+    """
+    tokens = name.split()
+    if not tokens:
+        return '?'
+    family = tokens[0][0].upper()
+    version = ''
+    has_1m = False
+    for tok in tokens[1:]:
+        if tok.upper() == '1M':
+            has_1m = True
+            continue
+        if not version:
+            match = _MODEL_VERSION_RE.match(tok)
+            if match:
+                version = match.group(1)
+    short = f'{family}{version}' if version else family
+    return f'{short}-1m' if has_1m else short
+
+
+def thinking_form_short(thinking: str) -> str:
+    """First-letter abbreviation of a thinking/effort string, e.g. 'low' -> 'l'.
+
+    Compound forms like 'low/fast' abbreviate each '/'-separated part, e.g.
+    'l/f'.
+    """
+    if not thinking:
+        return ''
+    return '/'.join(part[0].lower() for part in thinking.split('/') if part)
+
+
+# ---------------------------------------------------------------------------
 # Colour scale / paint helpers
 # ---------------------------------------------------------------------------
 

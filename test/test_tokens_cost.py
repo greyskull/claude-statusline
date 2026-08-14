@@ -201,10 +201,17 @@ def test_tokens_cost_no_overflow_at_or_above_fit_floor(box: int) -> None:
 def test_tokens_cost_dividers_match_rendered_at_narrow_boxes(box: int) -> None:
     # The assertion that previously only held at box 160: every reported divider
     # column lands on the rendered │ — no detachment from the ┬/┴ elbows.
-    lines, (col1, col2), _mark, _min = _call(box_width=box, **_NARROW)
+    # box=80 is now narrow enough that the shed ladder drops the
+    # tokens-over-time (rate/sparkline) segment entirely -- one divider
+    # survives (tokens|cost) instead of two (tokens|cost|leader).
+    lines, cols, _mark, _min = _call(box_width=box, **_NARROW)
     stripped = strip_ansi(lines[0])
-    assert stripped[col1 - 3] == '│'
-    assert stripped[col2 - 3] == '│'
+    if box == 80:
+        assert len(cols) == 1
+    else:
+        assert len(cols) == 2
+    for col in cols:
+        assert stripped[col - 3] == '│'
 
 
 @pytest.mark.parametrize('box', [103, 110, 130, 160])

@@ -45,6 +45,17 @@ demo/img:
 		uv run python3 ops/ansi_png.py $$d/$(DEMO_ONLY).txt $$d/$(DEMO_ONLY).png; \
 	fi
 
+# Renders one scenario at every max_width in a range into a single gzipped,
+# delimited archive (demo/widths.txt.gz) -- the width sweep used to catch layout
+# breakage that only shows up at particular column counts.
+#   make demo/widths                       # kitchen-sink, widths 1-350
+#   DEMO_ONLY=tasks make demo/widths       # a different scenario
+#   FROM=40 TO=120 JOBS=8 make demo/widths # a narrower range / less parallelism
+# Inspect the archive with the same script:
+#   ./f.sh play | ./f.sh extract <width> | ./f.sh changes
+demo/widths:
+	@DEMO="$(or $(DEMO_ONLY),kitchen-sink)" ./ops/f.sh render
+
 test:
 	@uv run pytest -q
 
@@ -73,4 +84,4 @@ version/bump:
 	@git commit -m "Bump version to $(VERSION)"
 	@git push
 
-.PHONY: hooks bench pr-info demo demo/img test statusline/test mon/run version/bump
+.PHONY: hooks bench pr-info demo demo/img demo/widths test statusline/test mon/run version/bump

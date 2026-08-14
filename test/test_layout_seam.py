@@ -209,53 +209,37 @@ def test_cache_countdown_none_single_elbow(monkeypatch: pytest.MonkeyPatch) -> N
     assert len(separator_dim.ups) == 3, f'expected 3 ups (path + elapsed + sep_rate), got {separator_dim.ups}'
 
 
-def test_cache_countdown_width_shed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cache section sheds at the exact threshold without extra path truncation.
-
-    The shed condition is: (width-4) - vsep_w - helper_w - cache_section_w - right_w < 5.
-    At min_keep width the path budget is exactly 5 (cache kept); one col narrower it sheds.
-    """
-    from yas.constants import GLYPH_CACHE
-    from yas.render.text import _visible_width
+def test_cache_countdown_outranks_branch_dir_and_timer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cache countdown is priority 2 in the declarative top-row precedence —
+    higher than branch (3), dir (4), the session timer (5), 7d (6), changes
+    (7), and commit (8). So even with a pathologically long branch name that
+    forces the path all the way down to its glyph-only floor, the cache
+    section is still retained across the whole wide tier (width >= 80)."""
+    from yas.constants import GLYPH_CACHE, MEDIUM_WIDTH
+    from yas.info.git import GitInfo
     _silence_dynamic(monkeypatch)
 
     countdown = (187.0, 38)
-    vsep_w    = 5
-    sess      = _session()
+    long_git  = GitInfo(branch='x' * 200, commit='abcdef1', modified=3)
 
-    # Measure renderer geometry so threshold is exact rather than hand-coded.
-    h5h, h7d, _, right_w = _r.model_right_section(
-        sess.model_name,
-        sess.model_thinking,
-        sess.rate_limits,
-        '',
-        fast_mode=sess.fast_mode,
-    )
-    helper_w = _visible_width(h5h) + (4 + _visible_width(h7d) if h7d else 0)
-    _, cache_w      = _r.cache_section(*countdown)
-    cache_section_w = vsep_w + cache_w
-    # Minimum width where the cache section is NOT shed (path budget == 5).
-    min_keep = 5 + vsep_w + helper_w + cache_section_w + right_w + 4
+    for width in (MEDIUM_WIDTH, MEDIUM_WIDTH + 1, MEDIUM_WIDTH + 20, MEDIUM_WIDTH + 80):
+        view = _view()
+        view.__dict__['cache_countdown'] = countdown
+        view.__dict__['git']             = long_git
+        spec  = layout.build_wide(view, _tick(), width, _r)
+        lines = layout.render_layout(spec, _r)
+        assert any(GLYPH_CACHE in ln for ln in lines), \
+            f'cache glyph absent at width={width} (priority 2 should outlast branch/dir/timer)'
 
-    # At the shed boundary: cache absent, single elbow.
-    view_shed = _view()
-    view_shed.__dict__['cache_countdown'] = countdown
-    spec_shed  = layout.build_wide(view_shed, _tick(), min_keep - 1, _r)
-    lines_shed = layout.render_layout(spec_shed, _r)
-    assert not any(GLYPH_CACHE in ln for ln in lines_shed), \
-        f'cache glyph present at width={min_keep - 1} (should be shed)'
-    assert len(spec_shed.rows[0].downs) == 3, \
-        f'expected 3 top_border downs (path + elapsed + sep_rate) at shed width, got {spec_shed.rows[0].downs}'
-
-    # 20 cols wider: cache present, four elbows (path + elapsed + sep_rate + cache).
-    view_keep = _view()
-    view_keep.__dict__['cache_countdown'] = countdown
-    spec_keep  = layout.build_wide(view_keep, _tick(), min_keep + 20, _r)
-    lines_keep = layout.render_layout(spec_keep, _r)
-    assert any(GLYPH_CACHE in ln for ln in lines_keep), \
-        f'cache glyph absent at width={min_keep + 20} (should be kept)'
-    assert len(spec_keep.rows[0].downs) == 4, \
-        f'expected 4 top_border downs (path + elapsed + sep_rate + cache) at keep width, got {spec_keep.rows[0].downs}'
+    # A normal (short) branch name keeps the elbow count and cache glyph
+    # present too — the shed loop only exercises the extreme-narrow rungs
+    # (7d/timer/dir/branch) when the path itself demands it.
+    view_normal = _view()
+    view_normal.__dict__['cache_countdown'] = countdown
+    spec_normal  = layout.build_wide(view_normal, _tick(), MEDIUM_WIDTH, _r)
+    lines_normal = layout.render_layout(spec_normal, _r)
+    assert any(GLYPH_CACHE in ln for ln in lines_normal), \
+        f'cache glyph absent at width={MEDIUM_WIDTH} with a normal-length branch name'
 
 
 def test_narrow_and_medium_no_cache_countdown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -463,6 +447,37 @@ def _make_tasklist(long_subject: bool = False) -> tasks_mod.TaskList:
     )
 
 
+def _make_tasklist_narrow_stress() -> tasks_mod.TaskList:
+    """A checklist shaped to stress `task_row`'s narrow (left_w ~12) per-item
+    field math: >=4 completed tasks (pushes the visible id past a single
+    digit: '5.', '6.', ...) plus a Total Elapsed timer WIDER than any
+    individual item's duration ('11:07' vs '1:11'/'1:07') — so `timer_w` (the
+    shared leading column) is sized off the header's elapsed string, not any
+    item's own timer, exactly like the demo fixture that exposed the
+    interior-divider off-by-one (task_row's own
+    ``avail = max(1, field_w - _visible_width(num))`` floor renders 1 column
+    past ``field_w`` once the numbered prefix alone already fills it, which a
+    3-task/single-digit/matched-timer-width fixture never triggers)."""
+    now = time.time()
+    return tasks_mod.TaskList(
+        tasks=[
+            tasks_mod.Task(id=i, subject=f't{i}', active_form=f'a{i}', status='completed',
+                           started_at=now - (900 - i * 100), completed_at=now - (800 - i * 100))
+            for i in range(1, 5)
+        ] + [
+            tasks_mod.Task(id=5, subject='task five subject text', active_form='doing five',
+                           status='in_progress', started_at=now - 71),
+            tasks_mod.Task(id=6, subject='task six subject text', active_form='doing six',
+                           status='in_progress', started_at=now - 67),
+            tasks_mod.Task(id=7, subject='task seven subject', active_form='doing seven',
+                           status='pending'),
+            tasks_mod.Task(id=8, subject='task eight subject', active_form='doing eight',
+                           status='pending'),
+        ],
+        last_event_ts=now - 5,
+    )
+
+
 def _divider_content_idx(spec: layout.LayoutSpec) -> list[int]:
     """Indices of dynamic content rows that carry a side-by-side divider │.
 
@@ -488,6 +503,20 @@ def _both_sections(monkeypatch: pytest.MonkeyPatch, *, long_subject: bool = Fals
     a one-subagent cohort so the wide builder can compose side-by-side."""
     _silence_dynamic(monkeypatch)
     tl = _make_tasklist(long_subject=long_subject)
+    monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
+                        classmethod(lambda cls, path: tl))
+    monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
+                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+
+
+def _both_sections_narrow_stress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like `_both_sections`, but with `_make_tasklist_narrow_stress` — the
+    fixture that actually exercises `task_row`'s narrow field-width floor
+    (see its docstring). Use this for any narrow-tier side-by-side assertion
+    that needs to catch the interior-divider-drift class of bug; the plain
+    `_make_tasklist()` fixture does not stress that code path."""
+    _silence_dynamic(monkeypatch)
+    tl = _make_tasklist_narrow_stress()
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
                         classmethod(lambda cls, path: tl))
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
@@ -934,46 +963,37 @@ def test_clear_timer_fresh_session_byte_identical(
 def test_clear_timer_degrades_to_clear_only_when_both_dont_fit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When width is too narrow for both timers but fits clear-only, only the clear timer renders."""
+    """When width is too narrow for both timers but fits clear-only, only the
+    clear timer renders. Under the declarative precedence, the session timer
+    is priority 5 — it degrades (both -> clear-only -> none) well before the
+    path/branch/dir (priorities 3/4) are touched, so this transition happens
+    at a width where the path is still rendered in full."""
     from helper import strip_ansi
     from yas.constants import GLYPH_CLEAR
-    from yas.render.text import _visible_width
     _silence_dynamic(monkeypatch)
 
-    # Measure the geometry so we find the exact shed boundary
-    sess       = _session()
-    h5h, h7d, _, right_w = _r.model_right_section(
-        sess.model_name, sess.model_thinking, sess.rate_limits, '', fast_mode=sess.fast_mode,
-    )
-    helper_w = _visible_width(h5h) + (4 + _visible_width(h7d) if h7d else 0)
-    vsep_w   = 5
-    now      = 1_750_000_000.0
+    now         = 1_750_000_000.0
     clear_epoch = now - 18 * 60 - 33
 
-    _co, clear_only_w = _r.elapsed_section('', '18:33')
-    _cb, both_w       = _r.elapsed_section('13:27', '18:33')
-    clear_sw = clear_only_w + 3
-    both_sw  = both_w + 3
-
-    # Width where both fit (path_budget = 5 with both)
-    width_both = 5 + vsep_w + both_sw + helper_w + right_w + 4
-    # Width where only clear fits (path_budget = 5 with clear only) but not both
-    width_clear_only = 5 + vsep_w + clear_sw + helper_w + right_w + 4
-
-    # At width_clear_only (< width_both), we should get clear-only
-    if width_clear_only < width_both:
+    def _render(width: int) -> str:
         view = _view()
-        view.__dict__['now'] = now
+        view.__dict__['now']     = now
         view.__dict__['elapsed'] = '13:27'
         _inject_clear_epoch(view, clear_epoch)
+        spec = layout.build_wide(view, _tick(), width, _r)
+        content_rows = [row for row in spec.rows if row.kind == 'content']
+        return content_rows[0].content
 
-        spec = layout.build_wide(view, _tick(), width_clear_only, _r)
-        content_rows = [r for r in spec.rows if r.kind == 'content']
-        plain = strip_ansi(content_rows[0].content)
-        # Clear timer present, session timer absent
-        assert GLYPH_CLEAR in content_rows[0].content, 'clear glyph should be present'
-        assert '18:33' in plain, 'clear timer should be shown'
-        assert '13:27' not in plain, 'session timer should be shed'
+    # Wide enough for both timers.
+    plain_both = strip_ansi(_render(76))
+    assert '18:33' in plain_both and '13:27' in plain_both
+
+    # Narrower: clear timer present, session timer shed.
+    content_clear_only = _render(70)
+    plain_clear_only    = strip_ansi(content_clear_only)
+    assert GLYPH_CLEAR in content_clear_only, 'clear glyph should be present'
+    assert '18:33' in plain_clear_only, 'clear timer should be shown'
+    assert '13:27' not in plain_clear_only, 'session timer should be shed'
 
 
 def test_clear_timer_sheds_entire_cell_on_path_protection(
@@ -1222,3 +1242,239 @@ def tree_columns_for(view: SessionView) -> tuple[int, int, int]:
     lines_w = tree_lines_width(sub_cells, view.tool_counts.per_agent)
     cluster_w = subagent_cluster_width(lines_w)
     return tree_columns(sub_cells, inner, cluster_full_w=cluster_w, model_w=model_w)
+
+
+# ---------------------------------------------------------------------------
+# Narrow-tier plan + subagent side-by-side
+# ---------------------------------------------------------------------------
+
+def _narrow_divider_content_idx(spec: layout.LayoutSpec) -> list[int]:
+    """Indices of content rows carrying the narrow-tier side-by-side divider │.
+
+    `build_narrow` has no `separator_seam` marker (that's a `build_wide`-only
+    dynamic-section concept), so — unlike `_divider_content_idx` — this scans
+    every content row's `downs`/`ups`-adjacent block directly: a row is part
+    of the side-by-side block only if a `│` appears at the SAME visible
+    column across a contiguous run bracketed by `separator_dim` rows whose
+    `downs`/`ups` name that column. Simpler in practice: just take content
+    rows containing a bare `│` (ANSI-stripped) — narrow's other content rows
+    (rate/model header, compact plan summary, context line) never contain one.
+    """
+    from helper import strip_ansi
+    return [
+        i for i, row in enumerate(spec.rows)
+        if row.kind == 'content' and '│' in strip_ansi(row.content)
+    ]
+
+def test_narrow_side_by_side_below_floor_falls_back_to_stacking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Below NARROW_SIDE_BY_SIDE_MIN_WIDTH (45), build_narrow keeps stacking
+    plan above subagents (the old compact single-line plan header) rather
+    than forcing an unreadable two-column split."""
+    from helper import strip_ansi
+    from yas.constants import NARROW_SIDE_BY_SIDE_MIN_WIDTH
+    _both_sections(monkeypatch)
+
+    width = NARROW_SIDE_BY_SIDE_MIN_WIDTH - 1
+    spec  = layout.build_narrow(_view(), width, _r)
+    assert not _narrow_divider_content_idx(spec), (
+        'no interior column divider expected below the side-by-side floor'
+    )
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+    plain = '\n'.join(lines)
+    # The old compact plan header (glyph + done/total) is still present.
+    assert '1/3' in plain
+
+
+def test_narrow_side_by_side_at_and_above_floor_has_continuous_divider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At/above NARROW_SIDE_BY_SIDE_MIN_WIDTH, build_narrow lays the plan
+    checklist and subagent cohort out side-by-side with a continuous divider
+    column — same ┬/│/┴ threading invariant as the wide-tier split.
+
+    Uses `_both_sections_narrow_stress` (>=4 completed tasks + a Total
+    Elapsed timer wider than any item's own duration) rather than the plain
+    3-task `_both_sections` fixture: that plain fixture never pushes
+    `task_row`'s narrow field-width math into its own internal floor
+    (`avail = max(1, ...)`), so a header/item divider-column drift regression
+    there sailed through this test's every-sampled-width check silently —
+    exactly what happened with the off-by-one this test is now written to
+    catch. Checks EVERY width 45-54 (not a 3-point sample) and every row's
+    divider column against the FIRST row of the block (the top border, not
+    just the header/item content rows), so a border-vs-content drift and a
+    header-vs-item drift are both caught the same way.
+    """
+    from helper import strip_ansi
+    from yas.render.text import _visible_width
+    from yas.constants import NARROW_SIDE_BY_SIDE_MIN_WIDTH
+    _both_sections_narrow_stress(monkeypatch)
+
+    for width in range(NARROW_SIDE_BY_SIDE_MIN_WIDTH, 55):
+        spec = layout.build_narrow(_view(), width, _r)
+        combined_idx = _narrow_divider_content_idx(spec)
+        assert combined_idx, f'expected a side-by-side block with a divider at width={width}'
+        div_cols = {3 + strip_ansi(spec.rows[i].content).index('│') for i in combined_idx}
+        assert len(div_cols) == 1, f'divider column drifts across rows at width={width}: {div_cols}'
+        divider_col = div_cols.pop()
+
+        first, last = combined_idx[0], combined_idx[-1]
+        assert combined_idx == list(range(first, last + 1)), 'combined block is not contiguous'
+        above = spec.rows[first - 1]
+        below = spec.rows[last + 1]
+        assert divider_col in above.downs, f'separator above missing ┬ at {divider_col}: {above.downs}'
+        assert divider_col in below.ups,   f'separator/border below missing ┴ at {divider_col}: {below.ups}'
+
+        # Check EVERY rendered line's actual glyph at the divider column —
+        # the top border (┬), every combined content row (│, header AND
+        # items alike), and the bottom separator/border (┴) — not just a
+        # subset of the combined rows. This is what actually caught the
+        # header-vs-item drift: the header row alone matched the border's
+        # column, but the item rows (below it, past the false floor a
+        # smaller fixture never exercised) did not.
+        lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+        for ln in lines:
+            assert _visible_width(ln) == width, f'row not full width: {_visible_width(ln)} != {width}'
+        col = divider_col - 1
+        assert lines[first - 1][col] in ('┬', '┼'), f'no ┬ above at width={width}: {lines[first - 1][col]!r}'
+        for i in combined_idx:
+            assert lines[i][col] == '│', (
+                f'no │ at the shared divider column in row {i} (content: {lines[i]!r}) at width={width}'
+            )
+        assert lines[last + 1][col] in ('┴', '┼'), f'no ┴ below at width={width}: {lines[last + 1][col]!r}'
+
+
+def test_narrow_side_by_side_plan_name_sheds_before_subagent_type_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-column precedence: at the side-by-side floor, the plan column is
+    pinned to PLAN_ONELINE_MIN_W (its item name truncated hard) while the
+    subagent column still gets its full untruncated type+model text, if
+    there is enough total room for the subagent column's untruncated floor
+    at all — i.e. plan item name (priority 4) sheds before subagent
+    type/model (priority 3), never the other way around."""
+    from helper import strip_ansi
+    from yas.constants import ELLIPSIS, PLAN_ONELINE_MIN_W
+    _both_sections(monkeypatch)
+
+    view = _view()
+    cells = layout.subagent_cells(view.subagents.visible(0, None))
+    right_floor = layout.oneline_right_floor(cells)
+
+    # A width where the subagent column's untruncated floor is reachable
+    # (avail - PLAN_ONELINE_MIN_W >= right_floor) but the plan column has no
+    # slack left over — i.e. plan is at its floor and subagent is at its
+    # natural (untruncated) width simultaneously.
+    width = right_floor + PLAN_ONELINE_MIN_W + 7
+    spec  = layout.build_narrow(view, width, _r)
+    combined_idx = _narrow_divider_content_idx(spec)
+    assert combined_idx, 'expected a side-by-side block at this width'
+    divider_col = 3 + strip_ansi(spec.rows[combined_idx[0]].content).index('│')
+    left_w = divider_col - 3 - 1  # content starts at col 3; divider sits 1 col after left_w
+    assert left_w == PLAN_ONELINE_MIN_W, (
+        f'plan column should be pinned to its floor ({PLAN_ONELINE_MIN_W}) '
+        f'once the subagent column claims its untruncated width, got {left_w}'
+    )
+    # The subagent side shows the model name in full (no mid-word ellipsis)
+    # at this width, confirming type/model (priority 3) survived intact.
+    plain = strip_ansi(spec.rows[combined_idx[0]].content)
+    assert 'sonnet' in plain and ELLIPSIS not in plain.split('│', 1)[1], (
+        f'expected an untruncated model name on the subagent side: {plain!r}'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Width-gap audit fixes: top-row justify padding cap (Finding C) and the
+# skills/plugins caption's centering under justify (Finding A)
+# ---------------------------------------------------------------------------
+
+def test_top_row_justify_padding_capped_at_wide_widths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding C (width-gap audit): without a cap, `total_slack` (path/
+    elapsed/5h/7d/cache justify breathing room) scales linearly with `width`
+    once nothing is being shed, so an equal N-way split turned into several
+    individually growing, uncapped blank runs scattered across the top row.
+    Every "extra" slot but the last is now capped at
+    `TOPROW_JUSTIFY_OUTER_CAP`; the last slot (ahead of the model pill)
+    absorbs whatever slack the others couldn't. So at any width there should
+    be AT MOST ONE blank run wider than the cap — everything else stays
+    small regardless of how wide the box gets."""
+    import re
+    from helper import strip_ansi
+    from yas.constants import TOPROW_JUSTIFY_OUTER_CAP
+    _silence_dynamic(monkeypatch)
+    session = _session()
+
+    for width in (150, 200, 250, 300, 350):
+        view = SessionView(session, Config(justify=True))
+        spec = layout.build_wide(view, _tick(), width, _r)
+        content_rows = [row for row in spec.rows if row.kind == 'content']
+        plain = strip_ansi(content_rows[0].content)
+        gaps  = [len(m.group()) for m in re.finditer(r' {2,}', plain)]
+        oversized = [g for g in gaps if g > TOPROW_JUSTIFY_OUTER_CAP]
+        assert len(oversized) <= 1, (
+            f'width={width}: expected at most one uncapped gap run '
+            f'(the trailing slot), got {len(oversized)}: {gaps}'
+        )
+
+
+def test_top_row_justify_never_overflows_the_box_with_short_model_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the `model_form='short'` shed-rung justify bug: at the
+    last-resort rung (`build_wide` narrows the model pill instead of dropping
+    5h), widening the 5h helper's inner separators (`gap_5h`) unconditionally
+    reassigned `helper_7d` from a fresh `Renderer._rate_helpers` call, even
+    when 7d had already been shed for width (`has_7d=False`) -- resurrecting
+    the dropped 7d text un-padded into `helper_text`. That silently overflowed
+    the top row past its own border by exactly the 7d section's width, at
+    every width in the `model_form='short'` band except the (coincidentally
+    zero-total_slack) 82-86 sub-band. Sweep the whole band and assert every
+    rendered line is exactly `width` -- never over, matching border_line's
+    own "pad, never truncate" contract."""
+    from yas.render.text import _visible_width
+    _silence_dynamic(monkeypatch)
+    session = _session()
+    long_model = session_mod.Model(
+        id='claude-opus-5[1m]',
+        display_name='Opus 5 Extended Thinking Reasoning Deep Research Preview 1M',
+    )
+    session.__dict__.update(
+        model=long_model,
+        rate_limits=session_mod.RateLimits(
+            session_mod.RateBucket(35.0, 0), session_mod.RateBucket(24.0, 0),
+        ),
+    )
+
+    for width in range(78, 111):
+        view = SessionView(session, Config(justify=True))
+        spec = layout.build_wide(view, _tick(), width, _r)
+        lines = layout.render_layout(spec, _r)
+        for ln in lines:
+            assert _visible_width(ln) <= width, (
+                f'width={width}: row overflows the box: '
+                f'{_visible_width(ln)} > {width}: {ln!r}'
+            )
+
+
+def test_top_row_justify_matches_unjustified_when_slack_absorbed_by_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap only bounds each slot's OWN growth; it must not change how
+    much total width the row consumes (still exactly `width`, via
+    `border_line`'s pad) or which sections are present."""
+    from yas.render.text import _visible_width
+    _silence_dynamic(monkeypatch)
+    session = _session()
+
+    for width in (150, 250, 350):
+        view = SessionView(session, Config(justify=True))
+        spec = layout.build_wide(view, _tick(), width, _r)
+        lines = layout.render_layout(spec, _r)
+        for ln in lines:
+            assert _visible_width(ln) == width, (
+                f'width={width}: row overflows/underfills the box: '
+                f'{_visible_width(ln)} != {width}'
+            )
+
+

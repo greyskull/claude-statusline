@@ -99,7 +99,15 @@ def test_justify_slack_zero_matches_unjustified(
     internal breathing room — see test_tokens_cost), independent of the path
     row's slack, so it is excluded from this path-row equivalence check."""
     _silence_dynamic(monkeypatch)
-    # Patch fit_path to consume all available width so total_slack == 0.
+    # The top-row shed loop (build_wide) now tries the dir-full path forms
+    # itself (via `path_git`) before ever calling `fit_path` — so patch
+    # `path_git` to never fit (forcing every lower-priority section: 7d,
+    # timer, ... to shed first, same on both sides of the justify flag) and
+    # patch `fit_path` to consume all remaining width so total_slack == 0.
+    monkeypatch.setattr(
+        renderer_mod.Renderer, 'path_git',
+        lambda self, pwd, git, show_path=True, show_commit=True, show_dirty=True, show_icons=True: 'z' * 10_000,
+    )
     monkeypatch.setattr(
         renderer_mod.Renderer, 'fit_path',
         lambda self, pwd, git, target_w, compact_only=False, show_icons=True: 'x' * max(0, target_w),

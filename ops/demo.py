@@ -1079,6 +1079,25 @@ SCENARIOS: list[ScenarioConfig] = [
         cache_anchor_secs_ago = 240.0,
     ),
     ScenarioConfig(
+        # Exercises the top-row shed ladder's last-resort rung
+        # (model_form='short', see layout.py build_wide's `model_form` local):
+        # a long display name + effort parenthetical ('Opus 5 1M (low)') is
+        # wide enough that narrowing forces the pill down to 'O5-1m (l)'
+        # before the 5h/7d stats would otherwise get dropped. See
+        # render/gradient.py model_form_short()/thinking_form_short().
+        name        = 'long-model-name',
+        model_id    = 'claude-opus-5[1m]',
+        model_name  = 'Opus 5 Extended Thinking Reasoning Deep Research Preview 1M',
+        effort      = 'low',
+        thinking    = True,
+        context_pct = 0.30,
+        skills      = ['grill-me', 'caveman'],
+        plugins     = ['openspec@0.1.0'],
+        five_hour_pct = 35.0,
+        seven_day_pct = 24.0,
+        cache_anchor_secs_ago = 60.0,
+    ),
+    ScenarioConfig(
         name        = 'config-error',
         model_id    = 'claude-opus-4-7',
         model_name  = 'Opus 4.7',
@@ -1298,6 +1317,55 @@ SCENARIOS: list[ScenarioConfig] = [
         ],
         five_hour_pct = 38.0,
         seven_day_pct = 24.0,
+        columns     = NARROW_COLS,
+    ),
+
+    # Config 3b — a genuine 3-level tree: one root spawning three children,
+    # the middle child (not the last sibling) itself spawns a grandchild.
+    # This is the only scenario that exercises spawnDepth==2, which is what
+    # makes the tree view's `│` ancestor-continuation column and the
+    # 2-column-per-level staircase indentation actually show up on screen —
+    # every other subagent-tree-* scenario only nests one hop deep.
+    ScenarioConfig(
+        name        = 'subagent-tree-wide-deep',
+        context_pct = 0.42,
+        subagents   = [
+            ('spec-implementer', 'Implement the ancestor-continuation column for the ops/demo.py tree view', 48_000_000, 13_400, ('Bash', {'command': 'openspec show tree-ancestor-column --json'}), None, None, None, (410, 60)),
+            ('explore',          'Survey every subagent-tree-* scenario for existing nesting depth',           1_400_000,    980, ('Grep', {'pattern': 'parent_idx'}), None, 1, None, (140, 0)),
+            ('general-purpose',  'Port the staircase indentation math into the grandchild row renderer',       7_600_000,  5_200, ('Edit', {'file_path': 'render/tree.py', 'old_string': 'a', 'new_string': 'b'}), None, 1, None, (260, 70)),
+            ('ui',               'Wire the deep-tree scenario into demo/img output',                           3_100_000,  2_050, ('Write', {'file_path': 'ops/demo.py'}), None, 1, None, (95, 40)),
+            ('general-purpose',  'Add pytest coverage for spawnDepth==2 rows',                                  2_900_000,  1_650, ('Edit', {'file_path': 'test/test_subagent_rows.py', 'old_string': 'a', 'new_string': 'b'}), None, 3, None, (110, 35)),
+        ],
+        five_hour_pct = 39.0,
+        seven_day_pct = 25.0,
+        columns     = WIDE_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-medium-deep',
+        context_pct = 0.42,
+        subagents   = [
+            ('spec-implementer', 'Implement the ancestor-continuation column for the ops/demo.py tree view', 48_000_000, 13_400, ('Bash', {'command': 'openspec show tree-ancestor-column --json'}), None, None, None, (410, 60)),
+            ('explore',          'Survey every subagent-tree-* scenario for existing nesting depth',           1_400_000,    980, ('Grep', {'pattern': 'parent_idx'}), None, 1, None, (140, 0)),
+            ('general-purpose',  'Port the staircase indentation math into the grandchild row renderer',       7_600_000,  5_200, ('Edit', {'file_path': 'render/tree.py', 'old_string': 'a', 'new_string': 'b'}), None, 1, None, (260, 70)),
+            ('ui',               'Wire the deep-tree scenario into demo/img output',                           3_100_000,  2_050, ('Write', {'file_path': 'ops/demo.py'}), None, 1, None, (95, 40)),
+            ('general-purpose',  'Add pytest coverage for spawnDepth==2 rows',                                  2_900_000,  1_650, ('Edit', {'file_path': 'test/test_subagent_rows.py', 'old_string': 'a', 'new_string': 'b'}), None, 3, None, (110, 35)),
+        ],
+        five_hour_pct = 39.0,
+        seven_day_pct = 25.0,
+        columns     = MEDIUM_COLS,
+    ),
+    ScenarioConfig(
+        name        = 'subagent-tree-narrow-deep',
+        context_pct = 0.42,
+        subagents   = [
+            ('spec-implementer', 'Implement the ancestor-continuation column for the ops/demo.py tree view', 48_000_000, 13_400, ('Bash', {'command': 'openspec show tree-ancestor-column --json'}), None, None, None, (410, 60)),
+            ('explore',          'Survey every subagent-tree-* scenario for existing nesting depth',           1_400_000,    980, ('Grep', {'pattern': 'parent_idx'}), None, 1, None, (140, 0)),
+            ('general-purpose',  'Port the staircase indentation math into the grandchild row renderer',       7_600_000,  5_200, ('Edit', {'file_path': 'render/tree.py', 'old_string': 'a', 'new_string': 'b'}), None, 1, None, (260, 70)),
+            ('ui',               'Wire the deep-tree scenario into demo/img output',                           3_100_000,  2_050, ('Write', {'file_path': 'ops/demo.py'}), None, 1, None, (95, 40)),
+            ('general-purpose',  'Add pytest coverage for spawnDepth==2 rows',                                  2_900_000,  1_650, ('Edit', {'file_path': 'test/test_subagent_rows.py', 'old_string': 'a', 'new_string': 'b'}), None, 3, None, (110, 35)),
+        ],
+        five_hour_pct = 39.0,
+        seven_day_pct = 25.0,
         columns     = NARROW_COLS,
     ),
 
