@@ -54,7 +54,7 @@ demo/img:
 # Inspect the archive with the same script:
 #   ./f.sh play | ./f.sh extract <width> | ./f.sh changes
 demo/widths:
-	@DEMO="$(or $(DEMO_ONLY),kitchen-sink)" ./f.sh render
+	@DEMO="$(or $(DEMO_ONLY),kitchen-sink)" ./ops/f.sh render
 
 test:
 	@uv run pytest -q
