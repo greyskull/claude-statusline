@@ -926,15 +926,25 @@ class Renderer:
         # relative offsets per `layout.tree_columns`) are used as-is.
         prefix_w = _visible_width(tree_prefix)
         # Top-level agents (tree_depth 0 — direct children of the implicit,
-        # never-rendered main thread) render their name BOLD instead of
-        # ITALIC; depth-1+ rows (their descendants) keep ITALIC. `tree_depth`
-        # is threaded through explicitly from `layout.subagent_cells`
-        # (`tree_order_full`'s own depth) rather than re-derived from the
-        # prefix string — every tree row's prefix now starts with an elbow
-        # glyph regardless of depth, so the glyph alone can't disambiguate.
-        # A flat (non-tree) row passes no `tree_depth` at all and falls
-        # through to ITALIC, matching its pre-existing look.
-        name_style = BOLD if tree_depth == 0 else ITALIC
+        # never-rendered main thread) render their name BOLD; depth-1+ rows
+        # (their descendants) render REGULAR — no BOLD, no ITALIC. Both
+        # depths share the exact same colour (self.SKILLS while running,
+        # self.CTX_DIM once finished — set where `name_style` is used below);
+        # bold-vs-regular is the ONLY remaining visual distinction between a
+        # top-level agent and its descendants. `tree_depth` is threaded
+        # through explicitly from `layout.subagent_cells` (`tree_order_full`'s
+        # own depth) rather than re-derived from the prefix string — every
+        # tree row's prefix now starts with an elbow glyph regardless of
+        # depth, so the glyph alone can't disambiguate. A flat (non-tree) row
+        # passes NO `tree_depth` at all (``None``) and keeps its pre-existing
+        # ITALIC look — that code path is untouched, only the tree view's
+        # depth-1+ style changed from ITALIC to regular.
+        if tree_depth == 0:
+            name_style = BOLD
+        elif tree_depth is None:
+            name_style = ITALIC
+        else:
+            name_style = ''
         now         = time.time()
         status      = subagent_status(sub)
         is_done     = subagent_is_terminal(status)
@@ -1112,10 +1122,11 @@ class Renderer:
             # codes and RESETs — active ancestry paints white, finished paths
             # grey — so it's used as-is, not force-tinted with CTX_DIM.
             elbow = tree_prefix if prefix_w else ''
-            # Agent name (type_text) renders italic — ITALIC is opened right
-            # before the text and self.R (RESET) closes it along with the
-            # colour, matching the existing BOLD convention elsewhere in
-            # this method (open code, then a bare RESET at the end).
+            # Agent name (type_text) renders BOLD at depth 0, regular at
+            # depth 1+ (`name_style`, computed above) — the style code is
+            # opened right before the text and self.R (RESET) closes it
+            # along with the colour (open code, then a bare RESET at the
+            # end).
             # The type/name text greys via CTX_DIM when finished, same as the
             # model field below — only the ✓/✗ status marker keeps done_clr
             # (green/alert) so pass-vs-fail stays visually distinguishable.

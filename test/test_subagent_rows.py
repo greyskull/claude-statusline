@@ -2214,15 +2214,35 @@ def test_tree_single_depth0_name_is_bold_not_italic() -> None:
     assert f'{ITALIC}spec-implementer' not in line1
 
 
-def test_tree_single_depth1_plus_name_stays_italic() -> None:
-    # Descendants of a top-level agent (tree_depth 1+) keep the
-    # pre-existing ITALIC treatment.
+def test_tree_single_depth1_plus_name_is_regular() -> None:
+    # Descendants of a top-level agent (tree_depth 1+) render REGULAR — no
+    # BOLD, no ITALIC — but the same colour (self.SKILLS) as depth 0, so
+    # bold-vs-regular is the only remaining visual distinction by depth.
     sub = _make_sub(agent_type='general-purpose', description='Sidechain section')
     line1 = _r.subagent_row(
         sub, 156, twoline=True, tree_single=True, tree_prefix='├── ', tree_depth=1,
     ).split('\n')[0]
-    assert f'{ITALIC}general-purpose' in line1
+    assert f'{ITALIC}general-purpose' not in line1
     assert f'{BOLD}general-purpose' not in line1
+    assert f'{_r.SKILLS}general-purpose' in line1
+
+
+def test_tree_single_depth0_and_depth1_share_colour_only_bold_differs() -> None:
+    # depth 0 and depth 1+ names share the exact same colour (self.SKILLS
+    # while running) — bold-vs-regular is the ONLY visual distinction left
+    # between a top-level agent's name and its descendants'.
+    root = _make_sub(agent_type='spec-implementer', description='top-level work')
+    kid  = _make_sub(agent_type='general-purpose', description='child work')
+    line_root = _r.subagent_row(
+        root, 156, twoline=True, tree_single=True, tree_prefix='├── ', tree_depth=0,
+    ).split('\n')[0]
+    line_kid = _r.subagent_row(
+        kid, 156, twoline=True, tree_single=True, tree_prefix='├── ', tree_depth=1,
+    ).split('\n')[0]
+    assert f'{_r.SKILLS}{BOLD}spec-implementer' in line_root
+    assert f'{_r.SKILLS}general-purpose' in line_kid
+    assert f'{_r.SKILLS}{ITALIC}general-purpose' not in line_kid
+    assert f'{_r.SKILLS}{BOLD}general-purpose' not in line_kid
 
 
 def test_tree_single_no_tree_depth_stays_italic() -> None:
