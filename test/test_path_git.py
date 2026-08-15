@@ -218,3 +218,14 @@ class TestPathGitShowIcons:
         result = r.fit_path(pwd, git, 0, show_icons=False)
         assert result == r.path_glyph_only(show_icons=False)
         assert result == ''
+
+    def test_path_git_show_icons_false_reserves_one_col_margin(self) -> None:
+        """With no folder glyph to reserve the row's left margin, `path_git`
+        falls back to a single literal leading space -- so the path row's
+        left margin (border_line's own gap + this space = 2 cols) lines up
+        with row 2 (`context_line`, which reserves its margin via a rjust'd
+        number) instead of sitting 1 column short of it."""
+        r = Renderer()
+        git = GitInfo(branch='main', commit='abc1234')
+        out = strip_ansi(r.path_git('~/proj', git, show_icons=False))
+        assert out.startswith(' ~/proj')

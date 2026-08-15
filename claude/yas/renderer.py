@@ -422,7 +422,11 @@ class Renderer:
         # middle-ellipsis). show_path=False yields the branch-only rung (glyph +
         # arrow + branch) used as a width-degradation step below the path forms.
         path_part = f'{self.PWD}{short_pwd}{self.R} ' if show_path else ''
-        glyph_part = f'{GLYPH_FOLDER}  ' if show_icons else ''
+        # With icons off there is no glyph to reserve the row's usual 2-col
+        # left margin -- fall back to a single literal space so the path row
+        # lines up with rows that reserve their margin via a fixed-width
+        # rjust instead of an icon (e.g. context_line's `fmt_tok(...):>6`).
+        glyph_part = f'{GLYPH_FOLDER}  ' if show_icons else ' '
 
         return (
             f'{self.ICON_PATH}{glyph_part}{path_part}'
@@ -699,9 +703,18 @@ class Renderer:
         else:
             glyph_part = f' {lead_glyph}  ' if show_icons else '  '
             if model_thinking:
-                right_text = f'{model_clr}{glyph_part}{model_name}{self.R} {model_clr}({model_thinking}){RESET}'
+                right_text = f'{model_clr}{glyph_part}{model_name}{self.R} {model_clr}({model_thinking}){RESET} '
             else:
-                right_text = f'{model_clr}{glyph_part}{model_name}{self.R}'
+                right_text = f'{model_clr}{glyph_part}{model_name}{self.R} '
+            # Trailing space above is deliberate, matching the `pct` pill
+            # branch's baked-in trailing padding cell above: without it, this
+            # is the rightmost content in the row and its own budget math
+            # (build_wide's `pad`) can land on exactly 0 spare columns at
+            # certain widths (e.g. justify+ascii at 79-81), landing a digit
+            # flush against the closing border. Baking the space in here
+            # makes the no-digit-adjacent-to-border invariant hold by
+            # construction rather than by relying on `pad` always having
+            # slack left over.
 
         right_w = _visible_width(right_text)
 
@@ -780,7 +793,11 @@ class Renderer:
         if plugin_names:
             plugins_glyph = f'{c_plugins}{BOLD}{GLYPH_PLUGINS}  {self.R}' if show_icons else ''
             extras.append(f'{plugins_glyph}{self.SKILLS}{plugin_names}{self.R}')
-        return f' {self.LABEL}|{self.R} '.join(extras)
+        line = f' {self.LABEL}|{self.R} '.join(extras)
+        # With icons off, no glyph reserves the row's usual 2-col left
+        # margin -- add the same single literal space the path/tokens rows
+        # fall back to, so this row's leading value lines up with them.
+        return f' {line}' if (line and not show_icons) else line
 
     def tool_counts_row(self, counts: dict[str, tuple[int, int]], width: int, *, fill: float = 1.0) -> str:
         """Greedy-filled per-tool ``Name main/sub`` counts as a full-width line.
@@ -1740,7 +1757,13 @@ class Renderer:
             in_icon  = f'{ARROW_IN_ACTIVE} '  if in_active  else f'{ARROW_IN_IDLE} '   # both 2 cols
             out_icon = f'{ARROW_OUT_ACTIVE} ' if out_active else f'{ARROW_OUT_IDLE} '  # both 2 cols
         else:
-            in_icon = out_icon = ''  # show_icons=False: number-only, no arrow glyph
+            # show_icons=False: number-only, no arrow glyph. The row's left
+            # margin is reserved by `sess_in`'s own rjust (below) instead of
+            # an icon-shaped space -- mirrors context_line, which has no
+            # icon-reservation either and relies solely on its rjust'd
+            # number for the margin. Reserving *both* here would double up
+            # and misalign the two rows again.
+            in_icon = out_icon = ''
 
         # Inter-group gaps in the tokens column and the cost/leader edge pads.
         # They start at their minimums (gaps 1 space, edge pads 0) so the
@@ -1751,7 +1774,14 @@ class Renderer:
         leader_lpad = ''
 
         if show_day_stats:
-            # Merged session/day per field; variable width, no fixed rjust (D2).
+            # Merged session/day per field; variable width, no fixed rjust (D2)
+            # -- except the row's LEADING number (`sess_in`), which is
+            # right-justified to `IN_W` (the same fixed width the
+            # session-only rung below uses) so it shares a stable right
+            # edge with row 2's context-fill number (also rjust'd, in
+            # `context_line`) and has headroom to grow (e.g. 25.9K ->
+            # 123.0K) without shifting every column after it or ending up
+            # flush against the row's left border.
             cache = (f'{self.TOK_DIM}({fmt_tok(sess_cache)}{self.R}'
                      f'{self.TOK_DAY_DIM}/{fmt_tok(day_cache)}{self.R}'
                      f'{self.TOK_DIM}){self.R}')
@@ -1759,7 +1789,7 @@ class Renderer:
             def build_tokens() -> str:
                 return (
                     f'{self.LABEL}{self.BOLDY}{in_icon}{self.R}'
-                    f'{self.TOK}{fmt_tok(sess_in)}{self.R}{self.TOK_DAY_DIM}/{fmt_tok(day_in)}{self.R}{gap1}'
+                    f'{self.TOK}{fmt_tok(sess_in).rjust(self.IN_W)}{self.R}{self.TOK_DAY_DIM}/{fmt_tok(day_in)}{self.R}{gap1}'
                     f'{cache}'
                     f'{self.LABEL}{gap2}{self.BOLDY}{out_icon}{self.R}'
                     f'{self.TOK}{fmt_tok(sess_out)}{self.R}{self.TOK_DAY_DIM}/{fmt_tok(day_out)}{self.R}'

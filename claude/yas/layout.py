@@ -1116,8 +1116,12 @@ def build_wide(
     # total_slack > 0; fall through silently when total_slack == 0 (D3).
     total_slack = target_w - path_w
     path_extra = elapsed_extra = h5_left = h5_right = h7_left = h7_right = cache_extra = last_extra = 0
+    # `_has_elapsed` is needed both inside the slack-distribution block below
+    # (to size the N-way split) and afterward for the baked-in-padding
+    # rebalance, which must run even when total_slack <= 0 -- so compute it
+    # once, unconditionally, ahead of the slack gate.
+    _has_elapsed = elapsed_section_w > 0
     if view.cfg.justify and total_slack > 0:
-        _has_elapsed = elapsed_section_w > 0
         _has_cache   = cache_section_w > 0
         _N           = 3 + (1 if _has_elapsed else 0) + (1 if has_7d else 0) + (1 if _has_cache else 0)
         _extra_per   = total_slack // _N
@@ -1231,9 +1235,29 @@ def build_wide(
             else:
                 line_path = f'{line_path}{" " * path_extra}'
             path_w += path_extra
-        if elapsed_extra:
-            _e_left           = elapsed_extra // 2
-            _e_right          = elapsed_extra - _e_left
+    if view.cfg.justify and _has_elapsed:
+        # `elapsed_content` may already carry asymmetric leading padding
+        # baked in by the renderer's fixed-width `rjust` (elapsed_section
+        # right-justifies to a constant cell width). Strip that baked-in
+        # run of leading spaces and fold it back into the slack pool
+        # before splitting, so the TOTAL whitespace either side of the
+        # visible digits ends up balanced -- not just the slack added
+        # here. This runs whenever elapsed is present and justify is on,
+        # *independent* of `total_slack > 0`: a sibling section (e.g.
+        # `fit_path` crossing a growth threshold) can consume the entire
+        # row's slack in the same pass, leaving `total_slack == 0` while
+        # the elapsed cell's own baked-in asymmetry is still present and
+        # otherwise never gets corrected (D3's "silent fall-through" only
+        # applies to *distributed* slack, not this pre-existing bake).
+        _plain_e    = _ANSI_RE.sub('', elapsed_content)
+        _baked_left = len(_plain_e) - len(_plain_e.lstrip(' '))
+        if _baked_left:
+            _b_end          = _ansi_byte_offset(elapsed_content, _baked_left)
+            elapsed_content = elapsed_content[:_b_end].rstrip(' ') + elapsed_content[_b_end:]
+        _total_pad = _baked_left + elapsed_extra
+        if _total_pad:
+            _e_left           = _total_pad // 2
+            _e_right          = _total_pad - _e_left
             elapsed_content   = f'{" " * _e_left}{elapsed_content}{" " * _e_right}'
             elapsed_section_w += elapsed_extra
 
@@ -1395,8 +1419,16 @@ def build_wide(
             RowSpec('content', content=f'{middle}{" " * last_extra}', right_pill=right_text),
         ]
     else:
+        # Measure `middle` directly with `_visible_width` instead of hand-summing
+        # its components (path_w + vsep_w + elapsed_section_w + helper_w + ...):
+        # the elapsed vsep is built with `lead=1` (4 visible cols, not the
+        # generic vsep_w=5), so the summed estimate silently overcounted by 1
+        # whenever an elapsed cell was present -- consuming pad's last reserved
+        # column and landing right_text (which carries no trailing space of its
+        # own) flush against the closing border at widths 79-81 (ascii/justify).
         pad = max(1, (width - 3) - (path_w + vsep_w + elapsed_section_w + helper_w + cache_section_w + (1 if cache_section_w else 0) + right_w))
         content_full = f'{middle}{" " * pad}{right_text}'
+
         rows += [
             RowSpec('top_border', downs=path_row_downs, labels=top_labels),
             RowSpec('content', content=content_full),
