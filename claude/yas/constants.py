@@ -89,10 +89,14 @@ NARROW_SIDE_BY_SIDE_MIN_WIDTH = PLAN_ONELINE_MIN_W + SUBAGENT_ONELINE_MIN_W + 7
 # the row cannot hold both columns at full size plus the rate/spark leader, so
 # build_wide drops it for the compact context line instead of overflowing the
 # box. The exact, content-aware minimum is computed per-render by
-# Renderer.tokens_cost (its ``min_width`` return) — this constant is the
-# realistic-widest floor (the wide layout owns box >= MEDIUM_WIDTH=80, and the
-# row first fits around box 84-85 for typical 6-7 digit token magnitudes).
-TOKENS_COST_MIN_WIDTH = 85
+# Renderer.tokens_cost (its ``min_width`` return) — this constant is a flat
+# floor on top of that. Deliberately pinned to MEDIUM_WIDTH (the box width
+# where build_wide itself starts) rather than a higher magic number: the old
+# value of 85 opened an 80-84 band where the plugin row (gated only by
+# MEDIUM_WIDTH) had already appeared but the context/tokens row was still
+# degraded to the compact form — an inconsistent shed ladder. Aligning the
+# two floors means both upgrade together at the same box width.
+TOKENS_COST_MIN_WIDTH = MEDIUM_WIDTH
 # Cap, in columns, on each individually-distributed justify "extra" slot in
 # the wide top row (path/elapsed/5h/7d/cache breathing room — see
 # `build_wide`'s justify block). Below `Renderer.JUSTIFY_PAD_CAP=4`'s sibling
@@ -112,8 +116,9 @@ TOKENS_COST_MIN_WIDTH = 85
 TOPROW_JUSTIFY_OUTER_CAP = 8
 # Floor for the wide layout's four-segment tokens │ lines │ cost │ rate row.
 # This constant gates ONLY the lines segment; TOKENS_COST_MIN_WIDTH must stay
-# at 85 because bumping it would regress every 85–103-column terminal into the
-# compact context line (losing the cost/rate row entirely, not just the lines).
+# at MEDIUM_WIDTH because bumping it would regress every terminal below 103
+# into the compact context line (losing the cost/rate row entirely, not just
+# the lines).
 LINES_SEGMENT_MIN_WIDTH = 103
 
 # Minimum gap between the narrow tasks-header's left cluster (glyph + done/total)
@@ -388,10 +393,15 @@ ASCII_GLYPHS: dict[str, str] = {
     PILL_BOT:           '-',
     PILL_LEFT:          '|',
     PILL_RIGHT:         '|',
-    PILL_TL:            ' ',
-    PILL_TR:            ' ',
-    PILL_BL:            ' ',
-    PILL_BR:            ' ',
+    # Corners map to '+' (not ' ') so a pill's start/end column never blanks
+    # a structural elbow/corner it happens to coincide with -- '+' is exactly
+    # what BOX_T_DOWN/BOX_T_UP/BOX_ARC_T* already fold to in ascii mode, so
+    # the pill corner reads as a normal box corner whether or not it lines up
+    # with a divider underneath.
+    PILL_TL:            '+',
+    PILL_TR:            '+',
+    PILL_BL:            '+',
+    PILL_BR:            '+',
 }
 
 # Sparkline density ramp fallbacks (U+2581..U+2588), low->high. Some of these

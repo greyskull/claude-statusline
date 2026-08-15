@@ -727,9 +727,10 @@ def test_wide_bottom_band_no_overflow_no_detached_elbows(
 ) -> None:
     """At the bottom of the wide band (box 80-84) the three-segment tokens row
     used to overflow the box and detach its two │ from the ┬/┴ elbows. The
-    builder now drops it for the compact context line below the fit floor, so at
-    EVERY width: no rendered row is wider than the box, and every ┬/┴ is backed
-    by a │ in the adjacent row."""
+    fit floor (TOKENS_COST_MIN_WIDTH) is now pinned to MEDIUM_WIDTH == 80, i.e.
+    the wide layout's own entry point, so the row is present across this whole
+    band; regardless, at EVERY width: no rendered row is wider than the box,
+    and every ┬/┴ is backed by a │ in the adjacent row."""
     from helper import strip_ansi
     from yas.render.text import _visible_width
     _silence_dynamic(monkeypatch)
@@ -743,8 +744,12 @@ def test_wide_bottom_band_no_overflow_no_detached_elbows(
 def test_wide_bottom_band_drops_three_segment_tokens_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Below the fit floor the three-segment tokens │ cost │ rate row is dropped
-    (no 't/m' content row); at/above it the row is present."""
+    """Below the fit floor (TOKENS_COST_MIN_WIDTH == MEDIUM_WIDTH == 80) the
+    three-segment tokens │ cost │ rate row is dropped (no 't/m' content row);
+    at/above it the row is present. TOKENS_COST_MIN_WIDTH is now pinned to
+    MEDIUM_WIDTH, so the floor sits below build_wide's own box >= 80 entry
+    point — passing a sub-80 width directly to build_wide (as this seam test
+    does) is the only way left to observe the dropped row."""
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
 
@@ -752,7 +757,8 @@ def test_wide_bottom_band_drops_three_segment_tokens_row(
         return any(row.kind == 'content' and 't/m' in strip_ansi(row.content)
                    for row in spec.rows)
 
-    assert not has_tokens_row(layout.build_wide(_view(), _tick(), 82, _r))
+    assert not has_tokens_row(layout.build_wide(_view(), _tick(), 75, _r))
+    assert has_tokens_row(layout.build_wide(_view(), _tick(), 80, _r))
     assert has_tokens_row(layout.build_wide(_view(), _tick(), 100, _r))
 
 
@@ -984,8 +990,11 @@ def test_clear_timer_degrades_to_clear_only_when_both_dont_fit(
         content_rows = [row for row in spec.rows if row.kind == 'content']
         return content_rows[0].content
 
-    # Wide enough for both timers.
-    plain_both = strip_ansi(_render(76))
+    # Wide enough for both timers. (Threshold is 77, not 76: `right_text`'s
+    # model-name cell now bakes in a guaranteed trailing space -- see the
+    # no-digit-adjacent-to-border fix in renderer.py's `model_right_section`
+    # -- which costs the row's shed budget 1 column across the board.)
+    plain_both = strip_ansi(_render(77))
     assert '18:33' in plain_both and '13:27' in plain_both
 
     # Narrower: clear timer present, session timer shed.
@@ -1074,16 +1083,59 @@ def test_tokens_row_two_elbows_in_85_102_band(monkeypatch: pytest.MonkeyPatch) -
     assert len(tokens_sep.downs) == 2, f'expected 2 downs at width=95, got {tokens_sep.downs}'
 
 
-@pytest.mark.parametrize('width', [85, 90, 100, 103, 140])
+@pytest.mark.parametrize('width', [80, 85, 90, 100, 103, 140])
 def test_tokens_row_present_across_lines_segment_threshold(
     monkeypatch: pytest.MonkeyPatch, width: int,
 ) -> None:
-    """TOKENS_COST_MIN_WIDTH=85 gating is unaffected by the new lines segment:
-    the tokens/cost content row (and hence the full, not compact, context line)
-    is present at every width from 85 up through and past the 103 threshold."""
+    """TOKENS_COST_MIN_WIDTH (== MEDIUM_WIDTH == 80) gating is unaffected by the
+    new lines segment: the tokens/cost content row (and hence the full, not
+    compact, context line) is present at every width from 80 (build_wide's own
+    floor) up through and past the 103 lines-segment threshold."""
     _silence_dynamic(monkeypatch)
     spec = layout.build_wide(_view(), _tick(), width, _r)
     assert _tokens_row_indices(spec), f'tokens/cost row missing at width={width}'
+
+
+def test_context_row_upgrades_at_wide_layout_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task threshold-alignment: TOKENS_COST_MIN_WIDTH is pinned to
+    MEDIUM_WIDTH, so the rich context line (token total + fraction, e.g.
+    '150.0K (75%) 100%') and the tokens/cost row's dividers both appear from
+    box 80 -- the same box width build_wide itself starts at -- eliminating
+    the old 80-84 band where the plugin row showed but the context row was
+    still degraded to the compact '75%'-only form."""
+    from helper import strip_ansi
+    _silence_dynamic(monkeypatch)
+
+    spec = layout.build_wide(_view(), _tick(), 80, _r)
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+    assert _tokens_row_indices(spec), 'tokens/cost row missing at the wide-layout floor (box 80)'
+    assert any('%' in ln and '(' in ln for ln in lines), \
+        'expected the rich context line (fraction form) at box 80, not the compact one'
+
+
+def test_plugin_row_and_rich_context_row_copresent_at_wide_layout_floor(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empirical pin for the fixed inconsistency: at box 80 (terminal 86),
+    with plugin data present, the plugin row and the rich context row (token
+    total + fraction, e.g. '16.0K (8%) 11%') must both render together --
+    there must be no band where the plugin row shows while the context row
+    is still degraded to the compact percent-only form. Before
+    TOKENS_COST_MIN_WIDTH was aligned to MEDIUM_WIDTH, the plugin row (gated
+    only by MEDIUM_WIDTH=80) could appear up to 5 box-columns ahead of the
+    rich context row (previously gated at 85)."""
+    from helper import strip_ansi
+    _silence_dynamic(monkeypatch)
+    monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: 'foo,bar'))
+
+    spec  = layout.build_wide(_view(), _tick(), 80, _r)
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+
+    plugin_lines = [ln for ln in lines if 'foo,bar' in ln]
+    assert plugin_lines, 'plugins row should render at box 80'
+
+    assert _tokens_row_indices(spec), 'tokens/cost row missing at box 80 alongside the plugin row'
+    assert any('%' in ln and '(' in ln for ln in lines), \
+        'expected the rich context line (fraction form) co-present with the plugin row at box 80'
 
 
 def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -444,3 +444,64 @@ def test_tokens_cost_show_icons_false_session_only_drops_cost_icon() -> None:
     text = lines[0]
     assert ICON_COST not in text
     assert ICON_TOK_RATE not in text
+
+
+# show_icons=False, show_day_stats=True: with no icon to reserve the row's
+# left margin, `sess_in` (the leading number) is right-justified to `IN_W`
+# instead. Two things this must guarantee: (1) the reserved width matches
+# row 2's context-fill number (also rjust'd, in `context_line`) so the two
+# rows' leading digits share the same right edge -- regardless of how many
+# digits either value currently has; (2) growing `sess_in` past a realistic
+# "everyday" width (e.g. 25.9K -> 123.0K) doesn't ripple into the columns
+# after it or land the number flush against the row's own left border.
+
+def test_tokens_cost_show_icons_false_leading_number_right_justified() -> None:
+    lines, _cols, _mark, _min = _call(show_icons=False, sess_in=1)
+    stripped = strip_ansi(lines[0])
+    # Row content starts right after the single border-gap space border_line
+    # always inserts; IN_W is the reserved field width for the leading number.
+    lead_field = stripped[:Renderer.IN_W]
+    assert lead_field.rstrip(' ').endswith('1')
+    assert lead_field == '1'.rjust(Renderer.IN_W)
+
+
+def test_tokens_cost_show_icons_false_leading_number_right_edge_stable_across_magnitude() -> None:
+    """The right edge of the reserved `sess_in` field must not move as the
+    value grows from a small session-start number up through a realistic
+    everyday count -- otherwise every column after it (the cache/day figures,
+    the │ dividers, the cost/rate columns) would shift underneath it."""
+    small = strip_ansi(_call(show_icons=False, sess_in=1)[0][0])
+    big   = strip_ansi(_call(show_icons=False, sess_in=25_900)[0][0])
+    huge  = strip_ansi(_call(show_icons=False, sess_in=123_000)[0][0])
+    # The char immediately after the reserved field (the day-count '/') sits
+    # at the same offset regardless of sess_in's magnitude.
+    assert small[Renderer.IN_W] == '/'
+    assert big[Renderer.IN_W]   == '/'
+    assert huge[Renderer.IN_W]  == '/'
+
+
+def test_tokens_cost_show_icons_false_leading_number_matches_context_line_margin() -> None:
+    """Row 2 (`context_line`) and row 3 (`tokens_cost`) share the same
+    reserved-width convention with icons off: both rjust their leading
+    number to a fixed width immediately after border_line's own 1-space
+    gap, so the two rows' numbers share a stable right edge."""
+    from yas.session import ContextWindow
+
+    r = Renderer()
+    ctx = ContextWindow(total_input_tokens=16_000, total_output_tokens=0,
+                         context_window_size=200_000, used_percentage=8.0)
+    ctx_line = strip_ansi(r.context_line(ctx, available=76, show_icons=False))
+    tok_line = strip_ansi(_call(show_icons=False, sess_in=16_000)[0][0])
+    # Both fields are right-justified to 6 columns from the row's start
+    # (border_line's leading space is stripped from both here, since neither
+    # string above includes it -- they're raw section content).
+    assert ctx_line[:Renderer.IN_W].rstrip(' ')[-1] == tok_line[:Renderer.IN_W].rstrip(' ')[-1]
+    assert len(ctx_line[:Renderer.IN_W]) == len(tok_line[:Renderer.IN_W]) == Renderer.IN_W
+
+
+def test_tokens_cost_show_icons_true_leading_number_unchanged() -> None:
+    """With icons on, the icon itself already reserves the margin -- the
+    show_icons=False rjust fix must not perturb the icons-on row shape."""
+    on_default = _call(show_icons=True, sess_in=1)
+    on_explicit = _call(show_icons=True, sess_in=1)
+    assert on_default == on_explicit

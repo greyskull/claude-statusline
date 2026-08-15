@@ -206,6 +206,76 @@ def test_justify_path_extra_split_around_git_block(
 
 # Inter-stat breathing room inside the 5h/7d helper sections
 
+def test_justify_elapsed_field_balanced(
+    monkeypatch: pytest.MonkeyPatch, strip_ansi: Callable[[str], str],
+) -> None:
+    """The elapsed/session-timer cell is a right-justified fixed-width atom
+    baked in by ``Renderer.elapsed_section`` (``rjust(8)``). The justify pass
+    must fold that baked-in leading padding into the slack it distributes, so
+    total LHS/RHS whitespace around the visible digits is balanced (diff <=1)
+    rather than stacking a fair added-slack split on top of an already
+    right-justified string (which produced a diff of 2+, e.g. ``'   +13:27 '``)."""
+    _silence_dynamic(monkeypatch)
+    import re
+
+    tested = 0
+    for width in (100, 102, 104, 108, 111, 112, 113, 115, 120):
+        view = _view(Config(justify=True))
+        raw = strip_ansi(_rendered_lines(view, width)[1])
+        pipes = [i for i, ch in enumerate(raw) if ch == '│']
+        assert len(pipes) >= 3, f'width={width} raw={raw!r}'
+        field = raw[pipes[1] + 1:pipes[2]]
+        if not re.search(r'\+\d', field):
+            continue  # elapsed cell shed at this width
+        tested += 1
+        left  = len(field) - len(field.lstrip(' '))
+        right = len(field) - len(field.rstrip(' '))
+        assert abs(left - right) <= 1, (
+            f'width={width} field={field!r} left={left} right={right}'
+        )
+    assert tested > 0, 'no width in the sweep exercised the elapsed cell'
+
+
+def test_justify_elapsed_field_balanced_at_zero_slack(
+    monkeypatch: pytest.MonkeyPatch, strip_ansi: Callable[[str], str],
+) -> None:
+    """Regression for the residual centering defect found at widths 102/112
+    (kitchen-sink demo scenario, YAS_JUSTIFY=1): when a sibling section (e.g.
+    `fit_path` crossing a growth threshold) consumes the ENTIRE row's slack
+    in the same layout pass, `total_slack` lands on exactly 0 -- the elapsed
+    cell's baked-in `rjust(8)` asymmetry (2 leading spaces, 0 trailing) must
+    still be rebalanced to <=1 diff even though no *distributed* slack exists
+    to fold into. Before the fix this produced a diff-2 split (e.g.
+    ``'   +13:27 '``) because the rebalance was nested inside the
+    ``total_slack > 0`` gate and silently skipped.
+
+    Widths 65/66/77/78 are where the standard fixture session naturally
+    lands on total_slack == 0 (dir-full path exactly fills its budget) while
+    the elapsed cell is still active -- picked by sweeping the fixture rather
+    than forcing it, so this exercises the real shed/slack interaction
+    instead of an artificial mock."""
+    _silence_dynamic(monkeypatch)
+    import re
+
+    tested = 0
+    for width in (65, 66, 77, 78):
+        view = _view(Config(justify=True))
+        spec = layout.build_wide(view, _tick(), width, _r)
+        raw  = strip_ansi(layout.render_layout(spec, _r)[1])
+        pipes = [i for i, ch in enumerate(raw) if ch == '│']
+        assert len(pipes) >= 3, f'width={width} raw={raw!r}'
+        field = raw[pipes[1] + 1:pipes[2]]
+        if not re.search(r'\+\d', field):
+            continue  # elapsed cell shed at this width
+        tested += 1
+        left  = len(field) - len(field.lstrip(' '))
+        right = len(field) - len(field.rstrip(' '))
+        assert abs(left - right) <= 1, (
+            f'width={width} field={field!r} left={left} right={right}'
+        )
+    assert tested > 0, 'no width in the sweep exercised the elapsed cell at zero slack'
+
+
 def test_justify_widens_helper_inter_stat_gap(
     monkeypatch: pytest.MonkeyPatch, strip_ansi: Callable[[str], str],
 ) -> None:
@@ -224,3 +294,31 @@ def test_justify_widens_helper_inter_stat_gap(
     gap_on  = _gap(_rendered_lines(_view(Config(justify=True)),  width))
     assert gap_off == 1
     assert 1 < gap_on <= 3
+
+
+# Regression — no digit may ever be flush against a border char (found in the
+# final confirm pass: widths 79-81, justify=True, glyph_mode='ascii' rendered
+# `...Sonnet 4.6│` with zero trailing space). Root cause was `model_right_section`'s
+# non-pill branch baking no trailing space into `right_text` (unlike the pill
+# branch, which pads a cell after the model name) -- `build_wide`'s own `pad`
+# math could land on exactly zero spare columns at these widths, so the fix
+# bakes a guaranteed trailing space into `right_text` itself in renderer.py.
+
+@pytest.mark.parametrize('justify', [True, False])
+def test_no_digit_adjacent_to_border(
+    monkeypatch: pytest.MonkeyPatch, strip_ansi: Callable[[str], str], justify: bool,
+) -> None:
+    """Sweep widths 60-130 (ascii glyph mode, the reported failure's glyph mode)
+    and assert no rendered row ever has a digit immediately touching `│`."""
+    _silence_dynamic(monkeypatch)
+    monkeypatch.setenv('YAS_GLYPH_MODE', 'ascii')
+    import re
+    digit_touches_border = re.compile(r'\d[│|]|[│|]\d')
+
+    for width in range(60, 131):
+        view = _view(Config(justify=justify, glyph_mode='ascii'))
+        for line in _rendered_lines(view, width):
+            raw = strip_ansi(line)
+            assert not digit_touches_border.search(raw), (
+                f'width={width} justify={justify} raw={raw!r}'
+            )

@@ -229,6 +229,38 @@ def test_border_separator_dim_right_flush_pill(r: borders.BorderRenderer) -> Non
     assert stripped[4] == '┴'
 
 
+def test_ascii_mode_pill_corner_at_right_edge_is_not_blank(r: borders.BorderRenderer) -> None:
+    """Regression: PILL_TR/PILL_BR landing on the box's right edge used to
+    fold to ' ' in ascii mode, erasing the right corner entirely (audit
+    BUG 1). It must now fold to the same '+' every other corner/elbow uses.
+    """
+    from yas.render.text import apply_glyph_mode
+
+    pill = Pill(start=21, end=30, anchor=(120, 80, 80), shift=(80, 120, 80), pct=100)
+    top = apply_glyph_mode(strip_ansi(r.border_top(width=30, pill=pill)), 'ascii')
+    sep = apply_glyph_mode(strip_ansi(r.border_separator_dim(width=30, ups=(5,), pill=pill)), 'ascii')
+    assert _visible_width(top) == 30
+    assert _visible_width(sep) == 30
+    assert top[29] == '+'
+    assert sep[29] == '+'
+    assert ' ' not in top[20:30]
+    assert ' ' not in sep[20:30]
+
+
+def test_ascii_mode_pill_corner_over_divider_elbow_is_not_blank(r: borders.BorderRenderer) -> None:
+    """Regression: a pill corner coinciding with a content divider column
+    used to blank the '┬'/'┴' elbow underneath it in ascii mode instead of
+    falling through to a real corner glyph (audit BUG 1).
+    """
+    from yas.render.text import apply_glyph_mode
+
+    pill = Pill(start=15, end=20, anchor=(120, 80, 80), shift=(80, 120, 80), pct=100)
+    top = apply_glyph_mode(strip_ansi(r.border_top(width=30, downs=(15,), pill=pill)), 'ascii')
+    sep = apply_glyph_mode(strip_ansi(r.border_separator_dim(width=30, ups=(15,), pill=pill)), 'ascii')
+    assert top[14] == '+'
+    assert sep[14] == '+'
+
+
 # --- label overlay (section 3) ------------------------------------------------
 
 @pytest.mark.parametrize('method', ['border_top', 'border_separator', 'border_separator_dim'])
