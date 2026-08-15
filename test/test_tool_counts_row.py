@@ -38,13 +38,13 @@ def _tick() -> TickRecord:
 
 def _silence_dynamic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[])))
+                        classmethod(lambda cls, sid, pdir, **kwargs: subagents_mod.RunningSubagents(subagents=[])))
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
-                        classmethod(lambda cls, path: tasks_mod.TaskList(tasks=[], last_event_ts=0.0)))
+                        classmethod(lambda cls, path, **kwargs: tasks_mod.TaskList(tasks=[], last_event_ts=0.0)))
     monkeypatch.setattr(skills_mod.LoadedSkills, 'from_transcript',
-                        classmethod(lambda cls, path: skills_mod.LoadedSkills(names=[])))
+                        classmethod(lambda cls, path, **kwargs: skills_mod.LoadedSkills(names=[])))
     monkeypatch.setattr(openspec_mod.OpenSpec, 'from_cwd',
-                        classmethod(lambda cls, cwd, max_depth=None: openspec_mod.OpenSpec(changes=[])))
+                        classmethod(lambda cls, cwd, max_depth=None, **kwargs: openspec_mod.OpenSpec(changes=[])))
     monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: ''))
 
 

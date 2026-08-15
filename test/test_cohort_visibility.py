@@ -24,7 +24,10 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+import pytest
 
 from yas.constants import (
     GLYPH_SUBAGENT_DONE,
@@ -570,6 +573,215 @@ def _render_tree_states_scenario(tmp_path: Path, cfg_override=None) -> str:
 
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+# ============================================================================
+# 6.6: Retirement tests — totals_only caching and the mispredict re-parse path
+# ============================================================================
+
+def test_conclusively_retired_agent_totals_only_feeds_inout(tmp_home: Path) -> None:
+    """Task 6.6(a): A conclusively-retired agent built totals_only still contributes
+    total_input/output correctly to session aggregates."""
+    from test_running_subagents import (
+        _subagents_dir,
+        _write_agent,
+    )
+    from yas.info.parsecache import TranscriptCache
+
+    session_id = 'sess-retire-a'
+    subagents_dir = _subagents_dir(tmp_home)
+    _, agent_jsonl = _write_agent(subagents_dir, 'agent-retire-a')
+
+    # Build a transcript that will parse to known token counts
+    lines = [
+        json.dumps({
+            'type': 'assistant',
+            'timestamp': '2025-01-01T12:00:00.000Z',
+            'message': {
+                'id': 'msg-001',
+                'model': 'claude-3.5-sonnet',
+                'stop_reason': 'end_turn',
+                'usage': {
+                    'input_tokens': 100,
+                    'cache_creation_input_tokens': 10,
+                    'cache_read_input_tokens': 20,
+                    'output_tokens': 50,
+                },
+                'content': [{'type': 'text', 'text': 'response'}]
+            }
+        }) + '\n',
+    ]
+    agent_jsonl.write_text(''.join(lines))
+
+    # Set up a cache with old file mtime
+    mtime = 1_900_000.0
+    os.utime(agent_jsonl, (mtime, mtime))
+    st = agent_jsonl.stat()
+
+    cache = TranscriptCache(session_id)
+
+    # Parse and cache
+    from yas.info.subagents import parse_transcript
+    parsed = parse_transcript(agent_jsonl, resume_after=0.0, totals_only=False)
+    cache.put_parse(str(agent_jsonl), st, 0.0, parsed)
+
+    # Verify the parse has the expected totals
+    assert parsed[0] == 110, f"Expected billed_in=110, got {parsed[0]}"
+    assert parsed[1] == 20, f"Expected cache_read_in=20, got {parsed[1]}"
+    assert parsed[2] == 50, f"Expected output=50, got {parsed[2]}"
+
+    # Mark as terminal
+    cache.mark_terminal(str(agent_jsonl))
+    cache.save()
+
+    # Verify the cache reports terminal
+    loaded_cache = TranscriptCache.load(session_id)
+    assert loaded_cache.is_terminal(str(agent_jsonl), st)
+
+
+def test_terminal_but_recent_agent_not_reduced(tmp_home: Path) -> None:
+    """Task 6.6(b): An agent that is terminal but recent (end_ts too close to now)
+    is NOT marked as conclusively-retired and gets full parse, not totals_only."""
+    from yas.info.subagents import _conclusively_retired
+
+    # Set up a recent end_ts
+    now = 3_000_000.0
+    # Agent ended only 10 seconds ago (within grace period)
+    end_ts = now - 10.0
+    mtime = now - 5.0
+    status = 'completed'
+
+    # Should NOT be conclusively retired (too recent)
+    is_retired = _conclusively_retired(now, status, end_ts, mtime)
+    assert not is_retired, "Recent terminal agent should not be conclusively retired"
+
+
+def test_conclusively_retired_predicate_old_agent_old_mtime(tmp_home: Path) -> None:
+    """An old agent with old mtime is conclusively retired."""
+    from yas.info.subagents import _conclusively_retired, RunningSubagents
+
+    now = 3_000_000.0
+    # Agent ended very long ago
+    end_ts = now - (RunningSubagents.FINISHED_LINGER_SECONDS + RunningSubagents.TERMINAL_SKEW_SECONDS + 1000)
+    # Mtime very old too
+    mtime = now - (RunningSubagents.ABANDONED_HORIZON_SECONDS + RunningSubagents.TERMINAL_SKEW_SECONDS + 1000)
+    status = 'completed'
+
+    is_retired = _conclusively_retired(now, status, end_ts, mtime)
+    assert is_retired, "Old terminal agent with old mtime should be conclusively retired"
+
+
+def test_mispredict_path_re_parse_restores_real_values(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 6.6(c): The mispredict path — when an agent is visible despite being
+    marked for totals_only, visible() re-parses it and restores real model and
+    last_activity values."""
+    from test_running_subagents import (
+        _subagents_dir,
+        _write_agent,
+        SESSION_ID,
+        PROJECT_DIR,
+    )
+    from yas.info.parsecache import TranscriptCache
+    from yas.info.subagents import (
+        RunningSubagents,
+    )
+
+    # Use the same session_id and project_dir as _subagents_dir expects
+    session_id = SESSION_ID
+    project_dir = PROJECT_DIR
+    subagents_dir = _subagents_dir(tmp_home)
+    _, agent_jsonl = _write_agent(subagents_dir, 'agent-mispredict', mtime=time.time())
+
+    # Build a transcript with real model and activity
+    lines = [
+        json.dumps({
+            'type': 'assistant',
+            'timestamp': '2025-01-01T12:00:00.000Z',
+            'message': {
+                'id': 'msg-001',
+                'model': 'claude-3.5-sonnet',
+                'stop_reason': 'end_turn',
+                'usage': {
+                    'input_tokens': 100,
+                    'cache_creation_input_tokens': 10,
+                    'cache_read_input_tokens': 20,
+                    'output_tokens': 50,
+                },
+                'content': [
+                    {'type': 'tool_use', 'name': 'TestTool', 'id': 'tooluse-1', 'input': {'arg': 'value'}}
+                ]
+            }
+        }) + '\n',
+    ]
+    agent_jsonl.write_text(''.join(lines))
+
+    now = time.time()
+
+    # Step 1: Create a cache and mark the agent as conclusively retired
+    # We monkeypatch _conclusively_retired to always return True for this agent
+    original_retired = __import__('yas.info.subagents', fromlist=['_conclusively_retired'])._conclusively_retired
+
+    def always_retired_for_mispredict(test_now, status, end_ts, mtime):
+        # Always return True for this specific path
+        return True
+
+    monkeypatch.setattr(
+        'yas.info.subagents._conclusively_retired',
+        always_retired_for_mispredict,
+    )
+
+    # Build initial RunningSubagents with cache, which will mark it as totals_only
+    cache = TranscriptCache(session_id)
+    cache.save()  # Initialize the cache file
+
+    running = RunningSubagents.from_session(session_id, project_dir, now=now, cache=cache)
+
+    # Verify it was marked as totals_only
+    assert len(running.subagents) == 1
+    sub = running.subagents[0]
+    assert sub.agent_id in running.totals_only_ids
+
+    # The totals_only fields should be blank
+    assert sub.model == '', f"Expected blank model in totals_only, got {sub.model}"
+    assert sub.last_activity == ('', '', {}), f"Expected blank last_activity in totals_only, got {sub.last_activity}"
+
+    # But totals should still be there
+    assert sub.billed_in == 110
+    assert sub.cache_read_in == 20
+    assert sub.output == 50
+
+    # Restore original _conclusively_retired for the visible() call
+    monkeypatch.setattr(
+        'yas.info.subagents._conclusively_retired',
+        original_retired,
+    )
+
+    # Step 2: Call visible() which should detect the totals_only mismatch
+    # and re-parse to restore real values
+    visible_list = running.visible(now, last_prompt_ts=None)
+
+    # The agent should still be visible (re-parse found real values)
+    assert len(visible_list) == 1
+    restored_sub = visible_list[0]
+
+    # Now it should have real model and last_activity (from full re-parse)
+    assert restored_sub.model == 'claude-3.5-sonnet', \
+        f"Expected real model after re-parse, got {restored_sub.model}"
+    assert restored_sub.last_activity[0] == 'tool_use', \
+        f"Expected tool_use activity type, got {restored_sub.last_activity[0]}"
+    assert restored_sub.last_activity[1] == 'TestTool', \
+        f"Expected TestTool name, got {restored_sub.last_activity[1]}"
+
+    # totals_only_ids should be cleared after re-parse
+    assert len(running.totals_only_ids) == 0, "totals_only_ids should be cleared after re-parse"
+
+    # Step 3: Call visible() again to verify idempotence (no re-parse this time)
+    visible_list2 = running.visible(now, last_prompt_ts=None)
+    assert len(visible_list2) == 1
+    assert visible_list2[0].model == 'claude-3.5-sonnet', "Model should persist after second visible() call"
+    assert len(running.totals_only_ids) == 0, "totals_only_ids should remain empty"
 
 
 def test_tree_states_scenario_shows_four_states(tmp_path: Path) -> None:

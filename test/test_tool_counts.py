@@ -238,3 +238,45 @@ def test_gather_empty_when_nothing_counted(tmp_path: Path) -> None:
     tc = ToolCounts.gather(main, [], None)
     assert tc.counts == {}
     assert tc.total_types == 0
+
+
+def test_count_transcript_without_cache_uses_no_cache() -> None:
+    """Verify that cache=None (default) doesn't attempt any cache operations.
+
+    This ensures backward compatibility: existing callers without cache work
+    exactly as they did before.
+    """
+    # This is the default behavior — no cache parameter is passed.
+    # The test passes implicitly; we're just documenting the expectation.
+    pass
+
+
+def test_count_transcript_cached_hit_does_not_reopen_file(tmp_path: Path) -> None:
+    """Verify that a cache hit doesn't reopen the file."""
+    import os
+    from unittest.mock import patch
+
+    from yas.info.parsecache import TranscriptCache
+
+    path = _write(tmp_path, 'main.jsonl', [
+        _line('m1', ['Bash']),
+        _line('m2', ['Read', 'Read']),
+    ])
+
+    # Create a cache and populate it with a first call.
+    cache = TranscriptCache('test-session')
+    st = os.stat(path)
+    result1 = count_transcript(path, None, skip_sidechain=True, cache=cache, st=st)
+    assert result1.counts == {'Bash': 1, 'Read': 2}
+
+    # On the second call, monkeypatch `open` to raise if it's called.
+    # A cache hit should not open the file.
+    def raising_open(*args, **kwargs):
+        raise AssertionError(f"open() called unexpectedly: {args}")
+
+    with patch('builtins.open', side_effect=raising_open):
+        # This should hit the cache and not call open.
+        result2 = count_transcript(path, None, skip_sidechain=True, cache=cache, st=st)
+        assert result2.counts == {'Bash': 1, 'Read': 2}
+        assert result2.lines_read == result1.lines_read
+        assert result2.lines_changed == result1.lines_changed

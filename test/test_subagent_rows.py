@@ -971,7 +971,7 @@ def test_two_line_activity_caps_at_100_when_huge() -> None:
 def _render_wide(monkeypatch: pytest.MonkeyPatch, subs: list[RunningSubagent], width: int = 120) -> str:
     monkeypatch.setattr(
         subagents_mod.RunningSubagents, 'from_session',
-        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=subs)),
+        classmethod(lambda cls, sid, pdir, **kwargs: subagents_mod.RunningSubagents(subagents=subs)),
     )
     session = session_mod.SessionInfo.from_dict(json.loads(SESSION.read_text()))
     view    = SessionView(session, Config())
@@ -1714,7 +1714,7 @@ def test_build_wide_tree_mode_renders_branches(monkeypatch: pytest.MonkeyPatch) 
                           last_activity=('tool_use', 'Read', {'file_path': 'z.py'}))
     monkeypatch.setattr(
         subagents_mod.RunningSubagents, 'from_session',
-        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[root, kid1, kid2])),
+        classmethod(lambda cls, sid, pdir, **kwargs: subagents_mod.RunningSubagents(subagents=[root, kid1, kid2])),
     )
     session = session_mod.SessionInfo.from_dict(json.loads(SESSION.read_text()))
     view    = SessionView(session, Config())

@@ -1,15 +1,27 @@
-"""RunningSubagent and RunningSubagents — active sub-agent discovery."""
+"""RunningSubagent and RunningSubagents — active sub-agent discovery.
+
+This module contains per-render transcript parsers and tail-cache readers.
+The module-level tail caches (_notif_tail_cache, _tool_result_tail_cache) hold
+process-local state across renders; per-session persistent tail state is available
+via yas.info.parsecache.TranscriptCache for warm-start across process restarts.
+When a TranscriptCache is provided, tail readers load from and persist to the cache,
+enabling a render in a fresh process to reuse the tail offset and findings from
+the previous render without rescanning the whole transcript."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from yas.constants import CLAUDE_DIR, _sanitize, subagent_is_terminal, subagent_status
+
+if TYPE_CHECKING:
+    from yas.info.parsecache import TranscriptCache
 
 
 def read_last_prompt_ts(session_id: str) -> float | None:
@@ -131,7 +143,7 @@ def _extract_notifications(line: str) -> list[_Notification]:
     return out
 
 
-def _tail_read_notifications(path: Path) -> list[_Notification]:
+def _tail_read_notifications(path: Path, cache: TranscriptCache | None = None) -> list[_Notification]:
     '''Read new <task-notification> records from path since it was last seen.
 
     Cached by (path, mtime, size): an unchanged file returns the cached list
@@ -141,8 +153,18 @@ def _tail_read_notifications(path: Path) -> list[_Notification]:
     streamed mid-write is re-read whole on the next call rather than parsed
     partially. Never raises; an unreadable file yields whatever was already
     cached (or nothing, on first sight).
+
+    When cache is not None, per-session persistent tail state may be loaded
+    and stored to enable warm-start across renders.
     '''
     key = str(path)
+    # Seed the module-level cache from persistent storage if available.
+    if cache is not None and key not in _notif_tail_cache:
+        cached_state = cache.get_notif(key)
+        if cached_state is not None:
+            mtime, size, offset, items = cached_state
+            _notif_tail_cache[key] = _TailCacheEntry(mtime, size, offset, items)
+
     try:
         st = path.stat()
     except OSError:
@@ -164,13 +186,19 @@ def _tail_read_notifications(path: Path) -> list[_Notification]:
             chunk = fh.read()
     except OSError:
         _notif_tail_cache[key] = _TailCacheEntry(st.st_mtime, st.st_size, prev_offset, notifications)
+        if cache is not None:
+            cache.put_notif(key, st.st_mtime, st.st_size, prev_offset, notifications)
         return notifications
 
     last_nl = chunk.rfind(b'\n')
     if last_nl == -1:
         # No complete line has arrived since the last read; leave the offset
         # put so the still-growing partial line is re-read whole next time.
+        # Note: we deliberately store prev_offset (not new_offset) here, so the
+        # still-partial line is re-read whole on the next call.
         _notif_tail_cache[key] = _TailCacheEntry(st.st_mtime, st.st_size, prev_offset, notifications)
+        if cache is not None:
+            cache.put_notif(key, st.st_mtime, st.st_size, prev_offset, notifications)
         return notifications
 
     new_offset = prev_offset + last_nl + 1
@@ -180,6 +208,8 @@ def _tail_read_notifications(path: Path) -> list[_Notification]:
         notifications.extend(_extract_notifications(raw_line.decode('utf-8', errors='ignore')))
 
     _notif_tail_cache[key] = _TailCacheEntry(st.st_mtime, st.st_size, new_offset, notifications)
+    if cache is not None:
+        cache.put_notif(key, st.st_mtime, st.st_size, new_offset, notifications)
     return notifications
 
 
@@ -235,15 +265,25 @@ def _extract_tool_results(line: str) -> list[tuple[str, str, float]]:
     return out
 
 
-def _tail_read_tool_results(path: Path) -> dict[str, tuple[str, float]]:
+def _tail_read_tool_results(path: Path, cache: TranscriptCache | None = None) -> dict[str, tuple[str, float]]:
     '''Read new tool_use_id -> (status, ts) pairs from path's toolUseResult
     sibling fields since it was last seen.
 
     Same tail-cache shape as _tail_read_notifications: an unchanged (mtime,
     size) pair skips all I/O; a changed file is read only from the previously
     recorded byte offset onward, never re-parsing the whole transcript.
+
+    When cache is not None, per-session persistent tail state may be loaded
+    and stored to enable warm-start across renders.
     '''
     key = str(path)
+    # Seed the module-level cache from persistent storage if available.
+    if cache is not None and key not in _tool_result_tail_cache:
+        cached_state = cache.get_tool_results(key)
+        if cached_state is not None:
+            mtime, size, offset, results = cached_state
+            _tool_result_tail_cache[key] = _ToolResultCacheEntry(mtime, size, offset, results)
+
     try:
         st = path.stat()
     except OSError:
@@ -264,13 +304,19 @@ def _tail_read_tool_results(path: Path) -> dict[str, tuple[str, float]]:
             chunk = fh.read()
     except OSError:
         _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, prev_offset, results)
+        if cache is not None:
+            cache.put_tool_results(key, st.st_mtime, st.st_size, prev_offset, results)
         return results
 
     last_nl = chunk.rfind(b'\n')
     if last_nl == -1:
         # No complete line has arrived since the last read; leave the offset
         # put so the still-growing partial line is re-read whole next time.
+        # Note: we deliberately store prev_offset (not new_offset) here, so the
+        # still-partial line is re-read whole on the next call.
         _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, prev_offset, results)
+        if cache is not None:
+            cache.put_tool_results(key, st.st_mtime, st.st_size, prev_offset, results)
         return results
 
     new_offset = prev_offset + last_nl + 1
@@ -281,6 +327,8 @@ def _tail_read_tool_results(path: Path) -> dict[str, tuple[str, float]]:
             results[tool_use_id] = (status, ts)
 
     _tool_result_tail_cache[key] = _ToolResultCacheEntry(st.st_mtime, st.st_size, new_offset, results)
+    if cache is not None:
+        cache.put_tool_results(key, st.st_mtime, st.st_size, new_offset, results)
     return results
 
 
@@ -344,7 +392,9 @@ class _NotifLookup(NamedTuple):
     notif_count:  int
 
 
-def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dict[str, _NotifLookup]:
+def _collect_task_notifications(
+    session_jsonl: Path, subagents_dir: Path, cache: TranscriptCache | None = None
+) -> dict[str, _NotifLookup]:
     '''Build a ``{task_id: _NotifLookup(status, ts, prev_ts, count)}`` map for one session tree.
 
     Scans the top-level session ``.jsonl`` AND every ``subagents/agent-*.jsonl``
@@ -360,11 +410,13 @@ def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dic
     number of DISTINCT (deduped) notifications observed for that task-id —
     the real run count, not the raw record count (a resumed agent notifies
     more than once).
+
+    When cache is not None, per-session persistent tail state enables warm-start.
     '''
     by_task: dict[str, list[_Notification]] = {}
 
     def _absorb(path: Path) -> None:
-        for note in _tail_read_notifications(path):
+        for note in _tail_read_notifications(path, cache=cache):
             if note.task_id:
                 by_task.setdefault(note.task_id, []).append(note)
 
@@ -389,7 +441,12 @@ def _collect_task_notifications(session_jsonl: Path, subagents_dir: Path) -> dic
 
 
 def parse_transcript(
-    jsonl: Path, resume_after: float = 0.0,
+    jsonl: Path,
+    resume_after: float = 0.0,
+    *,
+    cache: TranscriptCache | None = None,
+    st: os.stat_result | None = None,
+    totals_only: bool = False,
 ) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float]:
     """Parse one agent-*.jsonl transcript into the subagent metric tuple.
 
@@ -407,19 +464,150 @@ def parse_transcript(
     ``run_start_ts`` is ``0.0`` when ``resume_after`` is ``0.0`` (not asked
     for) or no later line was found (caller falls back to ``resume_after``
     itself). Never raises; an unreadable transcript yields zeroes.
+
+    When cache is not None and totals_only is False, attempts to load a cached
+    parse result keyed by (path, resume_after). st, if provided, is used as the
+    file stat; otherwise it is re-fetched. After a full parse, stores the result
+    in the cache. totals_only=True results are NEVER cached (they have blanked
+    fields that would poison a later full-fidelity read).
+
+    When totals_only is True, skips model resolution, tag/regex extraction, and
+    last-activity tracking, returning model='' and last_activity=('', '', {}).
+    All other fields (billed_in, cache_read_in, output, first_ts, end_ts,
+    run_start_ts) MUST equal the full-parse value. This mode filters the input
+    file in binary before json.loads to improve performance on very large
+    transcripts, but always decodes the FIRST and LAST complete lines to ensure
+    first_ts, run_start_ts, and end_ts stay exact.
     """
-    seen: set[str] = set()
+    # Try to load from cache if available and not totals_only.
+    if cache is not None and not totals_only:
+        if st is None:
+            try:
+                st = jsonl.stat()
+            except OSError:
+                st = None
+        if st is not None:
+            cached = cache.get_parse(str(jsonl), st, resume_after)
+            if cached is not None:
+                return cached
+
+    # totals_only mode: skip model/activity tracking, pre-filter usage lines
+    # for performance on large transcripts, but always decode first/last lines
+    # to ensure first_ts, run_start_ts, end_ts stay exact. If resume_after > 0,
+    # must also decode timestamped lines before the first usage line.
+    if totals_only:
+        seen: set[str] = set()
+        usage_by_id: dict[str, tuple[int, int, int]] = {}
+        first_ts     = 0.0
+        run_start_ts = 0.0
+        end_ts       = 0.0
+        model        = ''
+        last_activity: tuple[str, str, dict[str, object]] = ('', '', {})
+
+        try:
+            with jsonl.open('rb') as fh:
+                content = fh.read()
+        except OSError:
+            result: tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float] = (
+                0, 0, 0, 0.0, '', ('', '', {}), 0.0, 0.0,
+            )
+            # Never cache a totals_only result (it has blanked fields).
+            return result
+
+        # Split by newlines to find first/last complete lines.
+        lines = content.split(b'\n')
+        if not lines:
+            result = (0, 0, 0, 0.0, '', ('', '', {}), 0.0, 0.0)
+            return result
+
+        need_run_start = resume_after > 0.0
+
+        # Always decode the first complete line (might be empty).
+        if lines:
+            first_line = lines[0]
+            if first_line:
+                try:
+                    d = json.loads(first_line.decode('utf-8', errors='ignore'))
+                    ts_raw = d.get('timestamp', '')
+                    if ts_raw:
+                        first_ts = _parse_iso_to_epoch(ts_raw)
+                except (ValueError, TypeError):
+                    pass
+
+        # Process all lines: decode timestamped + usage lines.
+        for i, raw_line in enumerate(lines):
+            if not raw_line:
+                continue
+
+            # Always decode timestamped lines while looking for run_start_ts.
+            if need_run_start and b'"timestamp"' in raw_line:
+                try:
+                    d = json.loads(raw_line.decode('utf-8', errors='ignore'))
+                    ts_raw = d.get('timestamp', '')
+                    if ts_raw:
+                        parsed = _parse_iso_to_epoch(ts_raw)
+                        if parsed > resume_after:
+                            run_start_ts = parsed
+                            need_run_start = False
+                except (ValueError, TypeError):
+                    pass
+
+            # Pre-filter: only decode usage lines.
+            if b'"usage"' not in raw_line or b'"assistant"' not in raw_line:
+                continue
+
+            try:
+                d = json.loads(raw_line.decode('utf-8', errors='ignore'))
+            except (ValueError, TypeError):
+                continue
+
+            msg = d.get('message') or {}
+            mid = msg.get('id')
+
+            # Capture end_ts from end_turn (last-write-wins).
+            try:
+                stop   = msg.get('stop_reason')
+                ts_raw = d.get('timestamp', '')
+                line_ts = _parse_iso_to_epoch(ts_raw) if ts_raw else 0.0
+                if stop == 'end_turn' and line_ts:
+                    end_ts = line_ts
+                elif stop != 'end_turn':
+                    end_ts = 0.0
+            except (ValueError, TypeError, AttributeError):
+                pass
+
+            if not mid:
+                continue
+
+            # Capture usage (last-line-wins).
+            u = msg.get('usage') or {}
+            usage_by_id[mid] = (
+                (u.get('input_tokens', 0) or 0) + (u.get('cache_creation_input_tokens', 0) or 0),
+                u.get('cache_read_input_tokens', 0) or 0,
+                u.get('output_tokens', 0) or 0,
+            )
+
+        billed_in     = sum(billed for billed, _, _ in usage_by_id.values())
+        cache_read_in = sum(cached for _, cached, _ in usage_by_id.values())
+        output        = sum(out for _, _, out in usage_by_id.values())
+
+        # Never cache totals_only results (blanked fields would poison full parses).
+        result = (billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, run_start_ts)
+        return result
+
+    # Full parse mode (not totals_only).
+    seen = set()
     # Usage is keyed by message id with last-line-wins: streaming re-writes
     # the same id as it appends content blocks, and the usage counters GROW
     # across those writes — the final one carries the message's real totals.
     # Accumulating only the first write (behind the dedup) freezes usage at
     # the first partial snapshot and undercounts output tokens.
-    usage_by_id: dict[str, tuple[int, int, int]] = {}
+    usage_by_id = {}
     first_ts     = 0.0
     run_start_ts = 0.0
     end_ts       = 0.0
     model        = ''
-    last_activity: tuple[str, str, dict[str, object]] = ('', '', {})
+    last_activity = ('', '', {})
     # Activity is scoped to the FINAL message: block memory accumulates across
     # the streamed writes of one message id and resets when the id changes, so
     # a message's later tool_use/text writes are observed — its first streamed
@@ -563,7 +751,20 @@ def parse_transcript(
     # not prose pattern-matching) for callers that still consult it (e.g.
     # info/workflows.py), but RunningSubagent.end_ts is overwritten from the
     # notification map, never from this heuristic.
-    return billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, run_start_ts
+
+    result = (billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, run_start_ts)
+
+    # Store in cache if available and not totals_only.
+    if cache is not None:
+        if st is None:
+            try:
+                st = jsonl.stat()
+            except OSError:
+                st = None
+        if st is not None:
+            cache.put_parse(str(jsonl), st, resume_after, result)
+
+    return result
 
 
 def _build_tree_index(
@@ -892,10 +1093,15 @@ class RunningSubagent:
 
 
 class RunningSubagents:
-    __slots__ = ('subagents',)
+    __slots__ = ('subagents', 'totals_only_ids')
 
-    def __init__(self, subagents: list[RunningSubagent] | None = None) -> None:
+    def __init__(self, subagents: list[RunningSubagent] | None = None, totals_only_ids: dict[str, float] | None = None) -> None:
         self.subagents = subagents if subagents is not None else []
+        # Map of agent_id -> boundary_ts for agents parsed in totals_only mode.
+        # Used by visible() to re-parse full versions when transitioning from
+        # cache-fast to cache-miss. Empty frozenset by default; stored as dict
+        # with boundary_ts values to enable clean re-parse calls.
+        self.totals_only_ids = totals_only_ids if totals_only_ids is not None else {}
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RunningSubagents):
@@ -940,7 +1146,14 @@ class RunningSubagents:
     STALE_SECONDS = LIVENESS_WINDOW_SECONDS
 
     @classmethod
-    def from_session(cls, session_id: str, project_dir: str, now: float | None = None) -> RunningSubagents:
+    def from_session(
+        cls,
+        session_id: str,
+        project_dir: str,
+        now: float | None = None,
+        *,
+        cache: TranscriptCache | None = None,
+    ) -> RunningSubagents:
         if not session_id or not project_dir:
             return cls()
         # now is injectable for tests; defaults to wall-clock time so the
@@ -965,8 +1178,9 @@ class RunningSubagents:
         # <task-notification> records, keyed by task-id == agent-<id>.jsonl
         # filename stem minus the "agent-" prefix. See _collect_task_notifications.
         session_jsonl = CLAUDE_DIR / 'projects' / project_slug / f'{session_id}.jsonl'
-        notif_map = _collect_task_notifications(session_jsonl, subagents_dir)
+        notif_map = _collect_task_notifications(session_jsonl, subagents_dir, cache=cache)
         subagents: list[RunningSubagent] = []
+        totals_only_ids: dict[str, float] = {}
         try:
             for meta in subagents_dir.glob('*.meta.json'):
                 agent_type = ''
@@ -1004,7 +1218,8 @@ class RunningSubagents:
                 if not jsonl.is_file():
                     continue
                 try:
-                    mtime = jsonl.stat().st_mtime
+                    st = jsonl.stat()
+                    mtime = st.st_mtime
                 except OSError:
                     continue
 
@@ -1037,7 +1252,7 @@ class RunningSubagents:
                 prev_notif_ts = 0.0
                 end_ts        = 0.0
                 if tool_use_id and parent_jsonl.is_file():
-                    tool_result = _tail_read_tool_results(parent_jsonl).get(tool_use_id)
+                    tool_result = _tail_read_tool_results(parent_jsonl, cache=cache).get(tool_use_id)
                     if tool_result is not None and tool_result[0] == 'completed':
                         status = 'completed'
                         end_ts = tool_result[1] if tool_result[1] > 0 else mtime
@@ -1111,9 +1326,22 @@ class RunningSubagents:
                 else:
                     boundary_ts = 0.0
 
+                # Decide whether to use totals_only mode: when cache is available,
+                # the agent is conclusively retired, and not yet cached as terminal.
+                use_totals_only = False
+                if cache is not None and _conclusively_retired(now, status, end_ts, mtime):
+                    if not cache.is_terminal(str(jsonl), st):
+                        use_totals_only = True
+                        totals_only_ids[jsonl.stem] = boundary_ts
+
                 billed_in, cache_read_in, output, first_ts, model, last_activity, transcript_end_ts, parsed_run_start = (
-                    cls._parse_transcript(jsonl, boundary_ts)
+                    parse_transcript(jsonl, boundary_ts, cache=cache, st=st, totals_only=use_totals_only)
                 )
+
+                # Mark as terminal in cache if conclusively retired.
+                if cache is not None and _conclusively_retired(now, status, end_ts, mtime):
+                    cache.mark_terminal(str(jsonl))
+
                 if meta_model:
                     model = meta_model
 
@@ -1163,7 +1391,7 @@ class RunningSubagents:
         except OSError:
             pass
         subagents.sort(key=lambda s: s.first_timestamp)
-        return cls(subagents=subagents)
+        return cls(subagents=subagents, totals_only_ids=totals_only_ids)
 
     @classmethod
     def _live_ancestors(cls, subs: list[RunningSubagent], now: float) -> set[int]:
@@ -1261,7 +1489,63 @@ class RunningSubagents:
             # the much longer ABANDONED_HORIZON_SECONDS before sweeping.
             return now - sub.mtime > self.ABANDONED_HORIZON_SECONDS
 
-        return [sub for sub in candidates if not _retired(sub)]
+        visible_list = [sub for sub in candidates if not _retired(sub)]
+
+        # Task 3.10: Re-parse agents that were cached in totals_only mode.
+        # When a cache hit exists for a totals_only parse (because the agent
+        # was conclusively retired on an earlier render), we have blanked fields
+        # (model='', last_activity=('', '', {})). If the agent is still visible,
+        # re-run a full parse to restore real values and keep them in sync with
+        # the cached tail state. This re-parse is idempotent (re-entering visible()
+        # must not re-parse again) because the boundary_ts comes from the stored
+        # totals_only_ids dict, which was populated at from_session time and never
+        # changes; the cache itself detects the miss and returns None for a full
+        # parse, triggering a re-read and re-store.
+        if self.totals_only_ids:
+            reparsed_subs = {}
+            for sub in visible_list:
+                if sub.agent_id in self.totals_only_ids:
+                    boundary_ts = self.totals_only_ids[sub.agent_id]
+                    jsonl = Path(sub.jsonl_path)
+                    try:
+                        billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, parsed_run_start = (
+                            parse_transcript(jsonl, boundary_ts, totals_only=False)
+                        )
+                        # Rebuild the agent with the full-fidelity values.
+                        sub_rebuilt = RunningSubagent(
+                            agent_type      = sub.agent_type,
+                            description     = sub.description,
+                            billed_in       = billed_in,
+                            output          = output,
+                            first_timestamp = first_ts,
+                            model           = model,
+                            cache_read_in   = cache_read_in,
+                            total_input     = billed_in + cache_read_in,
+                            last_activity   = last_activity,
+                            end_ts          = sub.end_ts,
+                            mtime           = sub.mtime,
+                            agent_id        = sub.agent_id,
+                            jsonl_path      = sub.jsonl_path,
+                            parent_id       = sub.parent_id,
+                            spawn_depth     = sub.spawn_depth,
+                            status          = sub.status,
+                            run_count       = sub.run_count,
+                            is_fork         = sub.is_fork,
+                            resumed         = sub.resumed,
+                            run_start_ts    = parsed_run_start if parsed_run_start > 0 else boundary_ts if boundary_ts > 0 else first_ts,
+                        )
+                        reparsed_subs[id(sub)] = sub_rebuilt
+                    except OSError:
+                        pass
+
+            # Replace reparsed agents in both self.subagents and the returned list.
+            if reparsed_subs:
+                self.subagents = [reparsed_subs.get(id(s), s) for s in self.subagents]
+                visible_list = [reparsed_subs.get(id(s), s) for s in visible_list]
+                # Clear totals_only_ids to prevent re-parsing on next visible() call.
+                self.totals_only_ids.clear()
+
+        return visible_list
 
     @staticmethod
     def _parse_transcript(
@@ -1270,3 +1554,36 @@ class RunningSubagents:
         # Thin delegator to the module-level parse_transcript, kept so existing
         # callers/tests referencing RunningSubagents._parse_transcript still work.
         return parse_transcript(jsonl, resume_after)
+
+
+def _conclusively_retired(now: float, status: str, end_ts: float, mtime: float) -> bool:
+    '''Conservative predicate: True only when an agent is provably permanently done.
+
+    Returns True when ALL of:
+    - status is terminal (in _TERMINAL_STATUSES)
+    - end_ts > 0 (authoritative completion signal received)
+    - now - end_ts > max(FINISHED_LINGER_SECONDS, COHORT_GRACE_SECONDS) + TERMINAL_SKEW_SECONDS
+      (the agent ended long enough ago to survive clock-skew reconciliation and
+      cohort-retirement grace periods combined)
+    - now - mtime > ABANDONED_HORIZON_SECONDS + TERMINAL_SKEW_SECONDS (the transcript
+      has gone silent for long enough that we can be confident no resume will land)
+
+    This is a conservative predicate: false negatives (returning False when an agent
+    is actually conclusively retired) are free and harmless — the agent stays
+    listed a bit longer. False positives (returning True for a live agent) would be
+    caught and corrected by task 3.10's re-parse logic in visible(), but avoiding
+    them here keeps the cache work minimal.
+
+    Used to determine when to cache a transcript as conclusively terminal
+    (cache.mark_terminal) and whether to do a fast totals_only parse instead of
+    a full parse.
+    '''
+    return (
+        status in _TERMINAL_STATUSES
+        and end_ts > 0
+        and now - end_ts > max(
+            RunningSubagents.FINISHED_LINGER_SECONDS,
+            RunningSubagents.COHORT_GRACE_SECONDS,
+        ) + RunningSubagents.TERMINAL_SKEW_SECONDS
+        and now - mtime > RunningSubagents.ABANDONED_HORIZON_SECONDS + RunningSubagents.TERMINAL_SKEW_SECONDS
+    )

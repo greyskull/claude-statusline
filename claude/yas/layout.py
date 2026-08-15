@@ -916,7 +916,8 @@ def build_wide(
     # render (previously only when `cfg.show_tool_uses` was on, for the
     # per-tool row further down) — needed to feed the session-total lines
     # read/changed segment into `tokens_cost` below. Accepted +2.9ms cost per
-    # design.md Decision 6.
+    # design.md Decision 6. This cost can be amortized when transcripts are
+    # unchanged via the transcript cache (openspec/changes/cache-transcript-parses).
     line_tokens, vsep_cols, _mark_col, tokens_min_w = r.tokens_cost(
         usage.billed_in, usage.cache_read, usage.out,
         token_log.day_in, token_log.day_cache_read, token_log.day_out,
