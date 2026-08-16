@@ -130,6 +130,61 @@ def test_crash_resume(tmp_home):
         assert not (claude_dir / name).exists()
 
 
+def test_statusline_theme_kept_when_toml_has_no_theme_line(tmp_home):
+    # yas.toml doesn't fold the legacy theme (missing entirely, or present
+    # but without a `theme =` line) — migrate() must not delete the only
+    # remaining copy of the user's theme choice.
+    claude_dir = tmp_home / '.claude'
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    theme_file = claude_dir / 'statusline-theme'
+    theme_file.write_text('dracula')
+
+    assert migrate() is True
+    assert theme_file.exists()
+    assert theme_file.read_text() == 'dracula'
+
+
+def test_statusline_theme_kept_when_yas_toml_missing(tmp_home):
+    claude_dir = tmp_home / '.claude'
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    theme_file = claude_dir / 'statusline-theme'
+    theme_file.write_text('dracula')
+    assert not (claude_dir / 'yas.toml').exists()
+
+    assert migrate() is True
+    assert theme_file.exists()
+
+
+def test_statusline_theme_deleted_once_folded_into_toml(tmp_home):
+    # ops/install.sh's fold_legacy_theme() writes the `theme =` line into
+    # yas.toml before migrate() runs — once it's there, the legacy file is
+    # safe to retire.
+    claude_dir = tmp_home / '.claude'
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    theme_file = claude_dir / 'statusline-theme'
+    theme_file.write_text('dracula')
+    (claude_dir / 'yas.toml').write_text('[appearance]\ntheme = "dracula"\n')
+
+    assert migrate() is True
+    assert not theme_file.exists()
+
+
+def test_mkstemp_oserror_does_not_raise(tmp_home, monkeypatch):
+    # tempfile.mkstemp() itself can raise OSError (e.g. state_dir() vanishes,
+    # permissions); it must be caught by the same try/except as the rest of
+    # the version.json write, not raise out of migrate().
+    import tempfile as tempfile_mod
+    import yas.migrate as migrate_mod
+
+    def boom(*args, **kwargs):
+        raise OSError('simulated mkstemp failure')
+
+    monkeypatch.setattr(tempfile_mod, 'mkstemp', boom)
+    monkeypatch.setattr(migrate_mod, 'tempfile', tempfile_mod)
+
+    assert migrate() is False  # version.json write failed, but no exception
+
+
 def test_empty_config_dir_writes_marker_without_error(tmp_home):
     # No legacy files at all — every move/delete is a no-op, but the dirs
     # still get created and version.json still gets written.

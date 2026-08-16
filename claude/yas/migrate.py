@@ -11,6 +11,7 @@ longer expected in the wild, delete this module and its call site.
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -42,13 +43,14 @@ _MOVES: tuple[tuple[str, Callable[[], Path]], ...] = (
 )
 
 # Legacy files with no new-layout home — deleted outright. Note:
-# 'statusline-theme' is only DELETED here; folding its value into yas.toml is
-# the installer's job, not this module's.
+# 'statusline-theme' is handled separately below (guarded on yas.toml already
+# carrying the folded value): folding its value into yas.toml is the
+# installer's job, not this module's, and this module must never delete the
+# only copy of a theme choice that failed to fold.
 _DELETE_FILES: tuple[str, ...] = (
     'statusline-token-rate.log',
     'statusline-render.log',
     'yas.toml.cache',
-    'statusline-theme',
 )
 
 _DELETE_DIRS: tuple[str, ...] = (
@@ -104,20 +106,40 @@ def migrate() -> bool:
         except OSError:
             ok = False
 
+    # Only retire the legacy statusline-theme file once yas.toml already
+    # carries a `theme =` line — ops/install.sh's fold_legacy_theme() writes
+    # that line before this runs. If yas.toml has no theme line (fold failed
+    # its parse-validation, or no yas.toml exists), keep the legacy file in
+    # place rather than losing the user's theme choice outright.
+    toml_path = constants.CLAUDE_DIR / 'yas.toml'
+    try:
+        has_theme = toml_path.exists() and bool(
+            re.search(r'(?m)^[ \t]*theme[ \t]*=', toml_path.read_text())
+        )
+    except OSError:
+        has_theme = False
+    if has_theme:
+        try:
+            (constants.CLAUDE_DIR / 'statusline-theme').unlink(missing_ok=True)
+        except OSError:
+            ok = False
+
     if ok:
         payload = json.dumps({
             'schema_version': LAYOUT_SCHEMA_VERSION,
             'yas_version': VERSION,
             'migrated_at': time.time(),
         })
-        fd, tmp_path = tempfile.mkstemp(dir=state_dir(), prefix='.version-', suffix='.tmp')
+        tmp_path = None
         try:
+            fd, tmp_path = tempfile.mkstemp(dir=state_dir(), prefix='.version-', suffix='.tmp')
             with os.fdopen(fd, 'w') as f:
                 f.write(payload)
             os.replace(tmp_path, version_file())
         except OSError:
             ok = False
-            Path(tmp_path).unlink(missing_ok=True)
+            if tmp_path is not None:
+                Path(tmp_path).unlink(missing_ok=True)
 
     return ok
 

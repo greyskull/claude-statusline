@@ -36,7 +36,6 @@ from yas.constants import (
     DEFAULT_SHOW_DAY_STATS,
     DEFAULT_SHOW_TOOL_USES,
     config_path,
-    toml_cache_path,
 )
 from yas.themes import THEMES
 
@@ -240,14 +239,18 @@ def _load_toml(config_dir: Path) -> tuple[dict[str, object], str | None]:
     On Python 3.10 (no stdlib tomllib) the tomli backport is used instead, so
     TOML is still parsed. A parse failure → ({}, "yas.toml: parse error").
 
-    A binary (marshal) cache of the parsed dict lives under yas/cache/
-    (constants.toml_cache_path()), no longer beside the source file. On a warm,
-    unchanged file the dict is returned straight from the cache, skipping BOTH
-    `import tomllib` and the read+parse. Any cache miss/staleness/corruption
-    falls through to the live parse below, which then refreshes the cache.
+    A binary (marshal) cache of the parsed dict lives under
+    config_dir/yas/cache/config.toml.cache, no longer beside the source file.
+    Derived from config_dir (not the module-global constants.toml_cache_path())
+    so a caller that passes a sandboxed config_dir (e.g. tests using tmp_path)
+    never touches the real ~/.claude/yas/cache/ — the cache always lives next
+    to the yas.toml it was parsed from. On a warm, unchanged file the dict is
+    returned straight from the cache, skipping BOTH `import tomllib` and the
+    read+parse. Any cache miss/staleness/corruption falls through to the live
+    parse below, which then refreshes the cache.
     """
     toml_path = config_dir / 'yas.toml'
-    cache_path = toml_cache_path()
+    cache_path = config_dir / 'yas' / 'cache' / 'config.toml.cache'
     try:
         st = toml_path.stat()
     except OSError:

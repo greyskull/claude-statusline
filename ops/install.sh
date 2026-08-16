@@ -847,10 +847,22 @@ fold_legacy_theme() {
         return 0
     fi
 
-    # Build the new content: existing file plus an [appearance] theme stanza, or
-    # a minimal file when none exists.
+    # Build the new content: fold the theme into an *existing* [appearance]
+    # table when present (a second [appearance] header is a tomllib "Cannot
+    # declare ('appearance',) twice" parse error), append a fresh
+    # [appearance] stanza when the file exists but has no such table, or
+    # write a minimal file when yas.toml doesn't exist yet.
     local content
-    if [ -f "$toml_path" ]; then
+    if [ -f "$toml_path" ] && grep -Eq '^[[:space:]]*\[appearance\]' "$toml_path"; then
+        content=$(awk -v theme="$theme" '
+            { print }
+            !done && /^[[:space:]]*\[appearance\]/ {
+                print "# Folded in from the legacy statusline-theme file by ops/install.sh."
+                print "theme = \"" theme "\""
+                done = 1
+            }
+        ' "$toml_path")
+    elif [ -f "$toml_path" ]; then
         content=$(cat "$toml_path"; printf '\n[appearance]\n# Folded in from the legacy statusline-theme file by ops/install.sh.\ntheme = "%s"\n' "$theme")
     else
         content=$(printf '# yas.toml — yet-another-statusline configuration\n\n[appearance]\n# Folded in from the legacy statusline-theme file by ops/install.sh.\ntheme = "%s"\n' "$theme")
@@ -862,7 +874,14 @@ fold_legacy_theme() {
     printf '%s\n' "$content" > "$tmp" || { rm -f "$tmp"; fail '! write failed — yas.toml unchanged'; return 0; }
 
     if [ -n "${PYTHON_BIN:-}" ]; then
-        if ! "$PYTHON_BIN" -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$tmp" 2>/dev/null; then
+        if ! "$PYTHON_BIN" -c '
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+import sys
+tomllib.load(open(sys.argv[1], "rb"))
+' "$tmp" 2>/dev/null; then
             rm -f "$tmp"
             fail '! folding legacy theme produced invalid yas.toml — leaving existing file untouched'
             return 0
@@ -1324,7 +1343,14 @@ run_wizard() {
     printf '%s\n' "$content" > "$tmp" || { rm -f "$tmp"; fail '! write failed — yas.toml unchanged' > /dev/tty; return 0; }
 
     if [ -n "${PYTHON_BIN:-}" ]; then
-        if ! "$PYTHON_BIN" -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$tmp" 2>/dev/null; then
+        if ! "$PYTHON_BIN" -c '
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+import sys
+tomllib.load(open(sys.argv[1], "rb"))
+' "$tmp" 2>/dev/null; then
             rm -f "$tmp"
             fail '! generated yas.toml failed to parse — leaving existing file untouched' > /dev/tty
             return 0

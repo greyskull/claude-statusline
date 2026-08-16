@@ -892,7 +892,9 @@ def test_stale_version_cache_reparsed(tmp_path: Path) -> None:
     st = toml.stat()
     bad = marshal.dumps((config.CACHE_VERSION + 99, st.st_mtime_ns, st.st_size,
                          {'layout': {'max_width': 999}}))
-    (tmp_path / 'yas.toml.cache').write_bytes(bad)
+    cache_path = tmp_path / 'yas' / 'cache' / 'config.toml.cache'
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(bad)
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert cfg.max_width == 200  # version mismatch → reparse from source
 
@@ -902,13 +904,14 @@ def test_parse_error_writes_no_cache(tmp_path: Path) -> None:
     (tmp_path / 'yas.toml').write_text('this is = = not toml\n')
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert any('parse error' in e for e in cfg.errors)
-    assert not (tmp_path / 'yas.toml.cache').exists()  # no cache for a bad parse
+    # no cache for a bad parse
+    assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
 
 
 def test_missing_toml_writes_no_cache(tmp_path: Path) -> None:
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert cfg.errors == ()
-    assert not (tmp_path / 'yas.toml.cache').exists()
+    assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
 
 
 @requires_tomllib
@@ -916,10 +919,11 @@ def test_readonly_dir_cache_write_swallowed(tmp_path: Path) -> None:
     import os
     toml = tmp_path / 'yas.toml'
     toml.write_text('[layout]\nmax_width = 200\n')
-    os.chmod(tmp_path, 0o500)  # read+exec, no write
+    os.chmod(tmp_path, 0o500)  # read+exec, no write — blocks mkdir of yas/cache/
     try:
         cfg = config.Config.load(env={}, config_dir=tmp_path)
         assert cfg.max_width == 200  # parse still works; write failure swallowed
         assert cfg.errors == ()
+        assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
     finally:
         os.chmod(tmp_path, 0o700)
