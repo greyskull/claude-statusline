@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 
+import yas.constants as constants
 import yas.session as session
 
 
@@ -13,7 +14,7 @@ def _write_settings(path: Path, plugins: dict[str, bool]) -> None:
 def test_plugins_read_from_home_only(tmp_home: Path, tmp_path: Path, monkeypatch) -> None:
     """SEC-2: only the user's own settings drive plugins; project_dir's
     settings (attacker-controlled for a cloned repo) are never read."""
-    monkeypatch.setattr(session, 'CLAUDE_DIR', tmp_home / '.claude')
+    monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp_home / '.claude')
     _write_settings(tmp_home / '.claude' / 'settings.json', {'foo@1.0': True})
     project_dir = tmp_path / 'myproject'
     _write_settings(project_dir / '.claude' / 'settings.json', {'bar@2.0': True})
@@ -26,7 +27,7 @@ def test_plugins_read_from_home_only(tmp_home: Path, tmp_path: Path, monkeypatch
 
 def test_false_values_excluded(tmp_home: Path, monkeypatch) -> None:
     """False values are excluded from plugins."""
-    monkeypatch.setattr(session, 'CLAUDE_DIR', tmp_home / '.claude')
+    monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp_home / '.claude')
     _write_settings(tmp_home / '.claude' / 'settings.json', {'foo@1.0': False})
 
     ws = session.Workspace()
@@ -36,7 +37,7 @@ def test_false_values_excluded(tmp_home: Path, monkeypatch) -> None:
 
 def test_duplicates_collapsed_first_seen_order(tmp_home: Path, tmp_path: Path, monkeypatch) -> None:
     """Duplicates collapsed; first-seen order preserved."""
-    monkeypatch.setattr(session, 'CLAUDE_DIR', tmp_home / '.claude')
+    monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp_home / '.claude')
     # foo appears in both home (first) and project (second)
     _write_settings(tmp_home / '.claude' / 'settings.json', {'foo@1.0': True})
     project_dir = tmp_path / 'proj'
@@ -49,7 +50,7 @@ def test_duplicates_collapsed_first_seen_order(tmp_home: Path, tmp_path: Path, m
 
 def test_malformed_json_silently_skipped(tmp_home: Path, tmp_path: Path, monkeypatch) -> None:
     """Malformed JSON in home settings is silently skipped (no crash, empty result)."""
-    monkeypatch.setattr(session, 'CLAUDE_DIR', tmp_home / '.claude')
+    monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp_home / '.claude')
     # Write invalid JSON to home settings
     home_settings = tmp_home / '.claude' / 'settings.json'
     home_settings.parent.mkdir(parents=True, exist_ok=True)

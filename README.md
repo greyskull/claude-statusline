@@ -36,6 +36,21 @@ curl -fsSL https://raw.githubusercontent.com/tmck-code/yet-another-statusline/ma
 curl -fsSL https://raw.githubusercontent.com/tmck-code/yet-another-statusline/main/ops/install.sh | YAS_NO_TTY=1 YAS_PYTHON=3.15 bash
 ```
 
+### Upgrading — the `yas/` layout move
+
+Everything YAS writes except `yas.toml` now lives under a single
+`$CLAUDE_CONFIG_DIR/yas/` subtree (`yas/cache/` and `yas/state/`). The migration
+runs automatically — eagerly when you re-run `ops/install.sh`, lazily on the
+first render otherwise — and is a one-off; afterwards the check costs one
+`stat()`.
+
+Day-total token counts and the last-prompt handshake are **moved** and survive
+the upgrade. Rate-limit history, render timings, the transcript parse cache and
+`mon`'s per-session payloads are **regenerated rather than moved**, so expect a
+brief cold start after the first upgrade: the `t/m` rate and sparkline, the
+render-time figure and `mon`'s session list start out empty and refill within
+one render tick to about five minutes, depending on the item.
+
 ### Reconfigure later — `/yas:config`
 
 Run `/yas:config` any time to re-run the wizard against the already-installed
@@ -120,7 +135,12 @@ aliases when both are set — the aliases keep working but are deprecated.
 - **`show_day_stats`** — when `true` (the default), shows today's cumulative token and cost totals alongside the session's, as `session/day` pairs. **Note:** this key lives under **`[tokens]`**, not `[layout]`, unlike the other display toggles.
 - **`openspec_scan_depth`** — how many repo-levels below `cwd` the OpenSpec downward scan descends looking for nested `openspec/` roots (monorepo-of-repos layout). `1` (the default) finds a repo directly below `cwd`; `2` also finds one nested a level deeper; `0` disables the downward scan entirely (only an `openspec/` found by walking *upward* from `cwd` is used). Unlike the other numeric knobs, `0` is a legal value here.
 - **CLI flags** — `--theme NAME` / `--bg-shift DIR` also accept the `--theme=NAME` / `--bg-shift=DIR` form. Pass them in the `statusLine.command` of your `~/.claude/settings.json`.
-- **Legacy theme file** — `~/.claude/statusline-theme` (contents = a theme name) still works as the lowest-priority theme fallback, below `[appearance].theme`.
+- **Legacy theme file** — `~/.claude/statusline-theme` is **no longer read**. If you re-run the installer while the file is non-empty and `yas.toml` does not already set a theme, the installer folds its value into `yas.toml` once, and the migration then deletes the file. Otherwise set the theme by hand:
+
+  ```toml
+  [appearance]
+  theme = "claude-dark"
+  ```
 
 ### Context state word
 
@@ -218,7 +238,7 @@ model = [
 
 | var | default | description |
 |-----|---------|-------------|
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | base dir for config/state files (`yas.toml`, theme file, width file, token-rate log, output payloads) |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | base dir for `yas.toml` and the `yas/` state/cache subtree (logs, width file, session payloads) |
 | `YAS_DEBUG` | _(unset)_ | when set, prints detailed per-value config-rejection reasons to stderr |
 | `COLUMNS` | _(unset)_ | terminal-width fallback when tmux / width-file detection fail |
 
@@ -227,7 +247,7 @@ model = [
 Width is detected by the first source that returns a positive value:
 
 1. `tmux display-message -p '#{pane_width}'`
-2. `~/.claude/terminal-width` file
+2. `~/.claude/yas/state/signals/terminal-width` file (written by `ops/alacritty.py`, which honours `CLAUDE_CONFIG_DIR`)
 3. `COLUMNS` env var
 4. `shutil.get_terminal_size()` / `/dev/tty` ioctl
 

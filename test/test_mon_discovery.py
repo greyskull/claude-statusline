@@ -28,13 +28,14 @@ def _make_payloads_root(tmp_path: Path) -> Path:
 
 def _write_jsonl(projects_root: Path, project: str, session_id: str) -> Path:
     proj_dir = projects_root / project
-    proj_dir.mkdir(exist_ok=True)
+    proj_dir.mkdir(parents=True, exist_ok=True)
     p = proj_dir / f'{session_id}.jsonl'
     p.write_text('')
     return p
 
 
 def _write_payload(payloads_root: Path, name: str, data: dict) -> Path:
+    payloads_root.mkdir(parents=True, exist_ok=True)
     p = payloads_root / f'{name}.json'
     p.write_text(json.dumps(data))
     return p
@@ -228,36 +229,34 @@ class TestIndexPayloadsBySession:
 
 
 class TestClaudeConfigDirRespected:
-    """Confirm that discovery functions derive default roots from CLAUDE_DIR.
-
-    Default arguments are evaluated once at import time from the CLAUDE_DIR
-    constant.  We cannot re-evaluate them at runtime, so these tests verify
-    the wiring statically (default == CLAUDE_DIR / subdir) and the live
-    end-to-end path by reloading the module after pointing CLAUDE_CONFIG_DIR
-    at a temp directory.
+    """Confirm that discovery functions derive default roots from CLAUDE_DIR
+    at call time via yas.constants.projects_dir()/sessions_dir(), rather than
+    a value frozen at import time (a `None`-sentinel default resolved in the
+    function body, per yas.constants' call-time-only helper contract).
     """
 
-    def test_find_active_jsonls_default_projects_root_matches_claude_dir(self) -> None:
-        # The default argument for projects_root must be CLAUDE_DIR / 'projects',
-        # not a hardcoded Path.home() / '.claude' / 'projects'.
-        import inspect
-        import claude.mon.discovery as _disc
+    def test_find_active_jsonls_default_projects_root_matches_projects_dir(
+        self, tmp_home: Path,
+    ) -> None:
+        from yas.constants import projects_dir
+        now = datetime(2024, 1, 1, 12, 0, 0)
+        jsonl = _write_jsonl(projects_dir(), 'proj-a', 'sess-1')
+        _set_mtime(jsonl, now.timestamp() - 300)
 
-        sig = inspect.signature(_disc.find_active_jsonls)
-        default_projects_root = sig.parameters['projects_root'].default
+        result = find_active_jsonls(timedelta(minutes=10), now)
 
-        assert default_projects_root == _disc.CLAUDE_DIR / 'projects'
+        assert result == [(jsonl, now.timestamp() - 300)]
 
-    def test_index_payloads_default_payloads_root_matches_claude_dir(self) -> None:
-        # The default argument for payloads_root must be CLAUDE_DIR / 'statusline-output',
-        # not a hardcoded Path.home() / '.claude' / 'statusline-output'.
-        import inspect
-        import claude.mon.discovery as _disc
+    def test_index_payloads_default_payloads_root_matches_sessions_dir(
+        self, tmp_home: Path,
+    ) -> None:
+        from yas.constants import sessions_dir
+        data = {'session_id': 'sess-abc', 'cwd': '/home/user/project'}
+        pfile = _write_payload(sessions_dir(), 'sess-abc', data)
 
-        sig = inspect.signature(_disc.index_payloads_by_session)
-        default_payloads_root = sig.parameters['payloads_root'].default
+        result = index_payloads_by_session()
 
-        assert default_payloads_root == _disc.CLAUDE_DIR / 'statusline-output'
+        assert result['sess-abc'][0] == pfile
 
 
 class TestDiscover:

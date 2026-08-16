@@ -3,6 +3,10 @@
 Every configurable knob resolves through one fixed chain:
   CLI flag  →  canonical YAS_* env  →  legacy-alias env  →  yas.toml  →  default
 
+(theme specifically: CLI → env → yas.toml → default — the legacy
+statusline-theme file is retired; the installer folds any existing value into
+yas.toml once and migration deletes the file.)
+
 A higher-precedence source that is present and valid wins; an absent or
 invalid source falls through to the next. Only yas.toml-sourced rejections are
 surfaced in the visible error row (the row is titled "yas.toml"); every
@@ -19,7 +23,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
 from yas.constants import (
-    CLAUDE_DIR,
     DEFAULT_CONTEXT_LABELS,
     DEFAULT_CONTEXT_STATE,
     DEFAULT_CONTEXT_THRESHOLDS,
@@ -32,6 +35,8 @@ from yas.constants import (
     DEFAULT_THEME,
     DEFAULT_SHOW_DAY_STATS,
     DEFAULT_SHOW_TOOL_USES,
+    config_path,
+    toml_cache_path,
 )
 from yas.themes import THEMES
 
@@ -150,15 +155,6 @@ def _resolve(
     return default
 
 
-def _legacy_theme_sources(config_dir: Path) -> list[tuple[str, object]]:
-    """The deprecated ~/.claude/statusline-theme file, lowest priority."""
-    try:
-        name = (config_dir / 'statusline-theme').read_text().strip()
-    except OSError:
-        return []
-    return [('legacy', name)] if name else []
-
-
 def _parse_argv(argv: Sequence[str]) -> dict[str, str]:
     """Extract --theme / --bg-shift overrides from a CLI argv slice."""
     out: dict[str, str] = {}
@@ -225,6 +221,7 @@ def _write_toml_cache(cache_path: Path, mtime_ns: int, size: int, data: dict[str
     import marshal
     tmp = cache_path.with_name(f'{cache_path.name}.{os.getpid()}.tmp')
     try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         blob = marshal.dumps((CACHE_VERSION, mtime_ns, size, data))
         with open(tmp, 'wb') as fh:
             fh.write(blob)
@@ -243,14 +240,14 @@ def _load_toml(config_dir: Path) -> tuple[dict[str, object], str | None]:
     On Python 3.10 (no stdlib tomllib) the tomli backport is used instead, so
     TOML is still parsed. A parse failure → ({}, "yas.toml: parse error").
 
-    A binary (marshal) cache of the parsed dict lives at yas.toml.cache next to
-    the source. On a warm, unchanged file the dict is returned straight from the
-    cache, skipping BOTH `import tomllib` and the read+parse. Any cache miss/
-    staleness/corruption falls through to the live parse below, which then
-    refreshes the cache.
+    A binary (marshal) cache of the parsed dict lives under yas/cache/
+    (constants.toml_cache_path()), no longer beside the source file. On a warm,
+    unchanged file the dict is returned straight from the cache, skipping BOTH
+    `import tomllib` and the read+parse. Any cache miss/staleness/corruption
+    falls through to the live parse below, which then refreshes the cache.
     """
     toml_path = config_dir / 'yas.toml'
-    cache_path = config_dir / 'yas.toml.cache'
+    cache_path = toml_cache_path()
     try:
         st = toml_path.stat()
     except OSError:
@@ -453,7 +450,7 @@ class Config:
         if env is None:
             env = dict(os.environ)
         if config_dir is None:
-            config_dir = CLAUDE_DIR
+            config_dir = config_path().parent
         errors: list[str] = []
         debug: list[str] = []
 
@@ -502,8 +499,7 @@ class Config:
             'theme',
             cli_src('theme')
             + _env_sources(env, 'YAS_THEME', 'CLAUDE_STATUSLINE_THEME')
-            + toml_src(appearance, 'theme')
-            + _legacy_theme_sources(config_dir),
+            + toml_src(appearance, 'theme'),
             _parse_theme, DEFAULT_THEME, errors, debug)
         bg_shift = _resolve(
             'bg_shift',

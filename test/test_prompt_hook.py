@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from yas.constants import last_prompt_path
 from yas.info.subagents import read_last_prompt_ts
 
 _INSTALL_SH = Path(__file__).resolve().parent.parent / 'ops' / 'install.sh'
@@ -60,11 +61,13 @@ _FOREIGN = {
 _HOOK_SCRIPT = Path(__file__).resolve().parent.parent / 'hooks' / 'yas-prompt-hook.py'
 
 
-def _run_hook_logic(session_id: str, state_file: Path) -> None:
-    '''Invoke the hook's core logic directly against a given state file path.
+def _run_hook_logic(session_id: str, config_dir: Path) -> None:
+    '''Invoke the hook's core logic directly against a given CLAUDE_CONFIG_DIR.
 
     We import the hook module once (or reuse the cached import) and call main()
-    with stdin and CLAUDE_CONFIG_DIR patched to point at our temp directory.
+    with stdin and CLAUDE_CONFIG_DIR patched to point at our temp directory. The
+    hook itself derives its state file as
+    <config_dir>/yas/state/signals/last-prompt.json (see _state_path).
     '''
     # Import the hook module (cache it so subsequent calls reuse it).
     mod_name = '_yas_prompt_hook'
@@ -80,7 +83,7 @@ def _run_hook_logic(session_id: str, state_file: Path) -> None:
     payload = json.dumps({'session_id': session_id})
     env_backup = os.environ.copy()
     try:
-        os.environ['CLAUDE_CONFIG_DIR'] = str(state_file.parent)
+        os.environ['CLAUDE_CONFIG_DIR'] = str(config_dir)
         old_stdin = sys.stdin
         sys.stdin = io.StringIO(payload)
         try:
@@ -108,7 +111,7 @@ def test_missing_state_file_returns_none(tmp_home: Path) -> None:
 
 def test_invalid_json_returns_none(tmp_home: Path) -> None:
     '''Truncated/invalid JSON → None, no raise.'''
-    state = tmp_home / '.claude' / 'yas-last-prompt.json'
+    state = last_prompt_path()
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text('{ "sess": 12345')  # truncated JSON
 
@@ -118,7 +121,7 @@ def test_invalid_json_returns_none(tmp_home: Path) -> None:
 
 def test_empty_file_returns_none(tmp_home: Path) -> None:
     '''Empty file → None, no raise.'''
-    state = tmp_home / '.claude' / 'yas-last-prompt.json'
+    state = last_prompt_path()
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text('')
 
@@ -128,7 +131,7 @@ def test_empty_file_returns_none(tmp_home: Path) -> None:
 
 def test_session_not_in_map_returns_none(tmp_home: Path) -> None:
     '''State file exists but session not in map → None.'''
-    state = tmp_home / '.claude' / 'yas-last-prompt.json'
+    state = last_prompt_path()
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(json.dumps({'other-session': 1234567890.0}))
 
@@ -138,7 +141,7 @@ def test_session_not_in_map_returns_none(tmp_home: Path) -> None:
 
 def test_session_present_returns_float(tmp_home: Path) -> None:
     '''Session in map → correct float returned.'''
-    state = tmp_home / '.claude' / 'yas-last-prompt.json'
+    state = last_prompt_path()
     state.parent.mkdir(parents=True, exist_ok=True)
     ts = 1700000000.5
     state.write_text(json.dumps({'my-session': ts}))
@@ -149,7 +152,7 @@ def test_session_present_returns_float(tmp_home: Path) -> None:
 
 def test_non_dict_json_returns_none(tmp_home: Path) -> None:
     '''JSON that is not a dict (e.g. a list) → None.'''
-    state = tmp_home / '.claude' / 'yas-last-prompt.json'
+    state = last_prompt_path()
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(json.dumps([1, 2, 3]))
 
@@ -163,9 +166,10 @@ def test_non_dict_json_returns_none(tmp_home: Path) -> None:
 
 def test_hook_writes_single_session(tmp_path: Path) -> None:
     '''Hook creates the state file and records a timestamp for the session.'''
-    state = tmp_path / 'yas-last-prompt.json'
+    state = tmp_path / 'yas' / 'state' / 'signals' / 'last-prompt.json'
+    state.parent.mkdir(parents=True, exist_ok=True)
     before = time.time()
-    _run_hook_logic('sess-a', state)
+    _run_hook_logic('sess-a', tmp_path)
     after = time.time()
 
     assert state.is_file()
@@ -176,14 +180,15 @@ def test_hook_writes_single_session(tmp_path: Path) -> None:
 
 def test_hook_two_session_concurrent_write_preserves_both(tmp_path: Path) -> None:
     '''Two calls with different session IDs both persist in the state file.'''
-    state = tmp_path / 'yas-last-prompt.json'
+    state = tmp_path / 'yas' / 'state' / 'signals' / 'last-prompt.json'
+    state.parent.mkdir(parents=True, exist_ok=True)
 
     before_a = time.time()
-    _run_hook_logic('sess-alpha', state)
+    _run_hook_logic('sess-alpha', tmp_path)
     after_a = time.time()
 
     before_b = time.time()
-    _run_hook_logic('sess-beta', state)
+    _run_hook_logic('sess-beta', tmp_path)
     after_b = time.time()
 
     data = json.loads(state.read_text())
@@ -195,13 +200,14 @@ def test_hook_two_session_concurrent_write_preserves_both(tmp_path: Path) -> Non
 
 def test_hook_overwrites_same_session(tmp_path: Path) -> None:
     '''Calling the hook twice for the same session updates the timestamp.'''
-    state = tmp_path / 'yas-last-prompt.json'
+    state = tmp_path / 'yas' / 'state' / 'signals' / 'last-prompt.json'
+    state.parent.mkdir(parents=True, exist_ok=True)
 
-    _run_hook_logic('sess-x', state)
+    _run_hook_logic('sess-x', tmp_path)
     ts1 = json.loads(state.read_text())['sess-x']
 
     time.sleep(0.01)  # ensure clock advances
-    _run_hook_logic('sess-x', state)
+    _run_hook_logic('sess-x', tmp_path)
     ts2 = json.loads(state.read_text())['sess-x']
 
     assert ts2 >= ts1
@@ -209,10 +215,11 @@ def test_hook_overwrites_same_session(tmp_path: Path) -> None:
 
 def test_hook_corrupt_file_recovers(tmp_path: Path) -> None:
     '''Hook tolerates corrupt existing file and writes fresh data.'''
-    state = tmp_path / 'yas-last-prompt.json'
+    state = tmp_path / 'yas' / 'state' / 'signals' / 'last-prompt.json'
+    state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text('{bad json!!!')
 
-    _run_hook_logic('sess-recover', state)
+    _run_hook_logic('sess-recover', tmp_path)
 
     data = json.loads(state.read_text())
     assert 'sess-recover' in data
@@ -229,7 +236,8 @@ def test_hook_missing_session_id_does_not_crash(tmp_path: Path) -> None:
         sys.modules['_yas_prompt_hook'] = mod
         spec.loader.exec_module(mod)
 
-    state = tmp_path / 'yas-last-prompt.json'
+    state = tmp_path / 'yas' / 'state' / 'signals' / 'last-prompt.json'
+    state.parent.mkdir(parents=True, exist_ok=True)
     env_backup = os.environ.copy()
     try:
         os.environ['CLAUDE_CONFIG_DIR'] = str(tmp_path)
