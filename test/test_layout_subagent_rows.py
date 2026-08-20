@@ -39,7 +39,7 @@ def _make_sub(agent_type: str = 'Explore', first_timestamp: float | None = None)
 def _inject(monkeypatch: pytest.MonkeyPatch, subs: list[subagents_mod.RunningSubagent]) -> None:
     monkeypatch.setattr(
         subagents_mod.RunningSubagents, 'from_session',
-        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=subs)),
+        classmethod(lambda cls, sid, pdir, **kwargs: subagents_mod.RunningSubagents(subagents=subs)),
     )
 
 
@@ -113,7 +113,7 @@ def test_ordering_preserved_wide(monkeypatch: pytest.MonkeyPatch) -> None:
     subs_sorted = sorted(subs_unsorted, key=lambda s: s.first_timestamp)
     monkeypatch.setattr(
         subagents_mod.RunningSubagents, 'from_session',
-        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=subs_sorted)),
+        classmethod(lambda cls, sid, pdir, **kwargs: subagents_mod.RunningSubagents(subagents=subs_sorted)),
     )
     spec = layout.build_wide(_view(), _tick(), 110, _r)
     # markerless two-line identity rows carry the agent type (continuation rows

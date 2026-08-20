@@ -11,6 +11,7 @@ from yas.constants import (
     config_path, session_payload_path, sessions_dir, version_file,
 )
 from yas.info import SessionView
+from yas.info.parsecache import TranscriptCache
 from yas.layout import build_narrow, build_medium, build_wide, render_layout
 from yas.renderer import Renderer
 from yas.session import SessionInfo, _as_str
@@ -42,15 +43,16 @@ def resolve_theme(cli_name: str | None) -> Theme:
 def render(session_info: dict[str, object], width: int, *, bg_shift: str = 'warm', theme: Theme | None = None, glyph_mode: str | None = None, single_width: bool | None = None, timing: str = '') -> str:
     if width < MIN_WIDTH:
         return ''
-    session    = SessionInfo.from_dict(session_info)
-    r          = Renderer(bg_shift=bg_shift, theme=theme)
-    cfg        = Config.load()
+    session     = SessionInfo.from_dict(session_info)
+    r           = Renderer(bg_shift=bg_shift, theme=theme)
+    cfg         = Config.load()
+    parse_cache = TranscriptCache.load(session.session_id) if cfg.transcript_cache else None
     if glyph_mode is None:
         glyph_mode = cfg.glyph_mode
     if single_width is None:
         single_width = cfg.single_width
     soft_limit = cfg.soft_limit_for(session.model.id, session.model.display_name)
-    view       = SessionView(session, cfg)
+    view       = SessionView(session, cfg, cache=parse_cache)
     if width < NARROW_WIDTH:
         spec = build_narrow(view, width, r, soft_limit)
     elif width < MEDIUM_WIDTH:
@@ -62,6 +64,8 @@ def render(session_info: dict[str, object], width: int, *, bg_shift: str = 'warm
     # grey→muted-grey gradient), preceded by the previous run's wall-clock
     # when the show_render_time knob supplies it (`…47.2ms v0.6.2──╯`).
     out = '\n'.join(render_layout(spec, r, timing, f'v{VERSION}'))
+    if parse_cache is not None:
+        parse_cache.save()
     return apply_glyphs(out, glyph_mode, single_width)
 
 

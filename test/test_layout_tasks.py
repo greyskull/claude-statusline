@@ -38,7 +38,7 @@ def _spec(builder, width: int) -> layout.LayoutSpec:
 def _no_subagents(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         subagents_mod.RunningSubagents, 'from_session',
-        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[])),
+        classmethod(lambda cls, sid, pdir, **kwargs: subagents_mod.RunningSubagents(subagents=[])),
     )
 
 
@@ -48,7 +48,7 @@ def _stub_tasks(monkeypatch: pytest.MonkeyPatch, *, visible: bool, lines: list[s
     isolation from the renderer / parser units."""
     monkeypatch.setattr(
         tasks_mod.TaskList, 'from_session',
-        classmethod(lambda cls, path: tasks_mod.TaskList()),
+        classmethod(lambda cls, path, **kwargs: tasks_mod.TaskList()),
     )
     monkeypatch.setattr(tasks_mod.TaskList, 'is_visible', lambda self, now=None: visible)
     monkeypatch.setattr(renderer_mod.Renderer, 'task_row', lambda self, tasks, width, *, compact=False: list(lines))
@@ -97,7 +97,7 @@ def test_build_medium_calls_task_row_non_compact(monkeypatch: pytest.MonkeyPatch
         return list(STUB_LINES)
 
     monkeypatch.setattr(
-        tasks_mod.TaskList, 'from_session', classmethod(lambda cls, path: tasks_mod.TaskList()),
+        tasks_mod.TaskList, 'from_session', classmethod(lambda cls, path, **kwargs: tasks_mod.TaskList()),
     )
     monkeypatch.setattr(tasks_mod.TaskList, 'is_visible', lambda self, now=None: True)
     monkeypatch.setattr(renderer_mod.Renderer, 'task_row', _spy)
@@ -132,7 +132,7 @@ def test_build_narrow_calls_task_row_compact(monkeypatch: pytest.MonkeyPatch) ->
         return ['TASKLINE_HDR']
 
     monkeypatch.setattr(
-        tasks_mod.TaskList, 'from_session', classmethod(lambda cls, path: tasks_mod.TaskList()),
+        tasks_mod.TaskList, 'from_session', classmethod(lambda cls, path, **kwargs: tasks_mod.TaskList()),
     )
     monkeypatch.setattr(tasks_mod.TaskList, 'is_visible', lambda self, now=None: True)
     monkeypatch.setattr(renderer_mod.Renderer, 'task_row', _spy)

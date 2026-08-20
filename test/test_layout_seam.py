@@ -60,7 +60,7 @@ def _silence_dynamic(monkeypatch: pytest.MonkeyPatch) -> None:
     Workspace.plugins, which reads CLAUDE_DIR/settings.json directly.
     """
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[])))
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
                         classmethod(lambda cls, path: tasks_mod.TaskList(tasks=[], last_event_ts=0.0)))
     monkeypatch.setattr(skills_mod.LoadedSkills, 'from_transcript',
@@ -106,7 +106,7 @@ def test_tokens_row_dividers_align_with_separators(monkeypatch: pytest.MonkeyPat
     # A dynamic section below ensures the row below tokens is a (seam) separator,
     # not the bottom border — so we can check ┴ elbows both sides.
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
     spec  = layout.build_wide(_view(), _tick(), 160, _r)
     lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
     t_idx = _tokens_row_indices(spec)[0]
@@ -145,7 +145,7 @@ def test_subagent_cohort_caps_at_six_most_recent(monkeypatch: pytest.MonkeyPatch
     now  = time.time()
     subs = [_make_sub_labelled(f'sub-{i}', now - (8 - i)) for i in range(8)]
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=subs)))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=subs)))
     spec = layout.build_wide(_view(), _tick(), 160, _r)
     texts = ' '.join(strip_ansi(row.content) for row in spec.rows if row.kind == 'content')
     shown = [i for i in range(8) if f'sub-{i}' in texts]
@@ -156,7 +156,7 @@ def test_subagent_cohort_caps_at_six_most_recent(monkeypatch: pytest.MonkeyPatch
 def test_seam_present_with_dynamic_section(monkeypatch: pytest.MonkeyPatch) -> None:
     _silence_dynamic(monkeypatch)
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
     spec = layout.build_wide(_view(), _tick(), 140, _r)
     assert _kinds(spec).count('separator_seam') == 1
 
@@ -171,7 +171,7 @@ def test_no_seam_without_dynamic_rows(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_seam_is_first_separator_below_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     _silence_dynamic(monkeypatch)
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
     spec = layout.build_wide(_view(), _tick(), 140, _r)
     seam_idx = next(i for i, row in enumerate(spec.rows) if row.kind == 'separator_seam')
     # Seam threads up-elbows into the token-stat vsep columns.
@@ -184,7 +184,7 @@ def test_seam_renders_solid_not_heavy(monkeypatch: pytest.MonkeyPatch) -> None:
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
     spec = layout.build_wide(_view(), _tick(), 140, _r)
     seam_idx = next(i for i, row in enumerate(spec.rows) if row.kind == 'separator_seam')
     seam = strip_ansi(layout.render_layout(spec, _r)[seam_idx])
@@ -267,7 +267,7 @@ def test_only_first_dynamic_separator_is_seam(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(skills_mod.LoadedSkills, 'from_transcript',
                         classmethod(lambda cls, path: skills_mod.LoadedSkills(names=['x:demo'])))
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
     spec = layout.build_wide(_view(), _tick(), 140, _r)
     kinds = _kinds(spec)
     assert kinds.count('separator_seam') == 1
@@ -506,7 +506,7 @@ def _both_sections(monkeypatch: pytest.MonkeyPatch, *, long_subject: bool = Fals
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
                         classmethod(lambda cls, path: tl))
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
 
 
 def _both_sections_narrow_stress(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -520,7 +520,7 @@ def _both_sections_narrow_stress(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
                         classmethod(lambda cls, path: tl))
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
 
 
 def test_side_by_side_continuous_divider_when_both_present(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -685,7 +685,7 @@ def test_subagents_only_renders_full_width_stacked(monkeypatch: pytest.MonkeyPat
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
-                        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
+                        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
 
     spec = layout.build_wide(_view(), _tick(), 140, _r)
     assert _divider_content_idx(spec) == [], 'subagents-only must not compose a divider column'
@@ -1175,7 +1175,7 @@ def test_tree_labels_loc_slash_stacks_over_data_slash(monkeypatch: pytest.Monkey
     sub.jsonl_path = '/fake/ui.jsonl'
     monkeypatch.setattr(
         subagents_mod.RunningSubagents, 'from_session',
-        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
+        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[sub])),
     )
 
     view = SessionView(_session(), Config(labels=True))
@@ -1206,7 +1206,7 @@ def test_tree_labels_name_shifted_right_of_desc_col_start(monkeypatch: pytest.Mo
     sub = _make_sub()
     monkeypatch.setattr(
         subagents_mod.RunningSubagents, 'from_session',
-        classmethod(lambda cls, sid, pdir: subagents_mod.RunningSubagents(subagents=[sub])),
+        classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[sub])),
     )
 
     view = SessionView(_session(), Config(labels=True))

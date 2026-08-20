@@ -103,3 +103,6 @@
 #                 #   entirely (only an openspec/ found by walking upward from cwd
 #                 #   is used). Unlike most numeric knobs here, 0 is legal.
 #                 #   env: YAS_OPENSPEC_SCAN_DEPTH
+
+# [cache]
+# transcript_cache = true  # bool; persist per-transcript parse results between renders (disable to force a full re-parse every tick)

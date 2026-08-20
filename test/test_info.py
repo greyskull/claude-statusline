@@ -61,7 +61,7 @@ def test_session_inout_sums_usage_and_subagents(monkeypatch):
     running = RunningSubagents(subagents=[sub_a, sub_b])
 
     monkeypatch.setattr(TranscriptUsage, 'from_transcript', classmethod(lambda cls, p: usage))
-    monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd: running))
+    monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd, now=None, **kwargs: running))
     monkeypatch.setattr(GitInfo,          'from_cwd',       classmethod(lambda cls, cwd: GitInfo()))
     monkeypatch.setattr(OpenSpec,         'from_cwd',       classmethod(lambda cls, cwd: OpenSpec()))
 
@@ -84,7 +84,7 @@ def test_session_inout_no_subagents(monkeypatch):
     running = RunningSubagents(subagents=[])
 
     monkeypatch.setattr(TranscriptUsage, 'from_transcript', classmethod(lambda cls, p: usage))
-    monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd: running))
+    monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd, now=None, **kwargs: running))
     monkeypatch.setattr(GitInfo,          'from_cwd',       classmethod(lambda cls, cwd: GitInfo()))
     monkeypatch.setattr(OpenSpec,         'from_cwd',       classmethod(lambda cls, cwd: OpenSpec()))
 
@@ -205,7 +205,7 @@ def test_accessing_subagents_does_not_trigger_other_readers(monkeypatch):
     monkeypatch.setattr(GitInfo,          'from_cwd',       classmethod(counting_git))
     monkeypatch.setattr(TranscriptUsage,  'from_transcript', classmethod(counting_transcript))
     monkeypatch.setattr(OpenSpec,         'from_cwd',       classmethod(counting_openspec))
-    monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd: running))
+    monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd, now=None, **kwargs: running))
 
     view = SessionView(session=_session(), cfg=_cfg())
     _ = view.subagents  # access only this one cached property
@@ -756,4 +756,102 @@ def test_elapsed_section_clock_skew_clamped(tmp_path) -> None:
     clear_ms    = max(0, now - clear_epoch) * 1000
     assert clear_ms == 0.0
     assert _fmt_elapsed_clock(int(clear_ms)) == ''
+
+
+# ---------------------------------------------------------------------------
+# Task 6.9 — SessionView cache writes nothing until explicit save()
+# ---------------------------------------------------------------------------
+
+def test_session_view_cache_not_written_until_save(tmp_home: Path, frozen_clock: float) -> None:
+    """Task 6.9: SessionView with a cache attached must NOT write the cache file
+    when fields are accessed (subagents, tool_counts, session_inout), even if
+    the cache is populated with real data. The file must appear ONLY after an
+    explicit cache.save() call.
+
+    This test proves both halves:
+    1. Field access without save() → NO cache file on disk (first half)
+    2. With real agents, field access DOES populate the cache (it's genuinely
+       dirty/non-empty), but the file still doesn't exist until save() (second half)
+    """
+    import os
+    import re
+    from yas.info.parsecache import TranscriptCache, cache_path
+    from test_running_subagents import _write_agent, _assistant_line
+
+    # Clear module-level caches from previous tests
+    from yas.info.subagents import _notif_tail_cache, _tool_result_tail_cache
+    _notif_tail_cache.clear()
+    _tool_result_tail_cache.clear()
+
+    # Get session and build fixture agents
+    session_template = _session()
+    session_id = session_template.session_id
+    project_dir = session_template.workspace.project_dir
+
+    # Compute subagents directory: use the same slug logic as RunningSubagents
+    project_slug = re.sub(r'[^A-Za-z0-9]', '-', project_dir)
+    subagents_dir = tmp_home / '.claude' / 'projects' / project_slug / session_id / 'subagents'
+
+    # Create a real agent with token data that will be accessed and cached
+    agent_id = 'agent-cache-test'
+    jsonl_lines = [
+        '{"event": "start"}\n',
+        _assistant_line('msg-1', input_tokens=100, output_tokens=50),
+    ]
+    _write_agent(subagents_dir, agent_id, agent_type='Explore',
+                 description='test caching', jsonl_lines=jsonl_lines)
+
+    cache = TranscriptCache(session_id)
+    cache_file = cache_path(session_id)
+    tmp_file = cache_file.parent / f'{cache_file.name}.tmp'
+
+    # Sanity: cache file should not exist initially
+    assert not cache_file.exists(), "Cache file should not exist initially"
+    assert not tmp_file.exists(), "Temp file should not exist initially"
+
+    # Construct SessionView with cache attached and access its fields
+    # This should populate the cache with real agent/tool/token data
+    session = _session()
+    view = SessionView(session=session, cfg=_cfg(), now=frozen_clock, cache=cache)
+
+    # Access the fields that trigger gathering (and thus cache population)
+    _ = view.subagents
+    _ = view.tool_counts
+    _ = view.session_inout
+
+    # === FIRST HALF: File access does NOT trigger save ===
+    # Assert: cache file still does NOT exist after field access
+    assert not cache_file.exists(), (
+        "Cache file should NOT exist after accessing SessionView fields; "
+        "it must only appear after explicit cache.save()"
+    )
+
+    # Assert: no .tmp file left behind by field access
+    assert not tmp_file.exists(), "No .tmp file should be left behind after field access"
+
+    # === SECOND HALF: Cache is genuinely dirty/non-empty ===
+    # Verify the cache actually contains data by checking if get_parse returns
+    # a result for one of the agent transcripts. We access the cache internals
+    # to verify it's non-empty; this is acceptable in a test for validation.
+    agent_jsonl_path = subagents_dir / f'{agent_id}.jsonl'
+    st = os.stat(agent_jsonl_path)
+
+    # The view should have triggered a parse, so get_parse should return a result
+    parse_result = cache.get_parse(str(agent_jsonl_path), st, resume_after=0.0)
+    assert parse_result is not None, (
+        "Cache should contain a parse result after field access; "
+        "the view did not actually populate the cache"
+    )
+
+    # === THIRD HALF: Explicit save() writes the cache file ===
+    # Now explicitly save the cache
+    cache.save()
+
+    # Assert: cache file NOW EXISTS (because cache is dirty and was saved)
+    assert cache_file.exists(), (
+        "Cache file should exist after explicit cache.save()"
+    )
+
+    # Assert: no .tmp file left behind (atomic write succeeded)
+    assert not tmp_file.exists(), "No .tmp file should exist after successful save()"
 

@@ -66,10 +66,12 @@ because tool_use ids are fully disjoint between the two files.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 
 from yas.constants import META_EXCLUDE_TOOLS
+from yas.info.parsecache import TranscriptCache
 from yas.info.subagents import RunningSubagent, _parse_iso_to_epoch
 
 # Matches a cat -n style leading line number (any starting offset, not just
@@ -96,6 +98,8 @@ def count_transcript(
     clear_epoch: float | None,
     *,
     skip_sidechain: bool,
+    cache: TranscriptCache | None = None,
+    st: os.stat_result | None = None,
 ) -> TranscriptToolStats:
     """Count tool_use blocks and line activity in one transcript file.
 
@@ -112,6 +116,29 @@ def count_transcript(
     """
     if not path:
         return TranscriptToolStats(counts={}, lines_read=0, lines_changed=0)
+
+    # Attempt cache hit when cache is present (Task 4.1).
+    if cache is not None:
+        try:
+            st = st or os.stat(path)
+        except OSError:
+            st = None
+        if st is not None:
+            cached = cache.get_counts(path, st, clear_epoch, skip_sidechain)
+            if cached is not None:
+                cached_counts = cached['counts']
+                cached_lines_read = cached['lines_read']
+                cached_lines_changed = cached['lines_changed']
+                if (
+                    isinstance(cached_counts, dict)
+                    and isinstance(cached_lines_read, int)
+                    and isinstance(cached_lines_changed, int)
+                ):
+                    return TranscriptToolStats(
+                        counts=cached_counts,
+                        lines_read=cached_lines_read,
+                        lines_changed=cached_lines_changed,
+                    )
 
     def _nl(s: object) -> int:
         """Count newlines in a string, or 0 if not a string."""
@@ -291,11 +318,20 @@ def count_transcript(
             counts[name] = counts.get(name, 0) + 1
     lines_changed = sum(per_id_changed.values())
 
-    return TranscriptToolStats(
+    result = TranscriptToolStats(
         counts=counts,
         lines_read=lines_read,
         lines_changed=lines_changed,
     )
+
+    # Cache the result when cache is present and we have stat info (Task 4.1).
+    if cache is not None and st is not None:
+        cache.put_counts(
+            path, st, clear_epoch, skip_sidechain,
+            {'counts': result.counts, 'lines_read': result.lines_read, 'lines_changed': result.lines_changed},
+        )
+
+    return result
 
 
 class ToolCounts:
@@ -353,6 +389,7 @@ class ToolCounts:
         main_path:   str,
         subagents:   list[RunningSubagent],
         clear_epoch: float | None,
+        cache: TranscriptCache | None = None,
     ) -> ToolCounts:
         """Build the merged ``(main, sub)`` counts and session line totals.
 
@@ -364,7 +401,7 @@ class ToolCounts:
         """
         # Gather main transcript with sidechain skip (Decision 4).
         main_stats = count_transcript(
-            main_path, clear_epoch, skip_sidechain=True
+            main_path, clear_epoch, skip_sidechain=True, cache=cache
         )
         main_counts = main_stats.counts
 
@@ -376,7 +413,7 @@ class ToolCounts:
 
         for agent in subagents:
             agent_stats = count_transcript(
-                agent.jsonl_path, clear_epoch, skip_sidechain=False
+                agent.jsonl_path, clear_epoch, skip_sidechain=False, cache=cache
             )
             # Accumulate tool counts across subagents.
             for name, n in agent_stats.counts.items():

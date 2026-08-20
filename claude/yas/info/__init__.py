@@ -2,7 +2,8 @@
 
 All I/O is deferred to first access via @cached_property. Callers
 construct a SessionView and read only the fields they need; unread
-fields never touch the filesystem.
+fields never touch the filesystem. SessionView may hold a loaded
+transcript parse cache for deduplication but never writes it.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from yas.tokens import compute_session_cost
 from yas.info.transcript import TranscriptUsage
 from yas.info.toolcounts import ToolCounts
 from yas.info.clear import read_clear_epoch
+from yas.info.parsecache import TranscriptCache
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +78,11 @@ def _fmt_elapsed(mtime: float | None, now: float) -> str:
 # ---------------------------------------------------------------------------
 
 class SessionView:
-    def __init__(self, session: SessionInfo, cfg: Config, now: float | None = None) -> None:
-        self.session = session
-        self.cfg     = cfg
-        self.now     = time.time() if now is None else now
+    def __init__(self, session: SessionInfo, cfg: Config, now: float | None = None, cache: TranscriptCache | None = None) -> None:
+        self.session     = session
+        self.cfg         = cfg
+        self.now         = time.time() if now is None else now
+        self.parse_cache = cache
 
     # ------------------------------------------------------------------
     # Leaf readers — each delegates to its existing classmethod
@@ -98,6 +101,7 @@ class SessionView:
         return RunningSubagents.from_session(
             self.session.session_id,
             self.session.workspace.project_dir,
+            cache=self.parse_cache,
         )
 
     @cached_property
@@ -129,13 +133,15 @@ class SessionView:
         - per_agent breakdown of lines_read and lines_changed for each subagent.
 
         Reopens the main transcript and each subagent transcript — no I/O beyond
-        the files already scanned this render. Lazy: a narrow/medium render that
-        never reads this never pays for the aggregation.
+        the files already scanned this render. A cached, unchanged transcript is
+        not reopened at all. Lazy: a narrow/medium render that never reads this
+        never pays for the aggregation.
         """
         return ToolCounts.gather(
             self.session.transcript_path,
             self.subagents.subagents,
             self.clear_epoch,
+            cache=self.parse_cache,
         )
 
     # ------------------------------------------------------------------

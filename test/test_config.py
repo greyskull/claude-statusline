@@ -295,6 +295,52 @@ def test_env_show_tool_uses_overrides_toml_false(tmp_path: Path) -> None:
     assert cfg.show_tool_uses is True
 
 
+# transcript_cache (persists per-transcript parse results; default true)
+
+def test_transcript_cache_default_is_true(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.transcript_cache is True
+
+
+def test_env_transcript_cache_false(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={'YAS_TRANSCRIPT_CACHE': '0'}, config_dir=tmp_path)
+    assert cfg.transcript_cache is False
+
+
+def test_env_transcript_cache_truthy_values(tmp_path: Path) -> None:
+    for val in ('1', 'true', 'TRUE'):
+        cfg = config.Config.load(env={'YAS_TRANSCRIPT_CACHE': val}, config_dir=tmp_path)
+        assert cfg.transcript_cache is True, f'expected True for YAS_TRANSCRIPT_CACHE={val!r}'
+
+
+def test_env_transcript_cache_falsy_values(tmp_path: Path) -> None:
+    for val in ('0', 'false', 'FALSE'):
+        cfg = config.Config.load(env={'YAS_TRANSCRIPT_CACHE': val}, config_dir=tmp_path)
+        assert cfg.transcript_cache is False, f'expected False for YAS_TRANSCRIPT_CACHE={val!r}'
+
+
+@requires_tomllib
+def test_toml_transcript_cache_false(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[cache]\ntranscript_cache = false\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.transcript_cache is False
+
+
+@requires_tomllib
+def test_toml_transcript_cache_must_be_real_bool(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[cache]\ntranscript_cache = "yes"\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.transcript_cache is True  # rejected to default
+    assert 'transcript_cache' in cfg.errors
+
+
+@requires_tomllib
+def test_env_transcript_cache_overrides_toml_false(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[cache]\ntranscript_cache = false\n')
+    cfg = config.Config.load(env={'YAS_TRANSCRIPT_CACHE': '1'}, config_dir=tmp_path)
+    assert cfg.transcript_cache is True
+
+
 # show_day_stats (seventh knob)
 
 def test_env_show_day_stats_zero_is_false(tmp_path: Path) -> None:

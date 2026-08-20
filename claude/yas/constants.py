@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Keep in sync with pyproject.toml's [project] version — pyproject isn't
 # shipped with the runtime copy under ~/.claude, so the value lives here too.
-VERSION    = '0.8.0'
+VERSION    = '0.8.1'
 # Bumped by any future on-disk relayout under yas/; stamped into
 # state/version.json by yas.migrate so a future migration can detect and
 # convert an older layout.
@@ -66,6 +66,10 @@ def toml_cache_path() -> Path:
     return cache_dir() / 'config.toml.cache'
 
 
+def transcript_cache_path(session_id: str) -> Path:
+    return cache_dir() / f'transcripts.{session_id}.json'
+
+
 def tokens_log() -> Path:
     return runtime_dir() / 'tokens.log'
 
@@ -118,6 +122,10 @@ DEFAULT_LABELS         = False
 DEFAULT_CONTEXT_STATE      = False
 DEFAULT_CONTEXT_LABELS:     tuple[str, ...] = ('Smart', 'Coasting', 'Foggy', 'Cooked', 'Dumb')
 DEFAULT_CONTEXT_THRESHOLDS: tuple[int, ...] = (25, 50, 70, 90)
+TRANSCRIPT_CACHE_VERSION   = 1
+TRANSCRIPT_CACHE_KEEP_SECONDS = 86400.0  # 24 h — comfortably beyond ABANDONED_HORIZON_SECONDS = 1800
+TRANSCRIPT_CACHE_SUBKEY_MAX = 4          # max sub-keys retained per transcript per result kind
+DEFAULT_TRANSCRIPT_CACHE   = True
 NARROW_WIDTH = 55
 MEDIUM_WIDTH = 80
 # Box width at/above which the wide layout's workflow cohort pairs agents into

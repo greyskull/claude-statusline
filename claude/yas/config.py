@@ -35,6 +35,7 @@ from yas.constants import (
     DEFAULT_THEME,
     DEFAULT_SHOW_DAY_STATS,
     DEFAULT_SHOW_TOOL_USES,
+    DEFAULT_TRANSCRIPT_CACHE,
     config_path,
 )
 from yas.themes import THEMES
@@ -352,7 +353,7 @@ class Config:
         'token_window', 'theme', 'bg_shift', 'glyph_mode', 'single_width',
         'show_day_stats', 'context_state', 'context_labels', 'context_thresholds',
         'show_render_time', 'show_tool_uses', 'soft_limit_models', 'openspec_scan_depth',
-        'show_icons', 'errors', 'debug_lines',
+        'show_icons', 'transcript_cache', 'errors', 'debug_lines',
     )
 
     max_width:          int
@@ -373,7 +374,8 @@ class Config:
     show_tool_uses:     bool
     soft_limit_models:  tuple[tuple[str, int], ...]
     openspec_scan_depth: int
-    show_icons:          bool
+    show_icons:         bool
+    transcript_cache:   bool
     errors:             tuple[str, ...]
     debug_lines:        tuple[str, ...]
 
@@ -397,7 +399,8 @@ class Config:
         show_tool_uses:     bool = DEFAULT_SHOW_TOOL_USES,
         soft_limit_models:  tuple[tuple[str, int], ...] = (),
         openspec_scan_depth: int = DEFAULT_OPENSPEC_SCAN_DEPTH,
-        show_icons:          bool = True,
+        show_icons:         bool = True,
+        transcript_cache:   bool = DEFAULT_TRANSCRIPT_CACHE,
         errors:             tuple[str, ...] = (),
         debug_lines:        tuple[str, ...] = (),
     ) -> None:
@@ -421,6 +424,7 @@ class Config:
         s(self, 'soft_limit_models', soft_limit_models)
         s(self, 'openspec_scan_depth', openspec_scan_depth)
         s(self, 'show_icons', show_icons)
+        s(self, 'transcript_cache', transcript_cache)
         s(self, 'errors', errors)
         s(self, 'debug_lines', debug_lines)
 
@@ -440,7 +444,7 @@ class Config:
                 f'show_render_time={self.show_render_time}, show_tool_uses={self.show_tool_uses}, '
                 f'soft_limit_models={self.soft_limit_models!r}, '
                 f'openspec_scan_depth={self.openspec_scan_depth}, '
-                f'show_icons={self.show_icons}, '
+                f'show_icons={self.show_icons}, transcript_cache={self.transcript_cache}, '
                 f'errors={self.errors!r}, debug_lines={self.debug_lines!r})')
 
     @classmethod
@@ -473,6 +477,7 @@ class Config:
         layout, tokens, appearance = _table('layout'), _table('tokens'), _table('appearance')
         context = _table('context')
         openspec = _table('openspec')
+        cache = _table('cache')
         glyphs = _table_in(appearance, 'glyphs')
         cli = _parse_argv(argv) if argv is not None else {}
 
@@ -564,6 +569,11 @@ class Config:
             _env_sources(env, 'YAS_OPENSPEC_SCAN_DEPTH') + toml_src(openspec, 'scan_depth'),
             _parse_nonneg_int, DEFAULT_OPENSPEC_SCAN_DEPTH, errors, debug)
 
+        transcript_cache = _resolve(
+            'transcript_cache',
+            _env_sources(env, 'YAS_TRANSCRIPT_CACHE') + toml_src(cache, 'transcript_cache'),
+            _parse_bool, DEFAULT_TRANSCRIPT_CACHE, errors, debug)
+
         soft_limit_models = _parse_models(tokens.get('model'), errors, debug)
 
         return cls(
@@ -586,6 +596,7 @@ class Config:
             soft_limit_models=tuple(soft_limit_models),
             openspec_scan_depth=openspec_scan_depth,
             show_icons=show_icons,
+            transcript_cache=transcript_cache,
             errors=tuple(errors),
             debug_lines=tuple(debug),
         )
