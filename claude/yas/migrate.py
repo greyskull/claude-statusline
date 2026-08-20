@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -58,21 +59,32 @@ _DELETE_DIRS: tuple[str, ...] = (
 )
 
 
-def _move(src: Path, dst: Path) -> None:
+def _move(src: Path, dst: Path, *, verbose: bool = False) -> None:
     """Move src to dst, skipping (never clobbering) when dst already exists."""
     if dst.exists():
         return
     if not src.exists():
         return
     os.rename(src, dst)
+    if verbose:
+        try:
+            rel_dst = dst.relative_to(constants.CLAUDE_DIR)
+        except ValueError:
+            rel_dst = dst
+        print(f'  moved {src.name} -> {rel_dst}')
 
 
-def migrate() -> bool:
+def migrate(verbose: bool = False) -> bool:
     """Convert a pre-0.9 flat ~/.claude layout into the yas/cache, yas/state
     tree. Every step is individually idempotent (mkdir exist_ok, moves skip
     an existing destination, deletes tolerate a missing source), so this is
     safe to call on every startup. Returns True only if every step succeeded;
     on any OSError, version.json is left unwritten so the next run retries.
+
+    When verbose is True, each move/delete that actually acts on an existing
+    legacy path prints a one-line summary to stdout; no-ops (legacy path
+    absent) stay silent. Defaults to False so the lazy first-render call in
+    app.py never spams a normal user's statusline.
     """
     ok = True
 
@@ -90,19 +102,27 @@ def migrate() -> bool:
     # imports CLAUDE_DIR" rule, since this is a call-time attribute read.
     for name, dst_fn in _MOVES:
         try:
-            _move(constants.CLAUDE_DIR / name, dst_fn())
+            _move(constants.CLAUDE_DIR / name, dst_fn(), verbose=verbose)
         except OSError:
             ok = False
 
     for name in _DELETE_FILES:
+        src = constants.CLAUDE_DIR / name
         try:
-            (constants.CLAUDE_DIR / name).unlink(missing_ok=True)
+            existed = src.exists()
+            src.unlink(missing_ok=True)
+            if verbose and existed:
+                print(f'  removed {name}')
         except OSError:
             ok = False
 
     for name in _DELETE_DIRS:
+        src = constants.CLAUDE_DIR / name
         try:
-            shutil.rmtree(constants.CLAUDE_DIR / name, ignore_errors=True)
+            existed = src.exists()
+            shutil.rmtree(src, ignore_errors=True)
+            if verbose and existed:
+                print(f'  removed {name}')
         except OSError:
             ok = False
 
@@ -119,8 +139,12 @@ def migrate() -> bool:
     except OSError:
         has_theme = False
     if has_theme:
+        theme_path = constants.CLAUDE_DIR / 'statusline-theme'
         try:
-            (constants.CLAUDE_DIR / 'statusline-theme').unlink(missing_ok=True)
+            existed = theme_path.exists()
+            theme_path.unlink(missing_ok=True)
+            if verbose and existed:
+                print('  removed statusline-theme')
         except OSError:
             ok = False
 
@@ -145,4 +169,5 @@ def migrate() -> bool:
 
 
 if __name__ == '__main__':
-    raise SystemExit(0 if migrate() else 1)
+    _verbose = '--verbose' in sys.argv[1:] or os.environ.get('YAS_MIGRATE_VERBOSE') == '1'
+    raise SystemExit(0 if migrate(verbose=_verbose) else 1)

@@ -194,3 +194,33 @@ def test_empty_config_dir_writes_marker_without_error(tmp_home):
     for d in (cache_dir(), state_dir(),
               runtime_dir(), signals_dir(), sessions_dir()):
         assert d.is_dir()
+
+
+def test_migrate_silent_by_default(tmp_home, capsys):
+    claude_dir = tmp_home / '.claude'
+    _seed_legacy(claude_dir)
+
+    assert migrate() is True
+    assert capsys.readouterr().out == ''
+
+
+def test_migrate_verbose_prints_each_move_and_delete(tmp_home, capsys):
+    claude_dir = tmp_home / '.claude'
+    _seed_legacy(claude_dir)
+
+    assert migrate(verbose=True) is True
+    out = capsys.readouterr().out
+
+    for name, _dst_fn in _MOVES:
+        assert f'moved {name} ->' in out
+    for name in _DELETE_FILES:
+        assert f'removed {name}' in out
+    for name in _DELETE_DIRS:
+        assert f'removed {name}' in out
+
+
+def test_migrate_verbose_skips_noop_lines(tmp_home, capsys):
+    # No legacy files present — verbose mode must stay silent since nothing
+    # actually moved or was deleted.
+    assert migrate(verbose=True) is True
+    assert capsys.readouterr().out == ''

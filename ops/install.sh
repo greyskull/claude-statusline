@@ -903,7 +903,7 @@ migrate_layout() {
         return 0
     fi
 
-    if PYTHONPATH="$PLUGIN_ROOT/claude" "$PYTHON_BIN" -m yas.migrate; then
+    if PYTHONPATH="$PLUGIN_ROOT/claude" "$PYTHON_BIN" -m yas.migrate --verbose; then
         printf '%b  Layout migrated → %s/yas/%b\n' "$C_DIM" "$CLAUDE_CONFIG_DIR" "$C_RESET"
     else
         fail "! layout migration failed — continuing; the statusline will retry on next render"
