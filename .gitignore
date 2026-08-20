@@ -8,13 +8,15 @@ __pycache__
 .claude/skills/openspec*
 .claude/skills/speckit*
 .specify/
+# scratch dirs
+.scratch/
+scratch/
 
 # demo files
 demo/
 
 # JetBrains IDEs
 .idea/
-
 
 # JSON import benchmark venv (ops/bench_json_import.py)
 ops/.bench-venv/
@@ -24,3 +26,7 @@ ops/research/
 
 # ascii-mode render artifacts for eyeballing
 prototype/
+
+# GIGANTOR files :(
+openspec/
+
