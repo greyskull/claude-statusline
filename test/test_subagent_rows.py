@@ -11,6 +11,7 @@ import yas.session as session_mod
 import yas.info.subagents as subagents_mod
 from yas.config import Config
 
+import yas.constants as constants
 from yas.constants import (
     BOLD,
     BOX_H,
@@ -1018,7 +1019,7 @@ def _make_tree_sub(agent_id: str, parent_id: str = '', ts_off: float = 0.0, **kw
 def test_meta_parent_extraction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # parentAgentId/spawnDepth in the meta.json land on the parsed subagent;
     # a meta without them falls back to top-level ('' / 0).
-    monkeypatch.setattr(subagents_mod, 'CLAUDE_DIR', tmp_path)
+    monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp_path)
     sub_dir = tmp_path / 'projects' / '-proj' / 'sess-1' / 'subagents'
     sub_dir.mkdir(parents=True)
     line = json.dumps({'type': 'assistant', 'timestamp': '2026-01-01T00:00:00Z',

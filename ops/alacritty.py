@@ -23,7 +23,13 @@ for line in map(str.strip, sys.stdin):
         if new_columns != columns:
             print('terminal width changed! new columns:', new_columns, file=sys.stderr)
             columns = new_columns
-            with open(f'{os.environ["HOME"]}/.claude/terminal-width', 'w') as f:
+            # NOTE: duplicates yas.constants.terminal_width_path() on purpose —
+            # this script runs standalone, without the `yas` package on
+            # sys.path.  yas.constants is the source of truth for the layout.
+            config_dir = os.environ.get('CLAUDE_CONFIG_DIR', os.path.expanduser('~/.claude'))
+            width_path = os.path.join(config_dir, 'yas', 'state', 'signals', 'terminal-width')
+            os.makedirs(os.path.dirname(width_path), exist_ok = True)
+            with open(width_path, 'w') as f:
                 f.write(str(columns))
             try:
                 r = subprocess.run(['pgrep', '-f', 'claude'], capture_output=True, text=True)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -520,6 +521,91 @@ def _source_build_yas_toml() -> str:
                 break
     assert out and out[-1] == '}', 'build_yas_toml not found in install.sh'
     return '\n'.join(out)
+
+
+def _source_bash_func(name: str) -> str:
+    """Extract a single top-level bash function body (by its `name() {` opener
+    and matching bare `}` closer) from install.sh, for hermetic unit tests of
+    pure logic that the live installer can't otherwise be driven through in CI."""
+    lines = INSTALL_SH.read_text().splitlines()
+    out: list[str] = []
+    capturing = False
+    for line in lines:
+        if line.startswith(f'{name}() {{'):
+            capturing = True
+        if capturing:
+            out.append(line)
+            if line == '}':
+                break
+    assert out and out[-1] == '}', f'{name} not found in install.sh'
+    return '\n'.join(out)
+
+
+def _run_fold_legacy_theme(tmp_path: Path, existing_toml: str | None, legacy_theme: str) -> Path:
+    """Source fold_legacy_theme with minimal stand-ins for its dependencies
+    (fail(), the C_* color vars, DRY_RUN, PYTHON_BIN) and run it against a
+    scratch CLAUDE_CONFIG_DIR. Returns the resulting yas.toml path."""
+    config_dir = tmp_path / 'claude_config'
+    config_dir.mkdir()
+    (config_dir / 'statusline-theme').write_text(legacy_theme + '\n')
+    toml_path = config_dir / 'yas.toml'
+    if existing_toml is not None:
+        toml_path.write_text(existing_toml)
+
+    func = _source_bash_func('fold_legacy_theme')
+    script = f'''
+fail() {{ printf 'FAIL: %s\\n' "$*" >&2; return 1; }}
+C_DIM=''
+C_GREEN=''
+C_RESET=''
+DRY_RUN=0
+CLAUDE_CONFIG_DIR="{config_dir}"
+PYTHON_BIN="{sys.executable}"
+{func}
+fold_legacy_theme
+'''
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return toml_path
+
+
+def test_fold_legacy_theme_inserts_into_existing_appearance_table(tmp_path: Path):
+    """F1(a) — folding into a yas.toml that already has an [appearance] table
+    (but no theme=) must insert the theme line inside that table, not append
+    a second [appearance] header (which tomllib rejects as a duplicate table)."""
+    tomllib = pytest.importorskip('tomllib')
+    toml_path = _run_fold_legacy_theme(
+        tmp_path,
+        existing_toml='[appearance]\nglyphs = "nerd"\n\n[layout]\nmax_width = 200\n',
+        legacy_theme='dracula',
+    )
+    text = toml_path.read_text()
+    assert text.count('[appearance]') == 1
+    data = tomllib.loads(text)
+    assert data['appearance']['theme'] == 'dracula'
+    assert data['appearance']['glyphs'] == 'nerd'
+    assert data['layout']['max_width'] == 200
+
+
+def test_fold_legacy_theme_appends_stanza_when_no_appearance_table(tmp_path: Path):
+    tomllib = pytest.importorskip('tomllib')
+    toml_path = _run_fold_legacy_theme(
+        tmp_path,
+        existing_toml='[layout]\nmax_width = 200\n',
+        legacy_theme='dracula',
+    )
+    text = toml_path.read_text()
+    assert text.count('[appearance]') == 1
+    data = tomllib.loads(text)
+    assert data['appearance']['theme'] == 'dracula'
+    assert data['layout']['max_width'] == 200
+
+
+def test_fold_legacy_theme_creates_new_file_when_none_exists(tmp_path: Path):
+    tomllib = pytest.importorskip('tomllib')
+    toml_path = _run_fold_legacy_theme(tmp_path, existing_toml=None, legacy_theme='dracula')
+    data = tomllib.loads(toml_path.read_text())
+    assert data['appearance']['theme'] == 'dracula'
 
 
 def test_build_yas_toml_carries_four_values_and_parses():

@@ -17,9 +17,9 @@ import re
 from pathlib import Path
 
 from yas.constants import (
-    CLAUDE_DIR,
     WORKFLOW_LIVENESS_SECONDS,
     _sanitize,
+    projects_dir,
 )
 from yas.info.subagents import RunningSubagent, parse_transcript
 from yas.render.text import _middle_ellipsis
@@ -183,7 +183,7 @@ class RunningWorkflows:
         # Same projects/ dir convention as RunningSubagents.from_session: every
         # non-alphanumeric char becomes '-' (Unix and Windows safe).
         project_slug = re.sub(r'[^A-Za-z0-9]', '-', project_dir)
-        session_dir  = CLAUDE_DIR / 'projects' / project_slug / session_id
+        session_dir  = projects_dir() / project_slug / session_id
         runs_dir     = session_dir / 'subagents' / 'workflows'
         if not runs_dir.is_dir():
             return cls()

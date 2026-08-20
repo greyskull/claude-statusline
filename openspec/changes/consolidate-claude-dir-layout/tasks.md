@@ -1,0 +1,65 @@
+<!-- AGENT INSTRUCTIONS: Mark each subtask done with TaskUpdate (status: completed) the
+     moment it is finished — before starting the next task. Sections 3 and 4 are
+     independent of each other and MAY be delegated to parallel subagents (they touch
+     disjoint files); sections 1-2 must land first because everything imports the new
+     constants API. Run the gates via the `verifier` agent, never inline. -->
+
+## 1. Central path API in constants.py
+
+- [x] 1.1 In `claude/yas/constants.py`, directly below `CLAUDE_DIR` (line 14), add a `# --- YAS on-disk layout ---` block of path helper **functions** (not constants, so a patched `constants.CLAUDE_DIR` redirects everything): `yas_root()`, `cache_dir()`, `state_dir()`, `runtime_dir()`, `signals_dir()`, `sessions_dir()`, `version_file()`. Each returns a `Path` built from the module-global `CLAUDE_DIR` at call time; add a docstring on `yas_root()` naming the full layout and stating `yas.toml` is deliberately excluded.
+- [x] 1.2 Add the per-file helpers in the same block: `config_path()` → `CLAUDE_DIR/'yas.toml'`; `toml_cache_path()` → `cache_dir()/'config.toml.cache'`; `tokens_log()`, `token_rate_log()`, `render_log()` → `runtime_dir()/{'tokens.log','token-rate.log','render.log'}`; `last_prompt_path()` → `signals_dir()/'last-prompt.json'`; `terminal_width_path()` → `signals_dir()/'terminal-width'`; `session_payload_path(session_id: str)` → `sessions_dir()/f'{session_id}.json'`; `projects_dir()` → `CLAUDE_DIR/'projects'`; `settings_path()` → `CLAUDE_DIR/'settings.json'`.
+- [x] 1.3 Add `LAYOUT_SCHEMA_VERSION = 1` to `constants.py` next to `VERSION` (line 11), with a comment that it is bumped by any future relayout and stamped into `state/version.json`.
+- [x] 1.4 Add a module-level comment above the block stating the invariant: no module outside `constants.py` may import `CLAUDE_DIR`, and no YAS path may be evaluated at import time (including as a default argument).
+
+## 2. Migration module
+
+- [x] 2.1 Create `claude/yas/migrate.py` with a module docstring carrying a `# REMOVE AFTER 0.11.0` marker explaining that the module and its `app.main` guard exist only to convert pre-0.9 flat layouts and are deletable a few releases after ship.
+- [x] 2.2 Define the legacy disposition tables as module constants: `_MOVES: tuple[tuple[str, Callable[[], Path]], ...]` = `('statusline-tokens.log', tokens_log)`, `('yas-last-prompt.json', last_prompt_path)`, `('terminal-width', terminal_width_path)`; `_DELETE_FILES` = `('statusline-token-rate.log', 'statusline-render.log', 'yas.toml.cache', 'statusline-theme')`; `_DELETE_DIRS` = `('statusline-output',)`. Export them so `test/` and any future tooling read one list.
+- [x] 2.3 Implement `migrate() -> bool`: create the six directories (`cache_dir()`, `cache_dir()/'transcripts'`, `state_dir()`, `runtime_dir()`, `signals_dir()`, `sessions_dir()`) with `mkdir(parents=True, exist_ok=True)`; then apply `_MOVES` via a `_move(src, dst)` helper that returns early when `dst.exists()` and otherwise calls `os.rename(src, dst)`; then `Path.unlink(missing_ok=True)` each `_DELETE_FILES` entry and `shutil.rmtree(..., ignore_errors=True)` each `_DELETE_DIRS` entry. Wrap each individual step in `try/except OSError`, tracking a local `ok` flag.
+- [x] 2.4 As the final step, when `ok` is still true, write `version_file()` atomically: `json.dumps({'schema_version': LAYOUT_SCHEMA_VERSION, 'yas_version': VERSION, 'migrated_at': time.time()})` to a `tempfile.mkstemp(dir=state_dir(), prefix='.version-', suffix='.tmp')` file, then `os.replace`. Unlink the temp file on failure. Return `ok`.
+- [x] 2.5 Add a `main()` entry (`if __name__ == '__main__': raise SystemExit(0 if migrate() else 1)`) so `ops/install.sh` can invoke it as `python -m yas.migrate` with a meaningful exit code.
+
+## 3. Rewire every reader/writer to the new API
+
+- [x] 3.1 `claude/yas/app.py`: replace the `CLAUDE_DIR` import (line 9) with `config_path`/`session_payload_path`/`sessions_dir`/`version_file` imports from `yas.constants`. At the top of `main()` — before `Config.load` and before any other disk access — add the lazy guard: `if not version_file().exists(): from yas.migrate import migrate; migrate()`, with a `# REMOVE AFTER 0.11.0` comment.
+- [x] 3.2 `claude/yas/app.py:87`: pass `config_dir=config_path().parent` (or keep `Config.load(config_dir=...)`'s signature and pass `constants.CLAUDE_DIR` via a new `config_dir()` accessor — do NOT re-introduce a module-level `CLAUDE_DIR` import).
+- [x] 3.3 `claude/yas/app.py:99-104`: replace the `CLAUDE_DIR / 'statusline-output'` block with `sessions_dir().mkdir(parents=True, exist_ok=True)` + `session_payload_path(session_id).write_text(json.dumps(info))`, keeping the surrounding `try/except OSError: pass`. Update the comment above it (lines 93-97) to name the new path.
+- [x] 3.4 `claude/yas/tokens.py`: drop the `CLAUDE_DIR` import (line 14) for `tokens_log`, `token_rate_log`, `render_log`; replace the six path expressions at lines 116, 171, 207, 248, 292, 308 with the helper calls. Ensure each writer `mkdir(parents=True, exist_ok=True)`s `runtime_dir()` before its first write (`TokenLog.update` at :116 and the rate/render writers) so a fresh install works before migration has ever run.
+- [x] 3.5 `claude/yas/config.py`: delete `_legacy_theme_sources` (lines 154-160) entirely and remove its call site from the theme precedence chain; update the chain's docstring/comment to read CLI → env → yas.toml → default.
+- [x] 3.6 `claude/yas/config.py:240-259` (`_load_toml`): keep `toml_path = config_dir / 'yas.toml'` but source the cache path from `constants.toml_cache_path()` instead of `config_dir / 'yas.toml.cache'`, and `mkdir(parents=True, exist_ok=True)` the cache dir inside `_write_toml_cache` before the temp write (line 218-232). Update the docstring at :250-251 which currently says the cache "lives next to the source".
+- [x] 3.7 `claude/yas/session.py`: delete the duplicated `HOME`/`CLAUDE_DIR` declaration (lines 21-22) and any now-unused `os`/`Path` imports; change line 171's `candidates = [CLAUDE_DIR / 'settings.json']` to use `settings_path()` imported from `yas.constants` (session.py already imports `_sanitize` from there — extend that import).
+- [x] 3.9 `claude/yas/info/subagents.py`: replace the `CLAUDE_DIR` import (:21) with `last_prompt_path` and `projects_dir`; update the last-prompt read at :36, the docstring at :30-31, and the two projects paths at :1172 and :1180.
+- [x] 3.10 `claude/yas/info/workflows.py`: replace the `CLAUDE_DIR` import (:20) with `projects_dir` and update the session-dir expression at :186.
+- [x] 3.11 `claude/yas/render/text.py`: replace the `CLAUDE_DIR` import (:10) with `terminal_width_path` and update the read at :36.
+- [x] 3.12 `claude/mon/discovery.py`: change the `projects_root` (:23) and `payloads_root` (:45) default arguments to `None` and resolve them in the function body via `projects_dir()` / `sessions_dir()` — import-time defaults would ignore a patched `CLAUDE_DIR`. Update the payload glob/filename handling for the new `<session_id>.json` naming (was `statusline.<sid>.json`) in `index_payloads_by_session`.
+- [x] 3.13 `hooks/yas-prompt-hook.py:21-24`: point the self-contained resolver at `<config_dir>/yas/state/signals/last-prompt.json`, `mkdir(parents=True, exist_ok=True)` the parent before the `mkstemp` write at :54, and add a comment naming `yas.constants.last_prompt_path()` as the source of truth this file deliberately duplicates (it runs without the package on `sys.path`). Update the module docstring at :6-7.
+- [x] 3.14 `ops/alacritty.py:26`: resolve `os.environ.get('CLAUDE_CONFIG_DIR', os.path.expanduser('~/.claude'))` instead of hardcoding `$HOME`, write to `<config_dir>/yas/state/signals/terminal-width`, and create the parent dir first.
+- [x] 3.15 Run `grep -rn "CLAUDE_DIR" claude/ hooks/ ops/` and confirm the only Python hits are inside `claude/yas/constants.py`; grep for the nine legacy basenames across `claude/` and confirm the only hits are in `claude/yas/migrate.py`.
+
+## 4. Installer: eager migration, theme fold, uninstall sweep
+
+- [x] 4.1 `ops/install.sh do_wire`, immediately after the existing `statusline-info-*` legacy sweep (~:880-882) and after `PYTHON_BIN` is resolved (~:895-905): add a `migrate_layout()` step invoking `PYTHONPATH="$PLUGIN_ROOT/claude" "$PYTHON_BIN" -m yas.migrate`. On non-zero exit print a `fail`-style warning and continue (never `exit`). Honour `DRY_RUN=1` by printing "Would migrate layout" and skipping.
+- [x] 4.2 Add a `fold_legacy_theme()` shell function called from `do_wire` **before** `migrate_layout()`: if `$CLAUDE_CONFIG_DIR/statusline-theme` exists and is non-empty, and `yas.toml` either doesn't exist or sets no `theme` key, write the theme name into `$CLAUDE_CONFIG_DIR/yas.toml` reusing the existing atomic `mktemp "${toml_path}.XXXXXXXXXX"` + parse-validate + `mv` pattern from the yas.toml generator (~:1144-1240). Print what it did. Do not delete the file here — `migrate()` owns that.
+- [x] 4.3 `ops/install.sh do_uninstall` (~:966-979): extend the legacy sweep to `rm -rf "$CLAUDE_CONFIG_DIR/yas"` plus each of the eight legacy paths (`statusline-tokens.log`, `statusline-token-rate.log`, `statusline-render.log`, `statusline-theme`, `terminal-width`, `yas-last-prompt.json`, `yas.toml.cache`, `statusline-output/`) alongside the existing `statusline-info-*` glob. Keep the existing `DRY_RUN` "Would remove <basename>" idiom for every target, and add an explicit comment that `$CLAUDE_CONFIG_DIR/yas.toml` is deliberately preserved.
+- [x] 4.4 Confirm the installer preview block (~:1114-1133) still works: it sets `CLAUDE_CONFIG_DIR="$scratch"`, so the preview render now creates `$scratch/yas/` — verify the `rm -rf "$scratch"` cleanup covers it (it should, unchanged).
+
+## 5. Tests
+
+- [x] 5.1 `test/conftest.py:71-86`: reduce `tmp_home` to a single `monkeypatch.setattr(_sl_constants, 'CLAUDE_DIR', claude_dir)`, delete the seven other `setattr` calls and any now-unused module imports at the top of the file, and rewrite the comment to explain the call-time-function design that makes one patch sufficient.
+- [x] 5.2 Add `test/test_migrate.py` covering: full nine-path migration (moves land with contents, deletes are gone, six dirs exist); idempotent second run; move skipped when destination exists (destination contents preserved, no raise); `version.json` shape (`schema_version == 1`, `yas_version == constants.VERSION`, numeric `migrated_at`); crash-resume (delete `version.json` after a run, re-run, everything still intact); empty config dir (marker written, no error).
+- [x] 5.3 Add a test that `app.main` does not import `yas.migrate` when `version.json` exists (e.g. assert on `sys.modules` after popping it, or monkeypatch a sentinel) and does migrate when it is absent.
+- [x] 5.4 Add a layout-containment test: run a render tick against a fresh `tmp_home` and assert the set of entries created directly in `$CLAUDE_CONFIG_DIR` is a subset of `{'yas', 'yas.toml'}`.
+- [x] 5.5 Update existing tests that reference old paths: token-log tests (`statusline-tokens.log` / `-token-rate.log` / `-render.log`), `test_mon_discovery.py` (`statusline-output/statusline.<sid>.json` → `yas/state/sessions/<sid>.json`), any config test asserting `yas.toml.cache` placement, and any theme test exercising the legacy `statusline-theme` source (that one is deleted or inverted to assert the file is ignored).
+- [x] 5.6 Add a hook test asserting `hooks/yas-prompt-hook.py` writes to `yas/state/signals/last-prompt.json` under a temp `CLAUDE_CONFIG_DIR`, and that `subagents.last_prompt_ts` reads it back.
+
+## 6. Docs
+
+- [x] 6.1 `CONTEXT.md`: update the path references at :21 (tokens log), :24 (token-rate log), :78 (legacy theme file — now removed), :112 (last-prompt file), and add a short "on-disk layout" block showing the `yas/` tree with the cache-is-disposable note.
+- [x] 6.2 `README.md`: update ~:230 (terminal-width helper path) and replace the ~:123 deprecated `statusline-theme` section with a note that the file is no longer read, that the installer folds its value into `yas.toml` once, and how to set `[appearance] theme` by hand.
+- [x] 6.3 Add a short migration note to the README/CHANGELOG-facing text: rate-limit history, render timings, and `mon`'s payloads are regenerated rather than moved, so a brief post-upgrade cold start is expected.
+
+## 7. Verify
+
+- [x] 7.1 Via the `verifier` agent: `uv run pytest -q` full suite green, and `uv run ruff check` clean.
+- [x] 7.2 Via the `verifier` agent: `make demo/img` + `.claude/skills/yas-demo-text/scripts/demo-text.sh`, diff `demo/text/*.txt` — expect **zero** rendered-output change; any diff is a bug in this change.
+- [x] 7.3 Manual smoke: in a scratch dir, `CLAUDE_CONFIG_DIR=$scratch` with a hand-built legacy layout, run one render, and confirm the tree matches the target layout and `version.json` is present; then run `ops/install.sh uninstall --dry-run` and confirm the listed targets, then the real uninstall and confirm only `yas.toml` remains.

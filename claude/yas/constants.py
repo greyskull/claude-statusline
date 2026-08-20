@@ -9,9 +9,99 @@ from pathlib import Path
 # Keep in sync with pyproject.toml's [project] version — pyproject isn't
 # shipped with the runtime copy under ~/.claude, so the value lives here too.
 VERSION    = '0.8.0'
+# Bumped by any future on-disk relayout under yas/; stamped into
+# state/version.json by yas.migrate so a future migration can detect and
+# convert an older layout.
+LAYOUT_SCHEMA_VERSION = 1
 
 HOME       = Path(os.path.expanduser('~'))
 CLAUDE_DIR = Path(os.environ.get('CLAUDE_CONFIG_DIR', str(HOME / '.claude')))
+
+# --- YAS on-disk layout ---
+# No module outside this one may import CLAUDE_DIR directly (i.e.
+# `from yas.constants import CLAUDE_DIR`) — always go through the helpers
+# below so a test's `monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp)`
+# reaches every path. None of these helpers may be evaluated at import time
+# (including as a function default argument) — call them at use time only.
+
+
+def yas_root() -> Path:
+    """Root of the YAS on-disk layout under CLAUDE_DIR: yas/cache/,
+    yas/state/, yas/state/runtime/,
+    yas/state/signals/, yas/state/sessions/. `yas.toml` itself lives directly
+    under CLAUDE_DIR and is deliberately excluded from this tree — it is
+    user-authored config, not YAS-managed runtime/cache state."""
+    return CLAUDE_DIR / 'yas'
+
+
+def cache_dir() -> Path:
+    return yas_root() / 'cache'
+
+
+def state_dir() -> Path:
+    return yas_root() / 'state'
+
+
+def runtime_dir() -> Path:
+    return state_dir() / 'runtime'
+
+
+def signals_dir() -> Path:
+    return state_dir() / 'signals'
+
+
+def sessions_dir() -> Path:
+    return state_dir() / 'sessions'
+
+
+def version_file() -> Path:
+    return state_dir() / 'version.json'
+
+
+def config_path() -> Path:
+    return CLAUDE_DIR / 'yas.toml'
+
+
+def toml_cache_path() -> Path:
+    return cache_dir() / 'config.toml.cache'
+
+
+def transcript_cache_path(session_id: str) -> Path:
+    return cache_dir() / f'transcripts.{session_id}.json'
+
+
+def tokens_log() -> Path:
+    return runtime_dir() / 'tokens.log'
+
+
+def token_rate_log() -> Path:
+    return runtime_dir() / 'token-rate.log'
+
+
+def render_log() -> Path:
+    return runtime_dir() / 'render.log'
+
+
+def last_prompt_path() -> Path:
+    return signals_dir() / 'last-prompt.json'
+
+
+def terminal_width_path() -> Path:
+    return signals_dir() / 'terminal-width'
+
+
+def session_payload_path(session_id: str) -> Path:
+    return sessions_dir() / f'{session_id}.json'
+
+
+def projects_dir() -> Path:
+    return CLAUDE_DIR / 'projects'
+
+
+def settings_path() -> Path:
+    return CLAUDE_DIR / 'settings.json'
+
+
 MIN_WIDTH    = 40
 DEFAULT_MAX_WIDTH    = 140
 # Repo-levels (not path segments) the OpenSpec downward scan descends below

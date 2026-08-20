@@ -17,20 +17,23 @@ if TYPE_CHECKING:
     from yas.info.subagents import _Notification
 
 from yas.constants import (
-    CLAUDE_DIR,
     TRANSCRIPT_CACHE_VERSION,
     TRANSCRIPT_CACHE_KEEP_SECONDS,
     TRANSCRIPT_CACHE_SUBKEY_MAX,
+    transcript_cache_path,
 )
 
 
 def cache_path(session_id: str) -> Path:
     """Return the cache file path for a session.
 
-    Path is rooted in CLAUDE_DIR and is module-local so conftest.py can
-    monkeypatch it for testing.
+    Delegates to yas.constants.transcript_cache_path(), which resolves
+    CLAUDE_DIR at call time — so a test's monkeypatch of
+    yas.constants.CLAUDE_DIR reaches this too. Path lives under the
+    consolidated yas/cache/ tree (see yas.constants.cache_dir()), not the
+    old top-level yas-cache/ directory.
     """
-    return CLAUDE_DIR / 'yas-cache' / f'transcripts.{session_id}.json'
+    return transcript_cache_path(session_id)
 
 
 class TranscriptCache:

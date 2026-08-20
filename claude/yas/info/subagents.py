@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from yas.constants import CLAUDE_DIR, _sanitize, subagent_is_terminal, subagent_status
+from yas.constants import _sanitize, last_prompt_path, projects_dir, subagent_is_terminal, subagent_status
 
 if TYPE_CHECKING:
     from yas.info.parsecache import TranscriptCache
@@ -27,13 +27,13 @@ if TYPE_CHECKING:
 def read_last_prompt_ts(session_id: str) -> float | None:
     '''Return the last UserPromptSubmit timestamp for session_id, or None.
 
-    Reads the yas-last-prompt.json state file (a JSON map of session_id →
-    float epoch seconds) from CLAUDE_DIR.  Returns None when the file is
-    missing, unreadable, contains invalid JSON, or does not include an entry
-    for session_id.  Never raises.
+    Reads the last-prompt.json signal file (a JSON map of session_id →
+    float epoch seconds) at yas.constants.last_prompt_path().  Returns None
+    when the file is missing, unreadable, contains invalid JSON, or does not
+    include an entry for session_id.  Never raises.
     '''
     try:
-        state = CLAUDE_DIR / 'yas-last-prompt.json'
+        state = last_prompt_path()
         text = state.read_text()
         data = json.loads(text)
         if not isinstance(data, dict):
@@ -1169,7 +1169,7 @@ class RunningSubagents:
         # Unix; on Windows paths start with a drive letter (no leading '-'
         # in CC's dir name) so the f-string prefix gave a wrong path.
         project_slug = re.sub(r'[^A-Za-z0-9]', '-', project_dir)
-        session_dir = CLAUDE_DIR / 'projects' / project_slug / session_id
+        session_dir = projects_dir() / project_slug / session_id
         subagents_dir = session_dir / 'subagents'
         if not subagents_dir.is_dir():
             return cls()
@@ -1177,7 +1177,7 @@ class RunningSubagents:
         # session .jsonl AND every subagents/agent-*.jsonl for structured
         # <task-notification> records, keyed by task-id == agent-<id>.jsonl
         # filename stem minus the "agent-" prefix. See _collect_task_notifications.
-        session_jsonl = CLAUDE_DIR / 'projects' / project_slug / f'{session_id}.jsonl'
+        session_jsonl = projects_dir() / project_slug / f'{session_id}.jsonl'
         notif_map = _collect_task_notifications(session_jsonl, subagents_dir, cache=cache)
         subagents: list[RunningSubagent] = []
         totals_only_ids: dict[str, float] = {}

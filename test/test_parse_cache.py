@@ -460,7 +460,7 @@ def test_save_survives_os_replace_failure(tmp_home: Path, monkeypatch: pytest.Mo
     original_replace = os_module.replace
 
     def failing_replace(src, dst):
-        if 'yas-cache' in str(src):
+        if '.tmp' in str(src):
             raise OSError("Simulated replace failure")
         return original_replace(src, dst)
 
