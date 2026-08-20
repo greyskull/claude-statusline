@@ -119,6 +119,31 @@ def task_state_for(pct: float) -> list[tuple[str, str, str]]:
     return out
 
 
+def _seed_yas_version(claude_dir: Path) -> None:
+    """Pre-write yas/state/version.json so the renderer's lazy yas.migrate()
+    sees an already-migrated layout and skips entirely — otherwise migrate()
+    deletes the legacy statusline-token-rate.log (and would fold/relocate
+    statusline-tokens.log) before the first render, dropping the sparkline
+    data this demo seeds below. Schema mirrors yas.migrate.migrate()'s payload.
+    """
+    # Local import: only main()'s --snapshots path adds claude/ to sys.path,
+    # and this is reached from other call sites (the animate path) too, so
+    # import lazily and fall back to a hardcoded schema version if yas isn't
+    # importable yet rather than hard-failing the demo.
+    try:
+        sys.path.insert(0, str(REPO_ROOT / 'claude'))
+        from yas.constants import LAYOUT_SCHEMA_VERSION, VERSION
+    except ImportError:
+        LAYOUT_SCHEMA_VERSION, VERSION = 1, '0.0.0-demo'
+    version_file = claude_dir / 'yas' / 'state' / 'version.json'
+    version_file.parent.mkdir(parents=True, exist_ok=True)
+    version_file.write_text(json.dumps({
+        'schema_version': LAYOUT_SCHEMA_VERSION,
+        'yas_version': VERSION,
+        'migrated_at': time.time(),
+    }))
+
+
 def build_synthetic_env(tmpdir: Path, session_id: str) -> None:
     claude = tmpdir / '.claude'
     project = tmpdir / 'my-project'
@@ -158,9 +183,12 @@ def build_synthetic_env(tmpdir: Path, session_id: str) -> None:
     write_settings(claude, [])
     write_transcript(claude / 'projects' / session_id / f'{session_id}.jsonl', [], 0, 0, 0, 0)
     today = datetime.now().strftime('%Y-%m-%d')
-    (claude / 'statusline-tokens.log').write_text(
+    tokens_log = claude / 'yas' / 'state' / 'runtime' / 'tokens.log'
+    tokens_log.parent.mkdir(parents=True, exist_ok=True)
+    tokens_log.write_text(
         f'{today} demo-prior-session 8200000 215000000 1450000\n'
     )
+    _seed_yas_version(claude)
 
 
 def _subagent_content_block(spec: object) -> dict[str, object] | None:
@@ -792,7 +820,8 @@ def animate(env: dict[str, str], raw: dict[str, object], tmpdir: Path, session_i
     claude       = tmpdir / '.claude'
     project      = tmpdir / 'my-project'
     transcript_p = claude / 'projects' / session_id / f'{session_id}.jsonl'
-    rate_log     = claude / 'statusline-token-rate.log'
+    rate_log     = claude / 'yas' / 'state' / 'runtime' / 'token-rate.log'
+    rate_log.parent.mkdir(parents=True, exist_ok=True)
 
     KEEP = max(300.0, DEMO_TOKEN_WINDOW * 4)
 
@@ -1569,7 +1598,9 @@ def render_scenario(
     claude       = tmpdir / '.claude'
     project      = tmpdir / 'my-project'
     transcript_p = claude / 'projects' / session_id / f'{session_id}.jsonl'
-    rate_log     = claude / 'statusline-token-rate.log'
+    rate_log     = claude / 'yas' / 'state' / 'runtime' / 'token-rate.log'
+    rate_log.parent.mkdir(parents=True, exist_ok=True)
+    _seed_yas_version(claude)
 
     ctx_size  = 200_000
     total_in  = int(ctx_size * cfg.context_pct * 0.88)

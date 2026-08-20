@@ -7,7 +7,6 @@ import unicodedata
 from yas.constants import (
     _ANSI_RE,
     ASCII_TRANSLATE,
-    CLAUDE_DIR,
     DEFAULT_MAX_WIDTH,
     ELLIPSIS,
     GITHUB_TRANSLATE,
@@ -15,6 +14,7 @@ from yas.constants import (
     STRIKE,
     UNICODE_TRANSLATE,
     UNSTRIKE,
+    terminal_width_path,
 )
 
 
@@ -33,7 +33,7 @@ def terminal_width() -> int:
             pass
 
     try:
-        w = int((CLAUDE_DIR / 'terminal-width').read_text().strip())
+        w = int(terminal_width_path().read_text().strip())
         if w > 0:
             return w
     except (OSError, ValueError):

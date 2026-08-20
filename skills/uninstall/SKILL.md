@@ -12,7 +12,7 @@ Reverse `/yas:init`. Remove the `statusLine` block from `settings.json` in `$CLA
 
 `claude plugin uninstall yas@yet-another-statusline` only deletes the plugin *cache* — Claude Code keeps reading `statusLine.command` from settings.json and tries to run the now-missing script. This skill clears that config so the statusline actually stops.
 
-Leaves untouched: a custom (non-yas) statusLine, the `settings.json.bak-yas-*` backups, the user's `statusline-theme` / `terminal-width` config files, and any `make install` dev symlinks.
+Leaves untouched: a custom (non-yas) statusLine, the `settings.json.bak-yas-*` backups, the user's `yas.toml` config file, and any `make install` dev symlinks.
 
 </objective>
 
@@ -77,17 +77,24 @@ fi
 
 ## Step 3: Delete runtime state
 
-The renderer writes these as it runs. Safe to remove; they regenerate if the statusline is ever reinstalled.
+The renderer writes these as it runs. Safe to remove; they regenerate if the statusline is ever reinstalled. `yas.toml` is deliberately preserved — it is the user's own configuration, not YAS-generated state.
 
 ```bash
-for f in statusline-tokens.log statusline-token-rate.log; do
-    if [ -f "$CONFIG_DIR/$f" ]; then
-        rm -f "$CONFIG_DIR/$f" && printf "  Removed %s\n" "$f"
+# Consolidated state tree (current versions)
+if [ -d "$CONFIG_DIR/yas" ]; then
+    rm -rf "$CONFIG_DIR/yas" && printf "  Removed yas/\n"
+fi
+
+# Legacy flat paths (older versions, pre-migration)
+for f in statusline-tokens.log statusline-token-rate.log statusline-render.log \
+         statusline-theme terminal-width yas-last-prompt.json yas.toml.cache; do
+    if [ -e "$CONFIG_DIR/$f" ]; then
+        rm -f "$CONFIG_DIR/$f" && printf "  Removed legacy %s\n" "$f"
     fi
 done
 
 if [ -d "$CONFIG_DIR/statusline-output" ]; then
-    rm -rf "$CONFIG_DIR/statusline-output" && printf "  Removed statusline-output/\n"
+    rm -rf "$CONFIG_DIR/statusline-output" && printf "  Removed legacy statusline-output/\n"
 fi
 
 # Legacy: older versions wrote per-session info files here
@@ -115,7 +122,7 @@ Then print a summary:
 
   Still installed (this skill does not remove these):
     • the plugin itself — run:  claude plugin uninstall yas@yet-another-statusline
-    • your theme/width prefs — statusline-theme, terminal-width
+    • your config — yas.toml
     • backups — settings.json.bak-yas-*  (delete by hand if you want)
 
   Reload Claude Code to clear the statusline.

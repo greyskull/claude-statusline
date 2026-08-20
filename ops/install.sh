@@ -820,6 +820,96 @@ ensure_plugin() {
     fi
 }
 
+# fold_legacy_theme -----------------------------
+# The legacy $CLAUDE_CONFIG_DIR/statusline-theme file held a bare theme name.
+# That knob now lives in yas.toml under [appearance] theme. Fold the legacy
+# value in BEFORE migrate_layout() runs, but only when yas.toml does not already
+# express a theme — an explicit config always wins. The legacy file itself is
+# NOT deleted here: migrate() (python -m yas.migrate) owns retiring it.
+fold_legacy_theme() {
+    local theme_file="$CLAUDE_CONFIG_DIR/statusline-theme"
+    local toml_path="$CLAUDE_CONFIG_DIR/yas.toml"
+
+    [ -s "$theme_file" ] || return 0
+
+    local theme
+    theme=$(tr -d '\r' < "$theme_file" | head -1 | tr -d '[:space:]')
+    [ -n "$theme" ] || return 0
+
+    # Existing explicit theme = nothing to fold.
+    if [ -f "$toml_path" ] && grep -Eq '^[[:space:]]*theme[[:space:]]*=' "$toml_path"; then
+        printf '%b  yas.toml already sets a theme — leaving legacy statusline-theme unused%b\n' "$C_DIM" "$C_RESET"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '%b  Would fold legacy theme "%s" into %s%b\n' "$C_DIM" "$theme" "$toml_path" "$C_RESET"
+        return 0
+    fi
+
+    # Build the new content: fold the theme into an *existing* [appearance]
+    # table when present (a second [appearance] header is a tomllib "Cannot
+    # declare ('appearance',) twice" parse error), append a fresh
+    # [appearance] stanza when the file exists but has no such table, or
+    # write a minimal file when yas.toml doesn't exist yet.
+    local content
+    if [ -f "$toml_path" ] && grep -Eq '^[[:space:]]*\[appearance\]' "$toml_path"; then
+        content=$(awk -v theme="$theme" '
+            { print }
+            !done && /^[[:space:]]*\[appearance\]/ {
+                print "# Folded in from the legacy statusline-theme file by ops/install.sh."
+                print "theme = \"" theme "\""
+                done = 1
+            }
+        ' "$toml_path")
+    elif [ -f "$toml_path" ]; then
+        content=$(cat "$toml_path"; printf '\n[appearance]\n# Folded in from the legacy statusline-theme file by ops/install.sh.\ntheme = "%s"\n' "$theme")
+    else
+        content=$(printf '# yas.toml — yet-another-statusline configuration\n\n[appearance]\n# Folded in from the legacy statusline-theme file by ops/install.sh.\ntheme = "%s"\n' "$theme")
+    fi
+
+    # Atomic write (mktemp + mv) with a parse check, mirroring run_wizard.
+    local tmp
+    tmp=$(mktemp "${toml_path}.XXXXXXXXXX") || { fail '! could not create temp file — yas.toml unchanged'; return 0; }
+    printf '%s\n' "$content" > "$tmp" || { rm -f "$tmp"; fail '! write failed — yas.toml unchanged'; return 0; }
+
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        if ! "$PYTHON_BIN" -c '
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+import sys
+tomllib.load(open(sys.argv[1], "rb"))
+' "$tmp" 2>/dev/null; then
+            rm -f "$tmp"
+            fail '! folding legacy theme produced invalid yas.toml — leaving existing file untouched'
+            return 0
+        fi
+    fi
+
+    mv "$tmp" "$toml_path"
+    printf '%b  Folded legacy theme "%s" into %s%b\n' "$C_GREEN" "$theme" "$toml_path" "$C_RESET"
+}
+
+# migrate_layout --------------------------------
+# Move any legacy top-level state files/dirs into the consolidated
+# $CLAUDE_CONFIG_DIR/yas/ layout. Delegates entirely to the packaged migrator so
+# the layout is described in exactly one place. Failure is reported and NON-fatal:
+# the renderer retries the migration lazily on its next render.
+migrate_layout() {
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '%b  Would migrate layout → %s/yas/%b\n' "$C_DIM" "$CLAUDE_CONFIG_DIR" "$C_RESET"
+        return 0
+    fi
+
+    if PYTHONPATH="$PLUGIN_ROOT/claude" "$PYTHON_BIN" -m yas.migrate --verbose; then
+        printf '%b  Layout migrated → %s/yas/%b\n' "$C_DIM" "$CLAUDE_CONFIG_DIR" "$C_RESET"
+    else
+        fail "! layout migration failed — continuing; the statusline will retry on next render"
+    fi
+}
+
 # do_wire ---------------------------------------
 # — discover renderer
 # - clean up legacy files
@@ -896,6 +986,12 @@ do_wire() {
         fail "! Python 3.10+ not found — install Python 3.10+ (or uv) and re-run"; exit 1
     fi
 
+    # Consolidated-layout migration. fold_legacy_theme() must run FIRST: it reads
+    # the legacy statusline-theme file that migrate() then retires. Both need
+    # PYTHON_BIN (toml parse check / the migrator itself), so they sit here.
+    fold_legacy_theme
+    migrate_layout
+
     # Interactive config wizard: runs AFTER provisioning (previews need the
     # interpreter + shipped assets) and BEFORE the settings write. Guarded behind
     # INTERACTIVE + RUN_WIZARD so non-interactive / wire-only paths write no
@@ -970,13 +1066,29 @@ do_uninstall() {
 
     heading "Settings"
 
-    # Legacy cleanup (always, even if settings has nothing to remove)
-    for f in "$CLAUDE_CONFIG_DIR"/statusline-info-*; do
+    # State cleanup (always, even if settings has nothing to remove).
+    #
+    # NOTE: $CLAUDE_CONFIG_DIR/yas.toml is DELIBERATELY PRESERVED — it is the
+    # user's own configuration, not YAS-generated state. Everything else YAS
+    # owns goes: the consolidated yas/ tree plus the nine retired legacy paths
+    # (for users uninstalling before ever running the migration). Nothing owned
+    # by Claude Code (settings.json beyond the statusLine key, projects/,
+    # plugins/) is touched.
+    for f in "$CLAUDE_CONFIG_DIR"/statusline-info-* \
+             "$CLAUDE_CONFIG_DIR/yas" \
+             "$CLAUDE_CONFIG_DIR/statusline-tokens.log" \
+             "$CLAUDE_CONFIG_DIR/statusline-token-rate.log" \
+             "$CLAUDE_CONFIG_DIR/statusline-render.log" \
+             "$CLAUDE_CONFIG_DIR/statusline-theme" \
+             "$CLAUDE_CONFIG_DIR/terminal-width" \
+             "$CLAUDE_CONFIG_DIR/yas-last-prompt.json" \
+             "$CLAUDE_CONFIG_DIR/yas.toml.cache" \
+             "$CLAUDE_CONFIG_DIR/statusline-output"; do
         [ -e "$f" ] || continue
         if [ "$DRY_RUN" = "1" ]; then
-            printf '%b  Would remove legacy %s%b\n' "$C_DIM" "$(basename "$f")" "$C_RESET"
+            printf '%b  Would remove %s%b\n' "$C_DIM" "$(basename "$f")" "$C_RESET"
         else
-            rm -f "$f" && printf '%b  Removed legacy %s%b\n' "$C_DIM" "$(basename "$f")" "$C_RESET"
+            rm -rf "$f" && printf '%b  Removed %s%b\n' "$C_DIM" "$(basename "$f")" "$C_RESET"
         fi
     done
 
@@ -1231,7 +1343,14 @@ run_wizard() {
     printf '%s\n' "$content" > "$tmp" || { rm -f "$tmp"; fail '! write failed — yas.toml unchanged' > /dev/tty; return 0; }
 
     if [ -n "${PYTHON_BIN:-}" ]; then
-        if ! "$PYTHON_BIN" -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$tmp" 2>/dev/null; then
+        if ! "$PYTHON_BIN" -c '
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+import sys
+tomllib.load(open(sys.argv[1], "rb"))
+' "$tmp" 2>/dev/null; then
             rm -f "$tmp"
             fail '! generated yas.toml failed to parse — leaving existing file untouched' > /dev/tty
             return 0

@@ -2,7 +2,7 @@
 
 Imports:
   - yas.session  for Model and usage types
-  - yas.constants for CLAUDE_DIR
+  - yas.constants for the runtime/log path helpers (tokens_log, token_rate_log, render_log)
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import functools
 import time
 from typing import Any, TYPE_CHECKING
 
-from yas.constants import CLAUDE_DIR
+from yas.constants import tokens_log, token_rate_log, render_log
 from yas.session import Model
 
 if TYPE_CHECKING:
@@ -113,7 +113,7 @@ class TokenLog:
 
     @classmethod
     def update(cls, session_id: str, today: str, total_in: int, cache_read: int, total_out: int) -> TokenLog:
-        log = CLAUDE_DIR / 'statusline-tokens.log'
+        log = tokens_log()
         lines = []
         if log.exists():
             for ln in log.read_text().splitlines():
@@ -168,7 +168,7 @@ class TokenRate:
     def update(cls, session_id: str, total_in: int, total_out: int) -> int:
         if not session_id:
             return 0
-        log = CLAUDE_DIR / 'statusline-token-rate.log'
+        log = token_rate_log()
         now = time.time()
         rows: list[tuple[float, str, int, int]] = []
         if log.exists():
@@ -204,7 +204,7 @@ class TokenRate:
     def history(cls, session_id: str, n_buckets: int, window: float) -> list[int]:
         if n_buckets <= 0 or not session_id:
             return []
-        log = CLAUDE_DIR / 'statusline-token-rate.log'
+        log = token_rate_log()
         now = time.time()
         samples: list[tuple[float, int, int]] = []
         if log.exists():
@@ -245,7 +245,7 @@ class TokenRate:
         """Return (in_active, out_active) — True if that count grew in the last `window` seconds."""
         if not session_id:
             return False, False
-        log = CLAUDE_DIR / 'statusline-token-rate.log'
+        log = token_rate_log()
         if not log.exists():
             return False, False
         now = time.time()
@@ -289,7 +289,7 @@ class RenderTiming:
     def read(cls, session_id: str) -> float | None:
         if not session_id:
             return None
-        log = CLAUDE_DIR / 'statusline-render.log'
+        log = render_log()
         if not log.exists():
             return None
         try:
@@ -305,7 +305,7 @@ class RenderTiming:
     def write(cls, session_id: str, ms: float) -> None:
         if not session_id:
             return
-        log = CLAUDE_DIR / 'statusline-render.log'
+        log = render_log()
         now = time.time()
         rows: list[str] = []
         if log.exists():

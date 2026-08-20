@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import yas.tokens as tokens
+from yas.constants import tokens_log
 
 # Repoint symbols to the new module
 TokenLog = tokens.TokenLog
@@ -12,7 +13,7 @@ YESTERDAY = '2026-05-18'
 
 
 def _log_path(tmp_home: Path) -> Path:
-    return tmp_home / '.claude' / 'statusline-tokens.log'
+    return tokens_log()
 
 
 def test_empty_log_first_write(tmp_home: Path) -> None:

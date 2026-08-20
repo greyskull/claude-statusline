@@ -1,7 +1,9 @@
 """Session data-classes and parser helpers.
 
-The only package import is the leaf-level `_sanitize` from yas.constants (a
-stdlib-only module, so no import cycle); everything else is stdlib.
+The only package import is the leaf-level `_sanitize`/`settings_path` from
+yas.constants (a stdlib-only module, so no import cycle); everything else is
+stdlib. HOME (the user's home dir, distinct from CLAUDE_DIR) stays local to
+this module for short_pwd's `~` collapsing.
 TokenAccounting (used by Model.cost_rates) is imported lazily inside the
 property so this module can be loaded before tokens.py exists; it will resolve
 once task 4.1 creates claude/yas/tokens.py.
@@ -15,11 +17,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from yas.constants import _sanitize
+from yas.constants import _sanitize, settings_path
 
 
-HOME       = Path(os.path.expanduser('~'))
-CLAUDE_DIR = Path(os.environ.get('CLAUDE_CONFIG_DIR', str(HOME / '.claude')))
+HOME = Path(os.path.expanduser('~'))
 
 # helpers ---------------------------------------
 
@@ -168,7 +169,7 @@ class Workspace:
         # Only the user's own config dir is read. project_dir/.claude/settings.json
         # is attacker-controlled for a cloned repo — reading it was both an
         # unexpected trust-boundary read and an escape-injection sink (SEC-2).
-        candidates = [CLAUDE_DIR / 'settings.json']
+        candidates = [settings_path()]
         for sf in candidates:
             if not sf.is_file():
                 continue

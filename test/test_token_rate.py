@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import yas.tokens as tokens
+from yas.constants import token_rate_log
 
 
 NOW = 1_000_000.0  # fixed "now" for all tests
@@ -19,7 +20,7 @@ class FakeTime:
 
 
 def _log_path(tmp_home: Path) -> Path:
-    return tmp_home / '.claude' / 'statusline-token-rate.log'
+    return token_rate_log()
 
 
 def _write_row(path: Path, ts: float, session_id: str, total_in: int, total_out: int) -> None:

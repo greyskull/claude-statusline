@@ -103,13 +103,17 @@ def test_resolve_theme_env_beats_file(
     assert app.resolve_theme(None) is THEMES['dracula']
 
 
-def test_resolve_theme_file_used_when_no_env(
+def test_resolve_theme_legacy_statusline_theme_file_is_ignored(
     monkeypatch: pytest.MonkeyPatch, tmp_home: Path,
 ) -> None:
+    # The legacy `statusline-theme` file source was retired along with
+    # config._legacy_theme_sources; precedence is now CLI -> env ->
+    # yas.toml [appearance].theme -> default, so a stray legacy file must
+    # be silently ignored rather than resolved.
     monkeypatch.delenv('CLAUDE_STATUSLINE_THEME', raising=False)
     (tmp_home / '.claude').mkdir(parents=True, exist_ok=True)
     (tmp_home / '.claude' / 'statusline-theme').write_text('claude-light')
-    assert app.resolve_theme(None) is THEMES['claude-light']
+    assert app.resolve_theme(None) is CLAUDE_DARK
 
 
 def test_resolve_theme_unknown_name_falls_through(

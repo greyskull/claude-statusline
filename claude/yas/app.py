@@ -6,7 +6,10 @@ import time
 from datetime import datetime
 
 from yas.config import Config
-from yas.constants import CLAUDE_DIR, MIN_WIDTH, NARROW_WIDTH, MEDIUM_WIDTH, VERSION
+from yas.constants import (
+    MIN_WIDTH, NARROW_WIDTH, MEDIUM_WIDTH, VERSION,
+    config_path, session_payload_path, sessions_dir, version_file,
+)
 from yas.info import SessionView
 from yas.layout import build_narrow, build_medium, build_wide, render_layout
 from yas.renderer import Renderer
@@ -27,7 +30,7 @@ def record_tick(session: SessionInfo, usage: TranscriptUsage) -> TickRecord:
 
 def resolve_theme(cli_name: str | None) -> Theme:
     """Layered theme selection: CLI -> YAS_THEME -> CLAUDE_STATUSLINE_THEME
-    -> [appearance].theme -> statusline-theme file -> CLAUDE_DARK.
+    -> [appearance].theme -> CLAUDE_DARK.
 
     Resolves live (fresh Config.load) so callers see the current environment and
     CLAUDE_DIR; the import-time CONFIG singleton is for the module constants."""
@@ -78,24 +81,31 @@ def main(t0: float | None = None) -> None:
     # already UTF-8 (most Unix systems since Python 3.7).
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
+    # Lazy one-time migration to the yas/{cache,state}/ layout. The `stat()`
+    # here is the whole steady-state cost once migrated; the import stays
+    # inside the guard so it's never paid on the hot path after that.
+    # REMOVE AFTER 0.11.0
+    if not version_file().exists():
+        from yas.migrate import migrate
+        migrate()
     # Resolve config live so a freshly-set env var (e.g. YAS_FULL_WIDTH) or an
     # edited yas.toml takes effect on this invocation; CLI flags are top priority.
-    cfg      = Config.load(argv=sys.argv[1:], config_dir=CLAUDE_DIR)
+    cfg      = Config.load(argv=sys.argv[1:], config_dir=config_path().parent)
     bg_shift = cfg.bg_shift
     theme    = THEMES.get(cfg.theme, CLAUDE_DARK)
 
     info = json.loads(sys.stdin.read())
 
     # Write payload so the multi-session observer can index it. Keyed by
-    # session_id and overwritten in place, so the dir holds one file per
-    # session rather than one per render tick. The observer already collapses
-    # to the newest payload per session (mon/discovery.index_payloads_by_session),
-    # so the old timestamped filenames only ever accumulated dead weight.
+    # session_id and overwritten in place under yas/state/sessions/, so the
+    # dir holds one file per session rather than one per render tick. The
+    # observer already collapses to the newest payload per session
+    # (mon/discovery.index_payloads_by_session), so the old timestamped
+    # filenames only ever accumulated dead weight.
     session_id = _as_str(info.get('session_id')) or 'unknown'
     try:
-        out_dir    = CLAUDE_DIR / 'statusline-output'
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / f'statusline.{session_id}.json').write_text(json.dumps(info))
+        sessions_dir().mkdir(parents=True, exist_ok=True)
+        session_payload_path(session_id).write_text(json.dumps(info))
     except OSError:
         pass
 

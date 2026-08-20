@@ -812,12 +812,19 @@ def _no_tomllib_guard(monkeypatch: pytest.MonkeyPatch) -> Callable[[], None]:
 
 
 @requires_tomllib
-def test_cache_written_on_first_parse(tmp_path: Path) -> None:
+def test_cache_written_on_first_parse(tmp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # yas.toml itself still lives directly under config_dir; its marshal
+    # cache lives under yas/cache/ (constants.toml_cache_path()) — point
+    # CLAUDE_DIR at the same tmp_home the toml is written into so the two
+    # resolve to the same tree.
+    tmp_path = tmp_home / '.claude'
+    tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / 'yas.toml').write_text('[layout]\nmax_width = 200\n')
-    assert not (tmp_path / 'yas.toml.cache').exists()
+    from yas.constants import toml_cache_path
+    assert not toml_cache_path().exists()
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert cfg.max_width == 200
-    assert (tmp_path / 'yas.toml.cache').exists()
+    assert toml_cache_path().exists()
 
 
 @requires_tomllib
@@ -863,15 +870,19 @@ def test_cache_invalidated_on_backwards_mtime(tmp_path: Path, monkeypatch: pytes
 
 
 @requires_tomllib
-def test_corrupt_cache_falls_back_to_live_parse(tmp_path: Path) -> None:
+def test_corrupt_cache_falls_back_to_live_parse(tmp_home: Path) -> None:
+    tmp_path = tmp_home / '.claude'
+    tmp_path.mkdir(parents=True, exist_ok=True)
     toml = tmp_path / 'yas.toml'
     toml.write_text('[layout]\nmax_width = 200\n')
-    (tmp_path / 'yas.toml.cache').write_bytes(b'\x00not-valid-marshal\xff')
+    from yas.constants import toml_cache_path
+    toml_cache_path().parent.mkdir(parents=True, exist_ok=True)
+    toml_cache_path().write_bytes(b'\x00not-valid-marshal\xff')
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert cfg.max_width == 200  # corruption swallowed, parsed live
     assert not cfg.errors  # corruption is NOT surfaced as a parse error
     # The bad cache should have been overwritten with a valid one.
-    assert marshal.loads((tmp_path / 'yas.toml.cache').read_bytes())[0] == config.CACHE_VERSION
+    assert marshal.loads(toml_cache_path().read_bytes())[0] == config.CACHE_VERSION
 
 
 @requires_tomllib
@@ -881,7 +892,9 @@ def test_stale_version_cache_reparsed(tmp_path: Path) -> None:
     st = toml.stat()
     bad = marshal.dumps((config.CACHE_VERSION + 99, st.st_mtime_ns, st.st_size,
                          {'layout': {'max_width': 999}}))
-    (tmp_path / 'yas.toml.cache').write_bytes(bad)
+    cache_path = tmp_path / 'yas' / 'cache' / 'config.toml.cache'
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(bad)
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert cfg.max_width == 200  # version mismatch → reparse from source
 
@@ -891,13 +904,14 @@ def test_parse_error_writes_no_cache(tmp_path: Path) -> None:
     (tmp_path / 'yas.toml').write_text('this is = = not toml\n')
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert any('parse error' in e for e in cfg.errors)
-    assert not (tmp_path / 'yas.toml.cache').exists()  # no cache for a bad parse
+    # no cache for a bad parse
+    assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
 
 
 def test_missing_toml_writes_no_cache(tmp_path: Path) -> None:
     cfg = config.Config.load(env={}, config_dir=tmp_path)
     assert cfg.errors == ()
-    assert not (tmp_path / 'yas.toml.cache').exists()
+    assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
 
 
 @requires_tomllib
@@ -905,10 +919,11 @@ def test_readonly_dir_cache_write_swallowed(tmp_path: Path) -> None:
     import os
     toml = tmp_path / 'yas.toml'
     toml.write_text('[layout]\nmax_width = 200\n')
-    os.chmod(tmp_path, 0o500)  # read+exec, no write
+    os.chmod(tmp_path, 0o500)  # read+exec, no write — blocks mkdir of yas/cache/
     try:
         cfg = config.Config.load(env={}, config_dir=tmp_path)
         assert cfg.max_width == 200  # parse still works; write failure swallowed
         assert cfg.errors == ()
+        assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
     finally:
         os.chmod(tmp_path, 0o700)

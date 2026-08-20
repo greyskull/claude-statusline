@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from yas.constants import CLAUDE_DIR
+from yas.constants import projects_dir, sessions_dir
 
 
 @dataclass
@@ -20,9 +20,12 @@ class ActiveSession:
 def find_active_jsonls(
     include_after: timedelta,
     now: datetime,
-    projects_root: Path = CLAUDE_DIR / 'projects',
+    projects_root: Path | None = None,
 ) -> list[tuple[Path, float]]:
     """Return (jsonl_path, mtime) pairs for .jsonl files whose mtime is within include_after of now."""
+    if projects_root is None:
+        projects_root = projects_dir()
+
     result: list[tuple[Path, float]] = []
     now_ts = now.timestamp()
     cutoff = include_after.total_seconds()
@@ -42,9 +45,12 @@ def find_active_jsonls(
 
 
 def index_payloads_by_session(
-    payloads_root: Path = CLAUDE_DIR / 'statusline-output',
+    payloads_root: Path | None = None,
 ) -> dict[str, tuple[Path, float, dict[str, object]]]:
     """Return most-recent payload file per session_id as (path, mtime, parsed_dict)."""
+    if payloads_root is None:
+        payloads_root = sessions_dir()
+
     index: dict[str, tuple[Path, float, dict[str, object]]] = {}
 
     if not payloads_root.exists():

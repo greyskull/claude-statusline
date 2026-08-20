@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import yas.app as app
+import yas.constants as constants
 
 _EXAMPLE = Path(__file__).resolve().parent.parent / 'ops' / 'session-info-example.json'
 _SCRIPT  = Path(__file__).resolve().parent.parent / 'claude' / 'statusline_command.py'
@@ -48,7 +49,7 @@ def test_yas_full_width_fills_terminal(tmp_path, monkeypatch, capsys):
     fake_tw = 200  # wider than DEFAULT_MAX_WIDTH so capping is observable
 
     monkeypatch.setattr(app, 'terminal_width', lambda: fake_tw)
-    monkeypatch.setattr(app, 'CLAUDE_DIR', tmp_path / '.claude')
+    monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp_path / '.claude')
     # Isolate from any YAS_* env vars set in the host shell (e.g. YAS_MAX_WIDTH=40).
     monkeypatch.delenv('YAS_MAX_WIDTH', raising=False)
     monkeypatch.delenv('YAS_FULL_WIDTH', raising=False)
@@ -79,7 +80,7 @@ def test_yas_full_width_fills_terminal(tmp_path, monkeypatch, capsys):
 def _run_main(info, tmp_path, monkeypatch, env_extra):
     import io
     monkeypatch.setattr(app, 'terminal_width', lambda: 200)
-    monkeypatch.setattr(app, 'CLAUDE_DIR', tmp_path / '.claude')
+    monkeypatch.setattr(constants, 'CLAUDE_DIR', tmp_path / '.claude')
     for k in ('YAS_MAX_WIDTH', 'YAS_FULL_WIDTH', 'YAS_SHOW_RENDER_TIME'):
         monkeypatch.delenv(k, raising=False)
     for k, v in env_extra.items():
