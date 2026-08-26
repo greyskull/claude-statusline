@@ -56,6 +56,18 @@ demo/img:
 demo/widths:
 	@DEMO="$(or $(DEMO_ONLY),kitchen-sink)" ./ops/f.sh render
 
+# Points a Claude config dir's settings.json at THIS working copy, so edits here
+# are live without reinstalling the plugin. Thin wrapper over the installer's
+# wire-only mode (CLAUDE_PLUGIN_ROOT = this repo), which owns the atomic
+# backup/validate/restore write of statusLine + the YAS prompt hook.
+#   make dev/wire                                   # ~/.claude (or $CLAUDE_CONFIG_DIR)
+#   CLAUDE_CONFIG_DIR=~/.claude.work make dev/wire  # a different config dir
+#   DRY_RUN=1 make dev/wire                         # preview, writes nothing
+dev/wire:
+	@CLAUDE_PLUGIN_ROOT="$(CURDIR)" \
+		CLAUDE_CONFIG_DIR="$(or $(CLAUDE_CONFIG_DIR),$(HOME)/.claude)" \
+		bash ops/install.sh --wire-only $(if $(DRY_RUN),--dry-run,)
+
 test:
 	@uv run pytest -q
 
@@ -84,4 +96,4 @@ version/bump:
 	@git commit -m "Bump version to $(VERSION)"
 	@git push
 
-.PHONY: hooks bench pr-info demo demo/img demo/widths test statusline/test mon/run version/bump
+.PHONY: hooks bench pr-info demo demo/img demo/widths dev/wire test statusline/test mon/run version/bump
