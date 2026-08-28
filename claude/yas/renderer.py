@@ -648,7 +648,7 @@ class Renderer:
         c_helper  = rainbow_at(rainbow_step(), 9)
         icon_5h   = f'{c_helper}{BOLD}{ICON_LIMIT_5H}{self.R}  ' if show_icons else ''
         helper_5h = f'{icon_5h}{self.white_brt}{BOLD}{self.helper(rate_limits.five_hour, gap_5h, show_icons=show_icons)}{self.R}'
-        helper_7d = ''
+        icon_7d   = f'{c_helper}{BOLD}{ICON_LIMIT_7D}{self.R}  ' if show_icons else ''
         seven_day = rate_limits.seven_day
         if seven_day.used_percentage != 0 or seven_day.resets_at != 0:
             seven_clr     = self.fill_colour(float(seven_day.used_percentage or 0))
@@ -661,8 +661,12 @@ class Renderer:
                 show_icons=show_icons,
             )
             seven_trend_part = f'{" " * gap_7d}{seven_trend}' if seven_trend else ''
-            icon_7d   = f'{c_helper}{BOLD}{ICON_LIMIT_7D}{self.R}  ' if show_icons else ''
             helper_7d = f'{icon_7d}{seven_clr}{seven_pct_str}%{self.R}{seven_trend_part}'
+        else:
+            # No real/synthesised 7d data at all: render the same "unlimited"
+            # glyph the 5h helper() falls back to, instead of omitting the
+            # section outright, so 5h/7d fall back consistently.
+            helper_7d = f'{icon_7d}{self.COMMIT}{GLYPH_UNLIMITED}{self.R}'
         return helper_5h, helper_7d
 
     def model_right_section(

@@ -11,7 +11,7 @@ import functools
 import time
 from typing import Any, TYPE_CHECKING
 
-from yas.constants import tokens_log, token_rate_log, render_log
+from yas.constants import tokens_log, token_rate_log, rate_limit_log, render_log
 from yas.session import Model
 
 if TYPE_CHECKING:
@@ -266,6 +266,85 @@ class TokenRate:
         ti0, to0 = samples[0][1], samples[0][2]
         ti1, to1 = samples[-1][1], samples[-1][2]
         return ti1 > ti0, to1 > to0
+
+
+# ---------------------------------------------------------------------------
+# RateLimitLog
+# ---------------------------------------------------------------------------
+
+class RateLimitLog:
+    """Per-session history of cumulative token totals, backing the
+    [rate_limits] simulator (yas.rate_limits_sim).
+
+    One line per tick: `ts session_id cumulative_tokens`. Unlike
+    TokenRate's 300s log, retention here is caller-supplied (up to 7d for a
+    seven_day bucket) since the simulator needs to sum usage over a much
+    longer trailing window.
+    """
+
+    @classmethod
+    def record(cls, session_id: str, cumulative_tokens: int, keep_seconds: float) -> None:
+        if not session_id:
+            return
+        log = rate_limit_log()
+        now = time.time()
+        rows: list[str] = []
+        if log.exists():
+            try:
+                for ln in log.read_text().splitlines():
+                    parts = ln.split()
+                    if len(parts) != 3:
+                        continue
+                    try:
+                        ts = float(parts[0])
+                    except ValueError:
+                        continue
+                    if now - ts > keep_seconds:
+                        continue
+                    rows.append(ln)
+            except OSError:
+                pass
+        rows.append(f'{now:.3f} {session_id} {cumulative_tokens}')
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text('\n'.join(rows) + '\n')
+        except OSError:
+            pass
+
+    @classmethod
+    def usage_since(cls, session_id: str, window_start: float) -> int:
+        """Tokens accrued by `session_id` since `window_start`.
+
+        Computed as the cumulative total at the newest sample minus the
+        cumulative total at the oldest sample whose timestamp is >=
+        window_start (i.e. the first sample already inside the window). A
+        single sample (or none) inside the window yields 0 — there's no
+        earlier baseline to diff against yet.
+        """
+        if not session_id:
+            return 0
+        log = rate_limit_log()
+        if not log.exists():
+            return 0
+        samples: list[tuple[float, int]] = []
+        try:
+            for ln in log.read_text().splitlines():
+                parts = ln.split()
+                if len(parts) != 3 or parts[1] != session_id:
+                    continue
+                try:
+                    samples.append((float(parts[0]), int(parts[2])))
+                except ValueError:
+                    continue
+        except OSError:
+            return 0
+        if not samples:
+            return 0
+        samples.sort()
+        in_window = [s for s in samples if s[0] >= window_start]
+        if len(in_window) < 2:
+            return 0
+        return max(0, in_window[-1][1] - in_window[0][1])
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ from yas.constants import (
     GLYPH_CACHE,
     GLYPH_PLUGINS,
     GLYPH_SKILLS,
+    GLYPH_UNLIMITED,
     MEDIUM_WIDTH,
     NARROW_WIDTH,
     DEFAULT_MAX_WIDTH as MAX_WIDTH,
@@ -235,7 +236,9 @@ class TestModelRightSectionWideBurndown:
         stripped = strip_ansi(h5h + h7d)
         assert GLYPH_BURN_FAST in stripped  # at least one over-burn trend
 
-    def test_wide_seven_day_idle_suppresses_block(self) -> None:
+    def test_wide_seven_day_idle_shows_unlimited(self) -> None:
+        """An idle/absent 7d bucket renders the same GLYPH_UNLIMITED fallback
+        as an idle 5h bucket, rather than being suppressed outright."""
         import time
 
         now = time.time()
@@ -244,7 +247,9 @@ class TestModelRightSectionWideBurndown:
             seven_day=RateBucket(used_percentage=0, resets_at=0),
         )
         _h5h, h7d, _right, _w = self._r.model_right_section('Sonnet 4.6', '', rate)
-        assert h7d == ''  # entire 7d block suppressed
+        assert h7d != ''
+        assert GLYPH_UNLIMITED in strip_ansi(h7d)
+        assert '0.0%' not in strip_ansi(h7d)
 
     def test_wide_five_hour_warmup_no_5h_trend(self) -> None:
         import time
@@ -625,12 +630,13 @@ class TestModelRightSectionShortForm:
         assert h7d_on != ''
         assert h7d_off == ''
 
-    def test_include_7d_true_still_respects_content_gate(self) -> None:
-        # include_7d=True (the default) does not manufacture a 7d helper when
-        # there's no 7d data at all -- the content-driven has_7d gate in
-        # `_rate_helpers` still applies first.
+    def test_include_7d_true_with_no_data_shows_unlimited(self) -> None:
+        # include_7d=True (the default) still renders a 7d helper when there's
+        # no 7d data at all -- `_rate_helpers` now falls back to the same
+        # GLYPH_UNLIMITED glyph the 5h helper uses, instead of an empty string.
         r = Renderer()
         _h5h, h7d, _right, _w = r.model_right_section(
             'Sonnet 4.6', '', RateLimits(), include_7d=True,
         )
-        assert h7d == ''
+        assert h7d != ''
+        assert GLYPH_UNLIMITED in strip_ansi(h7d)

@@ -82,6 +82,15 @@ def render_log() -> Path:
     return runtime_dir() / 'render.log'
 
 
+def rate_limit_log() -> Path:
+    """Per-session cumulative-token samples backing the [rate_limits] simulator.
+
+    Distinct from token_rate_log(): that log is pruned after 300s (it only
+    feeds the instantaneous t/m rate), while this one is pruned per-call
+    against the caller-supplied retention (up to 7d for a seven_day bucket)."""
+    return runtime_dir() / 'rate-limit.log'
+
+
 def last_prompt_path() -> Path:
     return signals_dir() / 'last-prompt.json'
 

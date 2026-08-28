@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import NamedTuple, TYPE_CHECKING, TypeVar
 
 from yas.constants import (
     DEFAULT_CONTEXT_LABELS,
@@ -326,6 +327,72 @@ def _parse_context_labels(raw: object, origin: str) -> tuple[str, ...]:
     return tuple(items)
 
 
+_DURATION_RE = re.compile(r'^(\d+)([hd])$')
+
+
+def _parse_duration(raw: str) -> int:
+    """A simple duration string ("5h", "7d") -> whole seconds."""
+    m = _DURATION_RE.match(raw.strip())
+    if not m:
+        raise ValueError(f'expected a duration like "5h" or "7d", got {raw!r}')
+    n, unit = int(m.group(1)), m.group(2)
+    if n <= 0:
+        raise ValueError('duration must be > 0')
+    return n * (3600 if unit == 'h' else 86400)
+
+
+class RateLimitRule(NamedTuple):
+    budget:  int
+    window_seconds: int
+    anchor:  str            # 'rolling' | 'fixed'
+    epoch:   str | None     # cron expression, only set when anchor == 'fixed'
+
+
+def _parse_rate_limit_bucket(raw: object, label: str) -> RateLimitRule:
+    if not isinstance(raw, dict):
+        raise ValueError('expected a table')
+    budget = raw.get('budget')
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        raise ValueError('budget must be an integer > 0')
+    window_raw = raw.get('window')
+    if not isinstance(window_raw, str):
+        raise ValueError('window must be a string like "5h" or "7d"')
+    window_seconds = _parse_duration(window_raw)
+    anchor = raw.get('anchor', 'rolling')
+    if anchor not in ('rolling', 'fixed'):
+        raise ValueError(f'anchor must be "rolling" or "fixed", got {anchor!r}')
+    epoch = raw.get('epoch')
+    if anchor == 'rolling' and epoch is not None:
+        raise ValueError('epoch is only valid with anchor = "fixed"')
+    if anchor == 'fixed':
+        if not isinstance(epoch, str) or not epoch.strip():
+            raise ValueError('anchor = "fixed" requires an epoch (cron expression)')
+        from yas.cron import CronSchedule
+        CronSchedule.parse(epoch)  # validated eagerly so a bad cron fails at load time
+    return RateLimitRule(budget=budget, window_seconds=window_seconds, anchor=anchor, epoch=epoch)
+
+
+def _parse_rate_limits(raw: object, errors: list[str], debug: list[str]) -> dict[str, RateLimitRule]:
+    """Validate the [rate_limits] table into {bucket_name: RateLimitRule}.
+
+    Presence of `five_hour`/`seven_day` means "synthesise and override the
+    real value"; a bucket missing or invalid is simply absent from the
+    returned dict (today's real-value behaviour applies to it unchanged)."""
+    out: dict[str, RateLimitRule] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key in ('five_hour', 'seven_day'):
+        if key not in raw:
+            continue
+        label = f'rate_limits.{key}'
+        try:
+            out[key] = _parse_rate_limit_bucket(raw[key], label)
+        except ValueError as e:
+            errors.append(label)
+            debug.append(f'{label}: {e}')
+    return out
+
+
 def _parse_context_thresholds(raw: object, origin: str) -> tuple[int, ...]:
     """Exactly 4 strictly-ascending ints in 1..99 (band starts for levels 2-5).
 
@@ -353,7 +420,7 @@ class Config:
         'token_window', 'theme', 'bg_shift', 'glyph_mode', 'single_width',
         'show_day_stats', 'context_state', 'context_labels', 'context_thresholds',
         'show_render_time', 'show_tool_uses', 'soft_limit_models', 'openspec_scan_depth',
-        'show_icons', 'transcript_cache', 'errors', 'debug_lines',
+        'show_icons', 'transcript_cache', 'rate_limit_rules', 'errors', 'debug_lines',
     )
 
     max_width:          int
@@ -376,6 +443,7 @@ class Config:
     openspec_scan_depth: int
     show_icons:         bool
     transcript_cache:   bool
+    rate_limit_rules:   dict[str, RateLimitRule]
     errors:             tuple[str, ...]
     debug_lines:        tuple[str, ...]
 
@@ -401,6 +469,7 @@ class Config:
         openspec_scan_depth: int = DEFAULT_OPENSPEC_SCAN_DEPTH,
         show_icons:         bool = True,
         transcript_cache:   bool = DEFAULT_TRANSCRIPT_CACHE,
+        rate_limit_rules:   dict[str, RateLimitRule] | None = None,
         errors:             tuple[str, ...] = (),
         debug_lines:        tuple[str, ...] = (),
     ) -> None:
@@ -425,6 +494,7 @@ class Config:
         s(self, 'openspec_scan_depth', openspec_scan_depth)
         s(self, 'show_icons', show_icons)
         s(self, 'transcript_cache', transcript_cache)
+        s(self, 'rate_limit_rules', rate_limit_rules if rate_limit_rules is not None else {})
         s(self, 'errors', errors)
         s(self, 'debug_lines', debug_lines)
 
@@ -445,6 +515,7 @@ class Config:
                 f'soft_limit_models={self.soft_limit_models!r}, '
                 f'openspec_scan_depth={self.openspec_scan_depth}, '
                 f'show_icons={self.show_icons}, transcript_cache={self.transcript_cache}, '
+                f'rate_limit_rules={self.rate_limit_rules!r}, '
                 f'errors={self.errors!r}, debug_lines={self.debug_lines!r})')
 
     @classmethod
@@ -576,6 +647,9 @@ class Config:
 
         soft_limit_models = _parse_models(tokens.get('model'), errors, debug)
 
+        rate_limits_table = _table('rate_limits')
+        rate_limit_rules = _parse_rate_limits(rate_limits_table, errors, debug)
+
         return cls(
             max_width=max_width,
             full_width=full_width,
@@ -597,6 +671,7 @@ class Config:
             openspec_scan_depth=openspec_scan_depth,
             show_icons=show_icons,
             transcript_cache=transcript_cache,
+            rate_limit_rules=rate_limit_rules,
             errors=tuple(errors),
             debug_lines=tuple(debug),
         )
