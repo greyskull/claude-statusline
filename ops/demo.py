@@ -932,9 +932,17 @@ class ScenarioConfig:
     workflows:     list[dict[str, object]]   = field(default_factory=list)
     openspec:      list[tuple[str, int, int]]= field(default_factory=list)
     tasks:         list[tuple[str, str, str]]= field(default_factory=list)
-    five_hour_pct: float                     = 30.0
-    seven_day_pct: float                     = 20.0
+    # None omits the bucket from `rate_limits` entirely (simulates a Claude
+    # Code setup that doesn't supply that window at all), distinct from 0.0
+    # which is a present-but-idle bucket (must still render `∞`).
+    five_hour_pct: float | None               = 30.0
+    seven_day_pct: float | None               = 20.0
     yas_toml:      str | None                = None
+    # When set, render_scenario pre-seeds `rate-limit.log` with baseline
+    # samples so the `[rate_limits]` config-driven synthesizer (rate_limits_sim.py)
+    # has a real trailing-window history to diff against, instead of computing
+    # 0% from a single (this-tick-only) sample.
+    seed_rate_limit_log: bool                = False
     subagent_mtime_age: float                = 0.0
     cache_anchor_secs_ago: float | None      = None
     cache_1h_tier:         bool              = False
@@ -1535,6 +1543,39 @@ SCENARIOS: list[ScenarioConfig] = [
         five_hour_pct = 30.0,
         seven_day_pct = 20.0,
     ),
+    ScenarioConfig(
+        # No rate_limits payload at all — Claude Code setups that don't
+        # supply either window; both buckets must be omitted, not zeroed.
+        name          = 'rate-limits-absent',
+        context_pct   = 0.30,
+        five_hour_pct = None,
+        seven_day_pct = None,
+    ),
+    ScenarioConfig(
+        # Present-but-idle 7d bucket (0% used) alongside a normal 5h bucket —
+        # must render `∞`, not be dropped like the absent case above.
+        name          = 'rate-limits-idle-7d',
+        context_pct   = 0.30,
+        five_hour_pct = 30.0,
+        seven_day_pct = 0.0,
+    ),
+    ScenarioConfig(
+        # PR #125 headline feature: no stdin `rate_limits` payload at all
+        # (both buckets omitted, like `rate-limits-absent` above), but a
+        # `[rate_limits]` config table is set — YAS must synthesize real
+        # nonzero 5h/7d usage from local token history instead of falling
+        # back to the unlimited/omitted defaults.
+        name          = 'rate-limits-config-synthesized',
+        context_pct   = 0.30,
+        five_hour_pct = None,
+        seven_day_pct = None,
+        seed_rate_limit_log = True,
+        yas_toml      = '''
+[rate_limits]
+five_hour = { budget = 90_000, window = "5h", anchor = "rolling" }
+seven_day = { budget = 130_000, window = "7d", anchor = "fixed", epoch = "0 0 * * 0" }
+''',
+    ),
 ]
 
 
@@ -1586,6 +1627,26 @@ def write_rate_log_with_peaks(
     rate_log.write_text('\n'.join(lines) + '\n')
 
 
+def write_rate_limit_log_seed(
+    rate_limit_log: Path,
+    session_id:     str,
+    seed_samples:   tuple[tuple[float, int], ...],
+) -> None:
+    """Pre-populate `rate-limit.log` with baseline `(secs_ago, cumulative_tokens)`
+    samples so `RateLimitLog.usage_since` has an earlier baseline to diff the
+    live tick's cumulative total against.
+
+    Without this, `[rate_limits]`-config-driven synthesis (rate_limits_sim.py)
+    sees only the single sample recorded by this tick and computes 0% used —
+    correct behaviour, but useless for demonstrating the feature. Row format
+    matches `RateLimitLog.record`: `ts session_id cumulative_tokens`.
+    """
+    now   = time.time()
+    lines = [f'{now - secs_ago:.3f} {session_id} {cumulative}' for secs_ago, cumulative in seed_samples]
+    rate_limit_log.parent.mkdir(parents=True, exist_ok=True)
+    rate_limit_log.write_text('\n'.join(lines) + '\n')
+
+
 def render_scenario(
     env:        dict[str, str],
     fixture:    dict[str, object],
@@ -1599,6 +1660,7 @@ def render_scenario(
     project      = tmpdir / 'my-project'
     transcript_p = claude / 'projects' / session_id / f'{session_id}.jsonl'
     rate_log     = claude / 'yas' / 'state' / 'runtime' / 'token-rate.log'
+    rate_limit_log_p = claude / 'yas' / 'state' / 'runtime' / 'rate-limit.log'
     rate_log.parent.mkdir(parents=True, exist_ok=True)
     _seed_yas_version(claude)
 
@@ -1624,6 +1686,18 @@ def render_scenario(
     write_workflows(claude, session_id, project, cfg.workflows, age_seconds=90)
     write_openspec_changes(project, cfg.openspec)
     write_rate_log_with_peaks(rate_log, session_id, total_in + total_cc + total_out)
+    if cfg.seed_rate_limit_log:
+        # Live cumulative for this tick, matching yas.app._apply_rate_limit_sim's
+        # own computation (total_input_tokens + total_output_tokens) — the
+        # baselines below are diffed against this same value at render time.
+        live_cumulative = total_in + total_out
+        write_rate_limit_log_seed(
+            rate_limit_log_p, session_id,
+            seed_samples = (
+                (4 * 3600.0,       int(live_cumulative * 0.20)),   # 4h ago: inside the 5h window
+                (6 * 86400.0,      int(live_cumulative * 0.05)),   # 6d ago: inside the 7d window, older than the 5h sample
+            ),
+        )
 
     raw: dict[str, object] = dict(fixture)
     raw['model']          = {'id': cfg.model_id, 'display_name': cfg.model_name}
@@ -1639,12 +1713,26 @@ def render_scenario(
     ctx_win['used_percentage']     = round(cfg.context_pct * 100.0, 1)
     resets    = int(time.time()) + 7200
     rate_lims = _ensure_nested(raw, 'rate_limits')
-    five_hour = _ensure_nested(rate_lims, 'five_hour')
-    seven_day = _ensure_nested(rate_lims, 'seven_day')
-    five_hour['resets_at']        = resets
-    seven_day['resets_at']        = resets
-    five_hour['used_percentage']  = cfg.five_hour_pct
-    seven_day['used_percentage']  = cfg.seven_day_pct
+    # A pct of None means "this Claude Code setup didn't supply this window at
+    # all" — drop the key outright rather than defaulting it to a nonzero
+    # value. `rate_lims` is a shared mutable dict pulled off the base fixture
+    # (raw = dict(fixture) is only a shallow copy), so a bucket left over from
+    # an earlier scenario must be explicitly popped, not just left unset.
+    if cfg.five_hour_pct is None:
+        rate_lims.pop('five_hour', None)
+    else:
+        five_hour = _ensure_nested(rate_lims, 'five_hour')
+        # A genuinely idle window (0%) hasn't been touched yet, so the API
+        # wouldn't hand back a resets_at either — omit it so the ∞ path
+        # (idle + no resets_at) is exercised the same way as a real payload.
+        five_hour['resets_at']       = resets if cfg.five_hour_pct else 0
+        five_hour['used_percentage'] = cfg.five_hour_pct
+    if cfg.seven_day_pct is None:
+        rate_lims.pop('seven_day', None)
+    else:
+        seven_day = _ensure_nested(rate_lims, 'seven_day')
+        seven_day['resets_at']       = resets if cfg.seven_day_pct else 0
+        seven_day['used_percentage'] = cfg.seven_day_pct
 
     # Every YAS_* config knob already flows through `env` (a copy of os.environ)
     # to the statusline subprocess, so e.g. `YAS_SOFT_LIMIT=5000000 make demo/img`

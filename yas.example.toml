@@ -106,3 +106,20 @@
 
 # [cache]
 # transcript_cache = true  # bool; persist per-transcript parse results between renders (disable to force a full re-parse every tick)
+
+# [rate_limits]
+# Opt-in simulator for the 5h/7d usage buckets, for setups where Claude Code's
+# stdin JSON doesn't supply `rate_limits` at all. Defining a bucket here
+# synthesises it from local token-usage history and OVERRIDES any real
+# payload value for that bucket; omitting a bucket leaves it driven by the
+# stdin payload as before (or `∞`/omitted if that's absent too). No default —
+# both are unset unless you add them.
+#
+# five_hour = { budget = 44_000_000, window = "5h", anchor = "rolling" }
+# seven_day = { budget = 440_000_000, window = "7d", anchor = "fixed", epoch = "0 0 * * 0" }
+#
+# budget: int > 0; token budget for the window.
+# window: duration string like "5h" or "7d".
+# anchor: "rolling" (now-window .. now) or "fixed" (aligned to a cron `epoch`).
+# epoch:  standard 5-field cron expression; required when anchor = "fixed",
+#         forbidden when anchor = "rolling".

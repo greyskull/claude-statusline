@@ -185,7 +185,7 @@ def test_helper_reset_in_future(monkeypatch: pytest.MonkeyPatch) -> None:
 # Task 6.2 — 5h/7d icons, countdown placement, separator, 1dp
 # ---------------------------------------------------------------------------
 
-from yas.constants import ICON_LIMIT_5H, ICON_LIMIT_7D  # noqa: E402
+from yas.constants import GLYPH_UNLIMITED, ICON_LIMIT_5H, ICON_LIMIT_7D  # noqa: E402
 
 
 def test_model_right_section_5h_icon() -> None:
@@ -201,11 +201,14 @@ def test_model_right_section_7d_icon_appears_when_used() -> None:
     assert ICON_LIMIT_7D in h7d
 
 
-def test_model_right_section_7d_empty_when_idle() -> None:
+def test_model_right_section_7d_unlimited_when_idle() -> None:
+    """No 7d data (idle/absent, same as an unbounded 5h) renders the same
+    GLYPH_UNLIMITED fallback the 5h helper uses, instead of being omitted."""
     r = Renderer()
     rate = RateLimits(seven_day=RateBucket(used_percentage=0, resets_at=0))
     _h5h, h7d, _right, _w = r.model_right_section('Sonnet 4.6', '', rate)
-    assert h7d == ''
+    assert h7d != ''
+    assert GLYPH_UNLIMITED in h7d
 
 
 def test_helper_countdown_at_front(monkeypatch: pytest.MonkeyPatch) -> None:

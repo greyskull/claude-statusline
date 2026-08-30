@@ -14,11 +14,38 @@ from yas.info import SessionView
 from yas.info.parsecache import TranscriptCache
 from yas.layout import build_narrow, build_medium, build_wide, render_layout
 from yas.renderer import Renderer
-from yas.session import SessionInfo, _as_str
+from yas.session import RateLimits, SessionInfo, _as_str
 from yas.render.text import terminal_width, apply_glyphs
 from yas.themes import CLAUDE_DARK, THEMES, Theme
 from yas.tokens import RenderTiming, TickRecord, TokenLog, TokenRate, compute_day_cost
 from yas.info.transcript import TranscriptUsage
+
+
+def _apply_rate_limit_sim(info: dict[str, object], cfg: Config) -> None:
+    """Overwrite info['rate_limits'] with synthesised buckets per cfg.rate_limit_rules.
+
+    Mutates `info` in place, before it is written to the per-session payload
+    (see `main`), so the statusline and the `mon` TUI read the same
+    already-synthesised values rather than deriving them independently.
+    `cumulative_tokens` comes straight off the raw payload's context_window
+    totals (already present, no transcript parse needed) so this can run
+    ahead of SessionInfo/SessionView construction.
+    """
+    from yas.rate_limits_sim import simulate_rate_limits
+    session_id = _as_str(info.get('session_id')) or 'unknown'
+    ctx = info.get('context_window')
+    ctx = ctx if isinstance(ctx, dict) else {}
+    total_in  = ctx.get('total_input_tokens', 0)
+    total_out = ctx.get('total_output_tokens', 0)
+    cumulative_tokens = (int(total_in) if isinstance(total_in, (int, float)) else 0) \
+        + (int(total_out) if isinstance(total_out, (int, float)) else 0)
+    rl_raw = info.get('rate_limits')
+    real   = RateLimits.from_dict(rl_raw if isinstance(rl_raw, dict) else {})
+    synth  = simulate_rate_limits(session_id, cfg.rate_limit_rules, real, cumulative_tokens)
+    info['rate_limits'] = {
+        'five_hour': {'used_percentage': synth.five_hour.used_percentage, 'resets_at': synth.five_hour.resets_at},
+        'seven_day': {'used_percentage': synth.seven_day.used_percentage, 'resets_at': synth.seven_day.resets_at},
+    }
 
 
 def record_tick(session: SessionInfo, usage: TranscriptUsage) -> TickRecord:
@@ -99,6 +126,8 @@ def main(t0: float | None = None) -> None:
     theme    = THEMES.get(cfg.theme, CLAUDE_DARK)
 
     info = json.loads(sys.stdin.read())
+    if cfg.rate_limit_rules:
+        _apply_rate_limit_sim(info, cfg)
 
     # Write payload so the multi-session observer can index it. Keyed by
     # session_id and overwritten in place under yas/state/sessions/, so the

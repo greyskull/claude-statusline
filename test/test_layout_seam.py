@@ -382,9 +382,11 @@ def test_sep_rate_elbow_threaded_into_borders(monkeypatch: pytest.MonkeyPatch) -
     assert sep_rate_col in sep_row.ups,   f'sep_rate_col {sep_rate_col} not in separator_dim.ups {sep_row.ups}'
 
 
-def test_sep_rate_no_elbow_when_seven_day_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the 7-day bucket is absent (used_percentage=0, resets_at=0), the 7d vsep
-    does not appear in the content row and no stray ┬/┴ elbows are added for it."""
+def test_sep_rate_elbow_still_present_when_seven_day_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the 7-day bucket is absent (used_percentage=0, resets_at=0), the 7d
+    helper now renders the GLYPH_UNLIMITED fallback (same as an idle 5h bucket)
+    rather than being omitted — so the 7d vsep/elbow is still present, and no
+    stray ┬/┴ elbows are added or dropped either way."""
     from helper import strip_ansi
     from yas.session import RateBucket, RateLimits, SessionInfo
     _silence_dynamic(monkeypatch)
@@ -404,11 +406,13 @@ def test_sep_rate_no_elbow_when_seven_day_absent(monkeypatch: pytest.MonkeyPatch
     top_border_idx = next(i for i, row in enumerate(spec.rows) if row.kind == 'top_border')
     top_row = spec.rows[top_border_idx]
 
-    # When 7d is absent, sep_rate_col is None so fewer downs than with 7d active.
+    # 7d now always renders something (∞ when absent), so the vsep/elbow
+    # column count matches the populated-7d case exactly.
     spec_with_7d = layout.build_wide(_view(), _tick(), 160, _r)
     top_with_7d  = spec_with_7d.rows[next(i for i, r in enumerate(spec_with_7d.rows) if r.kind == 'top_border')]
-    assert len(top_row.downs) < len(top_with_7d.downs), (
-        f'expected fewer downs without 7d ({top_row.downs}) vs with 7d ({top_with_7d.downs})'
+    assert len(top_row.downs) == len(top_with_7d.downs), (
+        f'expected same down count with an absent-but-rendered 7d ({top_row.downs}) '
+        f'vs a populated 7d ({top_with_7d.downs})'
     )
 
     # No elbow gap: every ┬ has a │ below and every ┴ has a │ above.

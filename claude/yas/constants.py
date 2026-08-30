@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Keep in sync with pyproject.toml's [project] version — pyproject isn't
 # shipped with the runtime copy under ~/.claude, so the value lives here too.
-VERSION    = '0.8.1'
+VERSION    = '0.9.0'
 # Bumped by any future on-disk relayout under yas/; stamped into
 # state/version.json by yas.migrate so a future migration can detect and
 # convert an older layout.
@@ -80,6 +80,15 @@ def token_rate_log() -> Path:
 
 def render_log() -> Path:
     return runtime_dir() / 'render.log'
+
+
+def rate_limit_log() -> Path:
+    """Per-session cumulative-token samples backing the [rate_limits] simulator.
+
+    Distinct from token_rate_log(): that log is pruned after 300s (it only
+    feeds the instantaneous t/m rate), while this one is pruned per-call
+    against the caller-supplied retention (up to 7d for a seven_day bucket)."""
+    return runtime_dir() / 'rate-limit.log'
 
 
 def last_prompt_path() -> Path:
