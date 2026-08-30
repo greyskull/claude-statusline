@@ -61,7 +61,7 @@ from yas.render.metrics import (
 from yas.render.pill import Pill
 from yas.render.gradient import model_display
 from yas.renderer import Renderer
-from yas.render.text import _ansi_byte_offset, _visible_width, _token_offsets, fmt_tok_fixed
+from yas.render.text import _ansi_byte_offset, _visible_width, _token_offsets, clip_visible, fmt_tok_fixed
 from yas.tokens import TickRecord
 
 # Characters that can start a dirty-status block in the plain-text path string.
@@ -904,17 +904,13 @@ def build_wide(
     # row further down).
     plugins_line = r.plugins_skills(len(skills.names), skill_display, session.workspace.plugins, show_icons=view.cfg.show_icons)
     # `plugins_line` now shares the tokens/cost row's trailing column rather
-    # than owning a full-width row of its own, so it is pre-clipped to a
-    # fixed, realistic-widest cap (`PLUGINS_TRAILING_MAX_W`) instead of
-    # `width - 3`: clipping to the box's own width would make the measured
-    # trailing content scale with the box, making `tokens_cost`'s own
-    # min-width-with-leader gate unsatisfiable at ANY width for a long list.
-    # `tokens_cost` clips further still, to whatever narrower width the
-    # column actually gets once the tokens/cost segments claim their share.
+    # than owning a full-width row of its own, so it is pre-clipped to
+    # `PLUGINS_TRAILING_MAX_W` (see constants.py for why this is a fixed cap,
+    # not `width - 3`). `tokens_cost` clips further still, to whatever
+    # narrower (or wider) width the column actually gets once the
+    # tokens/cost segments claim their share.
     plugins_avail = min(width - 3, PLUGINS_TRAILING_MAX_W)
-    if _visible_width(plugins_line) > plugins_avail:
-        cut = _ansi_byte_offset(plugins_line, plugins_avail - 1)
-        plugins_line = f'{plugins_line[:cut]}{ELLIPSIS}{RESET}'
+    plugins_line  = clip_visible(plugins_line, plugins_avail)
 
     # Reading `view.tool_counts` here forces its transcript scan on every wide
     # render (previously only when `cfg.show_tool_uses` was on, for the
@@ -1469,9 +1465,9 @@ def build_wide(
         # glyph — that glyph is itself gated on `show_icons`, so with icons
         # off the glyph-sniff silently read `False` even when the segment
         # was present, dropping the 'loc r/w' label and mis-anchoring
-        # 'cost sess/day' onto the wrong (elbow) column. `has_leader_seg`
+        # 'cost sess/day' onto the wrong (elbow) column. `has_trailing_seg`
         # then follows from the arithmetic (vsep_cols length == 1 +
-        # has_lines + has_leader).
+        # has_lines + has_trailing).
         tok_labels: list[tuple[str, int]] = []
         if view.cfg.labels:
             _tp      = _ANSI_RE.sub('', line_tokens[0])
@@ -1503,8 +1499,8 @@ def build_wide(
                 tok_labels.append((_cache_lbl, _cache_anchor))
             if _out_i != -1:
                 tok_labels.append((f'output{_suf}', 3 + _out_i))
-            _has_lines_seg  = has_lines_seg
-            _has_leader_seg = len(vsep_cols) > (1 + (1 if _has_lines_seg else 0))
+            _has_lines_seg    = has_lines_seg
+            _has_trailing_seg = len(vsep_cols) > (1 + (1 if _has_lines_seg else 0))
             # Centre `cost` within its cell instead of left-anchoring at the
             # cell's start. The cell's left edge is the tokens│ (no lines
             # segment) or lines│ (lines segment) vsep; its right edge is the
@@ -1513,7 +1509,7 @@ def build_wide(
             # anchor to centre against, so left-anchor with a fixed offset).
             _cost_left = vsep_cols[1] if _has_lines_seg else vsep_cols[0]
             _cost_lbl  = f'cost{_suf}'
-            if _has_leader_seg:
+            if _has_trailing_seg:
                 _cost_mid = (_cost_left + vsep_cols[-1]) // 2
                 tok_labels.append((_cost_lbl, max(_cost_left + 1, _cost_mid - len(_cost_lbl) // 2)))
                 tok_labels.append(('skills + plugins', vsep_cols[-1] + 2))

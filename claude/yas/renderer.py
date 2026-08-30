@@ -85,6 +85,7 @@ from yas.constants import (
     ICON_TOK_RATE,
     PILL_LEFT,
     PILL_RIGHT,
+    PLUGINS_TRAILING_MIN_W,
     SEVEN_DAY_MINUTES,
     SEVEN_DAY_WARMUP_MINUTES,
     STRIKE,
@@ -117,7 +118,7 @@ from yas.session import ContextWindow, RateBucket, RateLimits
 from yas.info.subagents import RunningSubagent
 from yas.info.workflows import RunningWorkflow
 from yas.info.tasks import TaskList
-from yas.render.text import _ansi_byte_offset, _middle_ellipsis, _visible_width, fmt_tok, fmt_tok_fixed, strike
+from yas.render.text import _middle_ellipsis, _visible_width, clip_visible, fmt_tok, fmt_tok_fixed, strike
 from yas.tokens import TokenRate
 
 if TYPE_CHECKING:
@@ -1705,67 +1706,36 @@ class Renderer:
     def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, trailing_content: str = '', session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False, lines: tuple[int, int] | None = None, show_icons: bool = True) -> tuple[list[str], tuple[int, ...], int, int, bool]:
         """One content line: tokens │ [lines │] cost │ [trailing_content].
 
-        With ``show_day_stats`` (default), session and day figures merge per
-        field as ``session/day`` with a paired cache parenthetical. When off,
-        the row is session-only and keeps the original per-field justification.
+        Invariants:
 
-        When ``justify`` is on (and day stats are shown), horizontal slack is
-        spent as breathing room *inside* the sections — widening the two
-        inter-group gaps in the tokens column and padding the cost edges, each
-        capped at ``JUSTIFY_PAD_CAP`` spaces. ``min_width`` is unchanged: the
-        optional padding only consumes genuine slack, so at the tight floor the
-        gaps collapse to 1 and the row fits exactly as with ``justify`` off.
-        The tokens and cost columns are sized to the *measured* content (floored
-        at a realistic-widest budget), so the two ``│`` dividers always land on
-        the rendered content's divider column — they never detach from the
-        ┬/┴ elbows above/below.
+        - ``show_day_stats`` merges session/day per field as ``session/day``
+          with a paired cache parenthetical; off, the row is session-only.
+        - ``justify`` (with day stats on) spends genuine slack as padding
+          *inside* the tokens/cost sections (capped at ``JUSTIFY_PAD_CAP``),
+          never touching ``min_width`` — at the tight floor the row is
+          byte-identical to ``justify`` off.
+        - The tokens/cost/lines columns are sized to their *measured* content
+          (via ``_visible_width``, never ``len()``), so their ``│`` dividers
+          always land on the rendered divider column.
+        - ``lines`` (a session-total ``(read, changed)`` pair) is included as
+          a third segment only when ``box_width >= max(min_width_with_lines,
+          LINES_SEGMENT_MIN_WIDTH)``; otherwise shed whole.
+        - ``trailing_content`` (e.g. "skills + plugins") is included as a
+          fourth segment once the box clears a small minimum
+          (``PLUGINS_TRAILING_MIN_W``) — blank-padded when empty, clipped
+          with an ellipsis when it doesn't fully fit the free width, shed
+          whole only when even the minimum doesn't fit.
+        - Shed ladder (highest-retained first, once the richest built form
+          overflows ``box_width``): tokens sess/day (never shed) ← loc r/w ←
+          cost ← trailing content. Each rung drops exactly one segment;
+          ``vsep_cols`` shrinks by one column per rung dropped.
 
-        ``show_icons`` (default on) gates every per-number glyph in this row —
-        the in/out token arrows, the cost icon, and the lines read/changed
-        icons. When off, each icon (and its trailing gap) is simply omitted
-        from the builder closures below; every width (``tokens_w``, ``cost_w``,
-        ``lines_w``) is measured from the *built* string via ``_visible_width``,
-        so the column/vsep math downstream adapts automatically — no separate
-        width branch needed.
-
-        ``lines``, when given, is a ``(read, changed)`` session-total pair
-        rendered as a third segment between tokens and cost — but only when
-        the box is wide enough (``box_width >= max(min_width_with_lines,
-        LINES_SEGMENT_MIN_WIDTH)``); otherwise the segment and its ``│``
-        divider are shed entirely and this method returns exactly today's
-        shape. ``TOKENS_COST_MIN_WIDTH`` (the row's own existence gate,
-        checked by the caller) is unaffected by this shed rule — it is
-        computed from the without-segment ``min_width`` only.
-
-        ``trailing_content`` is pre-rendered content (e.g. "skills + plugins")
-        appended as a fourth, content-measured segment after cost — included
-        whenever the box has room for it, *even when empty*: this segment's
-        divider/border must not disappear just because there's nothing to
-        show (blank-padded to the leader column's width in that case). This
-        replaces the old in-row rate/sparkline leader, which is now its own
-        standalone row (see ``tokens_over_time``).
-
-        Shed ladder (highest-retained first): tokens sess/day, then loc r/w,
-        then cost, then the trailing content. The richest form (everything the
-        box has room for, per the existing gates above) is tried first; if IT
-        overflows ``box_width``, the row falls through progressively leaner
-        rungs that each drop exactly one segment in shed order (trailing
-        content first, then cost, then loc) until only tokens sess/day
-        remains — the protected segment that is never shed. ``vsep_cols``
-        shrinks by one column per rung dropped.
-
-        Returns ``([line], vsep_cols, 0, min_width, has_lines)``: ``vsep_cols``
-        has 0-3 entries depending on which rung was used — the divider
-        columns for the builder's elbow threading — the dead mark_col (the
-        old 60s tick marker is gone, =0), ``min_width`` — the smallest box
-        width at which this row fits without overflow, i.e. the floor of the
-        surviving-minimum form (tokens sess/day alone), independent of
-        whether ``lines``/cost/the trailing content end up shown at a given
-        width — and ``has_lines`` — whether the loc r/w segment survived into
-        the returned ``line`` (both the initial width gate AND the shed
-        ladder), so the caller can anchor labels to it without re-deriving
-        the same decision by sniffing the rendered content for a glyph that
-        ``show_icons=False`` would hide.
+        Returns ``([line], vsep_cols, 0, min_width, has_lines)`` — the dead
+        mark_col (=0) is a leftover 5-tuple slot; ``min_width`` is the floor
+        of the never-shed tokens-sess/day-alone form; ``has_lines`` reports
+        whether the loc r/w segment survived into the returned ``line``, for
+        the caller's label anchoring (see the hazard note in ``layout.py``
+        where it's consumed).
         """
         day_clr = self.day_cost_colour(day_cost)
         in_active, out_active = TokenRate.recently_active(session_id)
@@ -1855,9 +1825,9 @@ class Renderer:
             return (f'{read_icon}{self.TOK}{read_s}{self.R}'
                     f'{changed_icon}{self.TOK}{changed_s}{self.R}')
 
-        vsep_w        = 4
-        vsep_leader_w = 4
-        vsep_lines_w  = 4
+        vsep_w          = 4
+        vsep_trailing_w = 4
+        vsep_lines_w    = 4
 
         content_w = box_width - 3
         inner     = content_w - vsep_w  # tokens + cost budget (lines/trailing subtracted below when included)
@@ -1879,9 +1849,10 @@ class Renderer:
         # so `min_width` is derived from THIS, not from the richest form.
         tokens_base_w = tokens_w
 
-        # The trailing column is content-measured only, with no minimum reserve
-        # of its own (unlike the old rate/spark leader) -- it either fits at its
-        # full measured width or is shed entirely (see include_leader below).
+        # The trailing column is content-measured, but only needs to CLEAR
+        # PLUGINS_TRAILING_MIN_W to be included (see include_trailing below) --
+        # once included it fills whatever width is actually free, so it is
+        # shed entirely only when even that minimum doesn't fit.
         trailing_w = _visible_width(trailing_content)
 
         # The smallest box that holds both columns at their measured size plus
@@ -1900,17 +1871,20 @@ class Renderer:
         if include_lines:
             inner -= vsep_lines_w  # the lines segment's own vsep
 
-        # The trailing segment's own gate, mirroring include_lines: only shown
-        # when the box has genuine room for it at its full measured width.
-        min_width_with_leader = min_width + trailing_w + vsep_leader_w
-        # Included whenever the box has room -- unlike `include_lines`, this
-        # is NOT gated on `trailing_content` being non-empty: the "skills +
+        # The trailing segment's own gate: included once the box clears the
+        # SMALLER of the segment's own measured width and PLUGINS_TRAILING_MIN_W
+        # -- gating on the full measured `trailing_w` here would shed the
+        # whole column for any list wider than the free space instead of
+        # truncating it (the in-column ellipsis clip below does the actual
+        # fit-to-width work once this gate says there's room to try). Not
+        # gated on `trailing_content` being non-empty either: the "skills +
         # plugins" section is always shown, blank-padded when there is
         # nothing to display, so its border (divider + ┬/┴ elbows + label)
         # never disappears just because no skills/plugins are loaded.
-        include_leader = box_width >= min_width_with_leader
-        if include_leader:
-            inner -= vsep_leader_w  # the trailing segment's own vsep
+        min_width_with_trailing = min_width + min(trailing_w, PLUGINS_TRAILING_MIN_W) + vsep_trailing_w
+        include_trailing = box_width >= min_width_with_trailing
+        if include_trailing:
+            inner -= vsep_trailing_w  # the trailing segment's own vsep
 
         # Justify breathing room: spend genuine slack as padding *inside* the
         # sections. ``free`` is the room beyond the tight minimum (min-gap
@@ -1920,7 +1894,7 @@ class Renderer:
         # justify-off layout. Slots fill toward their caps via an even
         # round-robin.
         # NOTE: neither the lines segment nor the trailing segment gets a slot
-        # here — both are content-measured only (see w_lines/leader_w below),
+        # here — both are content-measured only (see w_lines/trailing_avail_w below),
         # same as tokens_col/cost_col before padding. This is deliberate, not
         # an oversight: giving them justify breathing room would make their
         # width (and therefore the divider columns) depend on `justify`, which
@@ -1987,33 +1961,35 @@ class Renderer:
         col1 = w_middle + 5                                          # 1-indexed position of the tokens│ vsep
         if include_lines:
             col2 = col1 + vsep_w + w_lines                           # 1-indexed position of the lines│ vsep
-            col_after_lines = col2 + vsep_lines_w + w_end            # 1-indexed position of the vsep_leader │
+            trailing_col = col2 + vsep_lines_w + w_end                # 1-indexed position of the trailing │
         else:
-            col_after_lines = w_middle + vsep_w + w_end + 5          # 1-indexed position of the vsep_leader │ (today's shape)
+            trailing_col = w_middle + vsep_w + w_end + 5              # 1-indexed position of the trailing │ (today's shape)
         vsep = self.vsep_block(col1, box_width, fill=fill, leader=True)
         if include_lines:
             lines_col  = build_lines()
             vsep_lines = self.vsep_block(col2, box_width, fill=fill, leader=True)
 
-        if include_leader:
-            vsep_leader = self.vsep_block(col_after_lines, box_width, fill=fill, leader=True)
-            leader_w    = max(0, inner - w_middle - w_lines - w_end)
-            if trailing_w <= leader_w:
-                leader = trailing_content + ' ' * (leader_w - trailing_w)
-            elif leader_w > 0:
-                cut    = _ansi_byte_offset(trailing_content, max(0, leader_w - 1))
-                leader = f'{trailing_content[:cut]}{ELLIPSIS}{RESET}'
+        if include_trailing:
+            vsep_trailing = self.vsep_block(trailing_col, box_width, fill=fill, leader=True)
+            # The actual free width for this column, independent of `trailing_w`
+            # -- it fills this whether the content is narrower (blank-padded),
+            # wider (clipped with an ellipsis), or empty (blank).
+            trailing_avail_w = max(0, inner - w_middle - w_lines - w_end)
+            if trailing_w <= trailing_avail_w:
+                trailing = trailing_content + ' ' * (trailing_avail_w - trailing_w)
+            elif trailing_avail_w > 0:
+                trailing = clip_visible(trailing_content, trailing_avail_w)
             else:
-                leader = ''
+                trailing = ''
 
         vsep_cols: tuple[int, ...]
-        if include_leader:
+        if include_trailing:
             if include_lines:
-                line = f'{tokens_col}{vsep}{lines_col}{vsep_lines}{cost_col}{vsep_leader}{leader}'
-                vsep_cols = (col1, col2, col_after_lines)
+                line = f'{tokens_col}{vsep}{lines_col}{vsep_lines}{cost_col}{vsep_trailing}{trailing}'
+                vsep_cols = (col1, col2, trailing_col)
             else:
-                line = f'{tokens_col}{vsep}{cost_col}{vsep_leader}{leader}'
-                vsep_cols = (col1, col_after_lines)
+                line = f'{tokens_col}{vsep}{cost_col}{vsep_trailing}{trailing}'
+                vsep_cols = (col1, trailing_col)
         elif include_lines:
             line = f'{tokens_col}{vsep}{lines_col}{vsep_lines}{cost_col}'
             vsep_cols = (col1, col2)
@@ -2021,20 +1997,12 @@ class Renderer:
             line = f'{tokens_col}{vsep}{cost_col}'
             vsep_cols = (col1,)
 
-        # Shed ladder (highest-retained first): tokens sess/day -> loc r/w ->
-        # cost -> trailing content. The richest form built above is tried
-        # first; if it overflows the box, fall through progressively leaner
-        # rungs that each drop exactly one segment, in the order trailing
-        # content -> cost -> loc, until we land on tokens sess/day alone,
-        # which is the protected survivor and is never shed. `min_width`
-        # (below) reflects THIS floor, not the richest form's.
+        # Shed ladder rungs (see the docstring's Invariants for the ordering).
+        # `has_lines_final` is set explicitly per rung actually used, rather
+        # than assumed from `include_lines`, so it always names the segment
+        # in the returned `line` -- see layout.py's tok_labels build for why
+        # the caller can't safely re-derive this by sniffing rendered content.
         content_w = box_width - 3
-        # Tracks whether the lines segment survives into the FINAL rung
-        # actually used below -- the caller needs this to anchor the 'loc r/w'
-        # and 'cost sess/day' labels correctly, and can't reliably re-derive
-        # it by sniffing the rendered content for the read-glyph, since
-        # `show_icons=False` omits that glyph even when the segment is
-        # present (see layout.py's tok_labels build).
         has_lines_final = include_lines
         if _visible_width(line) > content_w:
             if include_lines:
@@ -2044,12 +2012,11 @@ class Renderer:
                 rung_b = f'{tokens_col}{vsep}{cost_col}'
                 rung_b_cols = (col1,)
             if _visible_width(rung_b) <= content_w:
-                line, vsep_cols = rung_b, rung_b_cols
+                line, vsep_cols, has_lines_final = rung_b, rung_b_cols, include_lines
             elif include_lines and _visible_width(f'{tokens_col}{vsep}{lines_col}') <= content_w:
-                line, vsep_cols = f'{tokens_col}{vsep}{lines_col}', (col1,)
+                line, vsep_cols, has_lines_final = f'{tokens_col}{vsep}{lines_col}', (col1,), True
             else:
-                line, vsep_cols = tokens_col, ()
-                has_lines_final = False
+                line, vsep_cols, has_lines_final = tokens_col, (), False
 
         min_width = tokens_base_w + 3
 

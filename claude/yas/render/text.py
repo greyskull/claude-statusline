@@ -11,6 +11,7 @@ from yas.constants import (
     ELLIPSIS,
     GITHUB_TRANSLATE,
     MIDDLE_DOT,
+    RESET,
     STRIKE,
     UNICODE_TRANSLATE,
     UNSTRIKE,
@@ -89,11 +90,9 @@ def _visible_width(s: str) -> int:
 
 
 def _ansi_byte_offset(ansi: str, plain_idx: int) -> int:
-    """Return the byte (str index) in *ansi* that corresponds to plain-text
-    position *plain_idx* (0-indexed visible character count, ANSI escapes
-    excluded). Returns ``len(ansi)`` when *plain_idx* >= visible width."""
-    pos = 0   # current byte position in `ansi`
-    vis = 0   # visible characters counted so far
+    """Str index in ``ansi`` of visible position ``plain_idx``, ANSI escapes skipped whole (clamped to ``len(ansi)``)."""
+    pos = 0
+    vis = 0
     while pos < len(ansi) and vis < plain_idx:
         m = _ANSI_RE.match(ansi, pos)
         if m:
@@ -102,6 +101,18 @@ def _ansi_byte_offset(ansi: str, plain_idx: int) -> int:
         pos += 1
         vis += 1
     return pos
+
+
+def clip_visible(s: str, w: int) -> str:
+    """Clip ``s`` to ``w`` visible columns, appending ``ELLIPSIS`` + ``RESET`` if it overflows.
+
+    ``s`` returned unchanged when it already fits. Cuts on a visible-column
+    boundary via ``_ansi_byte_offset`` so embedded ANSI escapes survive intact.
+    """
+    if _visible_width(s) <= w:
+        return s
+    cut = _ansi_byte_offset(s, max(0, w - 1))
+    return f'{s[:cut]}{ELLIPSIS}{RESET}'
 
 
 def strike(s: str) -> str:

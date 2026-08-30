@@ -162,12 +162,34 @@ def test_tokens_cost_trailing_column_present_and_blank_when_content_empty() -> N
     assert stripped[cols[-1] - 2:].strip() == ''
 
 
-def test_tokens_cost_trailing_content_dropped_when_too_narrow() -> None:
-    # A long trailing string can't fit at a tight box; the segment (and its
-    # divider) is shed and the row falls back to the tokens|cost shape.
-    lines, cols, _mark, _min, _has_lines = _call(box_width=90, trailing_content='x' * 200)
+def test_tokens_cost_trailing_content_dropped_when_genuinely_no_room() -> None:
+    # Only when the box can't even clear PLUGINS_TRAILING_MIN_W is the
+    # segment (and its divider) shed and the row falls back to the
+    # tokens|cost shape -- a merely-too-narrow-for-the-FULL-list box (see
+    # test_tokens_cost_trailing_content_truncated_to_fill_available_width)
+    # truncates instead.
+    lines, cols, _mark, _min, _has_lines = _call(box_width=50, trailing_content='x' * 200)
     assert len(cols) == 1
     assert 'x' * 200 not in strip_ansi(lines[0])
+
+
+def test_tokens_cost_trailing_content_truncated_to_fill_available_width() -> None:
+    # Regression (Spec C1): a trailing list wider than the free column must be
+    # TRUNCATED to fill the actual free width, not shed whole -- gating the
+    # column's inclusion on the full measured content width sheds it entirely
+    # for any list wider than what's free, even though there's plenty of room
+    # for a clipped form.
+    lines, cols, _mark, _min, _has_lines = _call(
+        box_width=140, lines=(1234, 567), trailing_content='x' * 80,
+    )
+    assert len(cols) == 3  # tokens|lines, lines|cost, cost|trailing -- not shed
+    stripped = strip_ansi(lines[0])
+    trailing_region = stripped[cols[-1] - 3:]
+    assert trailing_region.rstrip().endswith('…')
+    # The row fills exactly to the box's content width (2-col lead + 1-col
+    # trailing border), proving the column consumed the real free space
+    # rather than stopping short at its measured (too-wide) content.
+    assert _visible_width(lines[0]) == 140 - 3
 
 
 def test_tokens_cost_trailing_content_padded_to_column_width() -> None:
