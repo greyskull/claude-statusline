@@ -108,11 +108,28 @@ def clip_visible(s: str, w: int) -> str:
 
     ``s`` returned unchanged when it already fits. Cuts on a visible-column
     boundary via ``_ansi_byte_offset`` so embedded ANSI escapes survive intact.
+    ``w <= 0`` returns ``''`` -- there is no room for even the ellipsis itself,
+    so emitting one would make the result 1 column wider than the budget
+    (the caller's divider/border lands one column short).
+
+    When it does clip (``w >= 2``), the LAST column is always reserved as a
+    blank pad, not spent on the ellipsis -- every other cell in this row ends
+    ``' │'`` (a pad column before the divider/border), and a clipped cell
+    that ran its ellipsis flush to that column would end ``'…│'`` instead,
+    one column tighter than its neighbours (and, since ``ELLIPSIS`` is
+    East-Asian-ambiguous width, rendered 2 cols wide by some terminals --
+    doubly reason not to let it sit flush against a border). At ``w == 1``
+    there is no room for both the ellipsis and the pad, so the ellipsis alone
+    is returned.
     """
+    if w <= 0:
+        return ''
     if _visible_width(s) <= w:
         return s
-    cut = _ansi_byte_offset(s, max(0, w - 1))
-    return f'{s[:cut]}{ELLIPSIS}{RESET}'
+    if w == 1:
+        return f'{ELLIPSIS}{RESET}'
+    cut = _ansi_byte_offset(s, w - 2)
+    return f'{s[:cut]}{ELLIPSIS}{RESET} '
 
 
 def strike(s: str) -> str:

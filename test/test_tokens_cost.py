@@ -4,7 +4,7 @@ import pytest
 
 import yas.renderer as renderer
 from yas.constants import GLYPH_LINES_CHANGED, GLYPH_LINES_READ, ICON_COST
-from yas.render.text import _visible_width
+from yas.render.text import _visible_width, clip_visible
 from helper import strip_ansi
 
 Renderer = renderer.Renderer
@@ -190,6 +190,49 @@ def test_tokens_cost_trailing_content_truncated_to_fill_available_width() -> Non
     # trailing border), proving the column consumed the real free space
     # rather than stopping short at its measured (too-wide) content.
     assert _visible_width(lines[0]) == 140 - 3
+
+
+def test_clip_visible_zero_budget_returns_empty() -> None:
+    # clip_visible(s, 0) must not append a lone ellipsis -- that would make
+    # the result 1 column wide when the caller has 0 columns of budget.
+    assert clip_visible('anything', 0) == ''
+    assert clip_visible('anything', -3) == ''
+
+
+def test_tokens_cost_trailing_content_clip_ends_with_pad_space() -> None:
+    # A clipped trailing cell must end like every other cell in the row --
+    # with a blank pad column before the divider/border, i.e. '...\u2026 '
+    # not '...\u2026' flush. Regression: the ellipsis used to be spent on the
+    # LAST column, so the cell (and the row's own right border, once wrapped
+    # by border_line) ended '\u2026\u2502' instead of ' \u2502' like its
+    # neighbours -- doubly risky since ELLIPSIS is East-Asian-ambiguous width
+    # and some terminals render it 2 cols wide.
+    lines, _cols, _mark, _min, _has_lines = _call(
+        box_width=140, lines=(1234, 567), trailing_content='x' * 80,
+    )
+    stripped = strip_ansi(lines[0])
+    assert stripped.endswith('\u2026 '), repr(stripped[-5:])
+    # And the fully-wrapped row (as the box actually renders it) ends the
+    # same way once the outer border is attached.
+    r = Renderer()
+    wrapped = strip_ansi(r.border_line(lines[0], 140))
+    assert wrapped.endswith(' \u2502'), repr(wrapped[-5:])
+
+
+def test_tokens_cost_trailing_content_clip_never_widens_row() -> None:
+    # Regression: clip_visible(s, 0) used to still append an ellipsis (1 visible
+    # column) even though the caller had 0 columns of budget -- the trailing
+    # column would then be 1 column wider than its divider math assumed,
+    # pushing the row's own right border past the box width. Sweep a wide
+    # band of box widths (crossing every shed/clip boundary for this row) and
+    # assert every rendered row is exactly box_width - 3 cols, never wider.
+    for box in range(90, 200):
+        lines, _cols, _mark, _min, _has_lines = _call(
+            box_width=box, lines=(530, 1234),
+            trailing_content='audiovis-analysis,audiovis-backend,audiovis-whereis,'
+                              'audiovis-design,dnb-expert,prototype | ui-ux-pro-max',
+        )
+        assert _visible_width(lines[0]) <= box - 3, (box, strip_ansi(lines[0]))
 
 
 def test_tokens_cost_trailing_content_padded_to_column_width() -> None:
