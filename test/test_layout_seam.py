@@ -894,6 +894,30 @@ def test_short_plugins_row_not_truncated(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ELLIPSIS not in plugins_lines[0]
 
 
+def test_moderate_plugins_row_fills_available_width_not_pre_clipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A skills+plugins list that comfortably fits the trailing column's real
+    budget at a wide box must render in full, not get truncated against a
+    pre-clip cap that is narrower than the column's actual room (the bug: a
+    fixed 60-col pre-clip in `build_wide` cut the list short long before
+    `tokens_cost`'s own leader-width truncation ever got a chance to size it
+    to the real budget, leaving an early `…` and a wall of blank padding)."""
+    from helper import strip_ansi
+    from yas.constants import ELLIPSIS
+    _silence_dynamic(monkeypatch)
+    monkeypatch.setattr(skills_mod.LoadedSkills, 'from_transcript',
+                        classmethod(lambda cls, path: skills_mod.LoadedSkills(
+                            names=['a:audiovis-design', 'a:audiovis-fractal', 'a:audiovis-whereis'])))
+    monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: 'dnb-expe,another-plugin'))
+
+    width = 185
+    spec  = layout.build_wide(_view(), _tick(), width, _r)
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+    plugins_lines = [ln for ln in lines if 'audiovis-design' in ln]
+    assert plugins_lines, 'skills+plugins content should render in the tokens/cost row'
+    assert 'another-plugin' in plugins_lines[0], 'the full list fits the column and must not be cut short'
+    assert ELLIPSIS not in plugins_lines[0], 'a list that fits its real budget must not show a truncation ellipsis'
+
+
 # ---------------------------------------------------------------------------
 # Task 6.4 — cache_section sub-hour and over-hour format
 # ---------------------------------------------------------------------------

@@ -234,7 +234,16 @@ LINES_SEGMENT_MIN_WIDTH = 103
 # measured width scale with the box itself, so the row's own min-width-with-
 # leader gate (tokens + cost + trailing + vseps <= box_width) could never be
 # satisfied for a long plugin/skill list at ANY width.
-PLUGINS_TRAILING_MAX_W = 60
+#
+# 60 was too tight -- it pre-clipped the list well inside the leader column's
+# actual budget on any wide terminal (>= ~140 cols), so `tokens_cost`'s own
+# leader_w-based truncation (which fits the column to the real measured
+# budget) never got a chance to run: the list was already cut short before
+# it got there, leaving a fully-fit-but-blank-padded ellipsis. This cap only
+# needs to bound the self-referential gate above, not the realistic column
+# width itself, so it is set well past any terminal's plausible leader
+# column (hundreds of columns) rather than a token few dozen.
+PLUGINS_TRAILING_MAX_W = 300
 
 # Minimum gap between the narrow tasks-header's left cluster (glyph + done/total)
 # and its right-anchored active-task timer. The timer is flush to the content
