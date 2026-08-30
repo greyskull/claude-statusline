@@ -932,8 +932,11 @@ class ScenarioConfig:
     workflows:     list[dict[str, object]]   = field(default_factory=list)
     openspec:      list[tuple[str, int, int]]= field(default_factory=list)
     tasks:         list[tuple[str, str, str]]= field(default_factory=list)
-    five_hour_pct: float                     = 30.0
-    seven_day_pct: float                     = 20.0
+    # None omits the bucket from `rate_limits` entirely (simulates a Claude
+    # Code setup that doesn't supply that window at all), distinct from 0.0
+    # which is a present-but-idle bucket (must still render `∞`).
+    five_hour_pct: float | None               = 30.0
+    seven_day_pct: float | None               = 20.0
     yas_toml:      str | None                = None
     subagent_mtime_age: float                = 0.0
     cache_anchor_secs_ago: float | None      = None
@@ -1535,6 +1538,22 @@ SCENARIOS: list[ScenarioConfig] = [
         five_hour_pct = 30.0,
         seven_day_pct = 20.0,
     ),
+    ScenarioConfig(
+        # No rate_limits payload at all — Claude Code setups that don't
+        # supply either window; both buckets must be omitted, not zeroed.
+        name          = 'rate-limits-absent',
+        context_pct   = 0.30,
+        five_hour_pct = None,
+        seven_day_pct = None,
+    ),
+    ScenarioConfig(
+        # Present-but-idle 7d bucket (0% used) alongside a normal 5h bucket —
+        # must render `∞`, not be dropped like the absent case above.
+        name          = 'rate-limits-idle-7d',
+        context_pct   = 0.30,
+        five_hour_pct = 30.0,
+        seven_day_pct = 0.0,
+    ),
 ]
 
 
@@ -1639,12 +1658,26 @@ def render_scenario(
     ctx_win['used_percentage']     = round(cfg.context_pct * 100.0, 1)
     resets    = int(time.time()) + 7200
     rate_lims = _ensure_nested(raw, 'rate_limits')
-    five_hour = _ensure_nested(rate_lims, 'five_hour')
-    seven_day = _ensure_nested(rate_lims, 'seven_day')
-    five_hour['resets_at']        = resets
-    seven_day['resets_at']        = resets
-    five_hour['used_percentage']  = cfg.five_hour_pct
-    seven_day['used_percentage']  = cfg.seven_day_pct
+    # A pct of None means "this Claude Code setup didn't supply this window at
+    # all" — drop the key outright rather than defaulting it to a nonzero
+    # value. `rate_lims` is a shared mutable dict pulled off the base fixture
+    # (raw = dict(fixture) is only a shallow copy), so a bucket left over from
+    # an earlier scenario must be explicitly popped, not just left unset.
+    if cfg.five_hour_pct is None:
+        rate_lims.pop('five_hour', None)
+    else:
+        five_hour = _ensure_nested(rate_lims, 'five_hour')
+        # A genuinely idle window (0%) hasn't been touched yet, so the API
+        # wouldn't hand back a resets_at either — omit it so the ∞ path
+        # (idle + no resets_at) is exercised the same way as a real payload.
+        five_hour['resets_at']       = resets if cfg.five_hour_pct else 0
+        five_hour['used_percentage'] = cfg.five_hour_pct
+    if cfg.seven_day_pct is None:
+        rate_lims.pop('seven_day', None)
+    else:
+        seven_day = _ensure_nested(rate_lims, 'seven_day')
+        seven_day['resets_at']       = resets if cfg.seven_day_pct else 0
+        seven_day['used_percentage'] = cfg.seven_day_pct
 
     # Every YAS_* config knob already flows through `env` (a copy of os.environ)
     # to the statusline subprocess, so e.g. `YAS_SOFT_LIMIT=5000000 make demo/img`
