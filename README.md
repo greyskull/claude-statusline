@@ -106,6 +106,7 @@ aliases when both are set — the aliases keep working but are deprecated.
 | `context_thresholds` | `YAS_CONTEXT_THRESHOLDS` | — | `[context].thresholds` | `25,50,70,90` |
 | `show_render_time` | `YAS_SHOW_RENDER_TIME` | — | `[layout].show_render_time` | `false` |
 | `show_tool_uses` | `YAS_SHOW_TOOL_USES` | — | `[layout].show_tool_uses` | `false` |
+| `show_tokens_over_time` | `YAS_SHOW_TOKENS_OVER_TIME` | — | `[layout].show_tokens_over_time` | `false` |
 | `labels` | `YAS_LABELS` | — | `[layout].labels` | `false` |
 | `justify` | `YAS_JUSTIFY` | — | `[layout].justify` | `false` |
 | `show_day_stats` | `YAS_SHOW_DAY_STATS` | — | `[tokens].show_day_stats` | `true` |
@@ -130,6 +131,7 @@ aliases when both are set — the aliases keep working but are deprecated.
 - **`full_width`** — when `true`, makes the box fill the terminal and ignore `max_width`.
 - **`show_render_time`** — when `true`, annotates the bottom-right border with the previous run's wall-clock render time (e.g. `…47.2ms──╯`). Off by default; each run shows the prior run's timing, so it is blank on a session's first render.
 - **`show_tool_uses`** — when `true`, adds a row (wide layout only) under the tokens/cost band, listing per-tool `tool_use` counts.
+- **`show_tokens_over_time`** — when `true`, adds a full-width "tokens over time" row (wide layout only) under the tokens/cost band, showing the `t/m` rate and live sparkline. The trailing column of the tokens/cost row always shows skills + plugins; the sparkline is opt-in via this row.
 - **`labels`** — when `true`, paints small superscript field captions into the border/separator rows (wide layout only). **Note:** this is a different knob from `[context].labels`, which is the five-word state list — see [Context state word](#context-state-word). The two share a key name but live in different sections and take different types.
 - **`justify`** — when `true`, aligns fields into columns instead of packing them left (wide layout only).
 - **`show_day_stats`** — when `true` (the default), shows today's cumulative token and cost totals alongside the session's, as `session/day` pairs. **Note:** this key lives under **`[tokens]`**, not `[layout]`, unlike the other display toggles.

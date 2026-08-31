@@ -30,6 +30,10 @@
 #                           #   a session's first render. env: YAS_SHOW_RENDER_TIME
 # show_tool_uses = false    # bool; wide layout only — show the per-tool tool_use
 #                           #   counts row below the tokens/cost rows. env: YAS_SHOW_TOOL_USES
+# show_tokens_over_time = false  # bool; wide layout only — add a full-width "tokens over
+#                                #   time" row (t/m rate + sparkline) below the tokens/cost
+#                                #   row. The tokens/cost row's trailing column now always
+#                                #   shows skills + plugins. env: YAS_SHOW_TOKENS_OVER_TIME
 
 # [tokens]
 # soft_limit = 150000   # int > 0; tokens; context-fill bar / % threshold. Raise for 1M-context models.

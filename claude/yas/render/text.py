@@ -11,6 +11,7 @@ from yas.constants import (
     ELLIPSIS,
     GITHUB_TRANSLATE,
     MIDDLE_DOT,
+    RESET,
     STRIKE,
     UNICODE_TRANSLATE,
     UNSTRIKE,
@@ -86,6 +87,49 @@ def _is_wide(ch: str) -> bool:
 def _visible_width(s: str) -> int:
     plain = _ANSI_RE.sub('', s)
     return sum(2 if _is_wide(ch) else 1 for ch in plain)
+
+
+def _ansi_byte_offset(ansi: str, plain_idx: int) -> int:
+    """Str index in ``ansi`` of visible position ``plain_idx``, ANSI escapes skipped whole (clamped to ``len(ansi)``)."""
+    pos = 0
+    vis = 0
+    while pos < len(ansi) and vis < plain_idx:
+        m = _ANSI_RE.match(ansi, pos)
+        if m:
+            pos = m.end()
+            continue
+        pos += 1
+        vis += 1
+    return pos
+
+
+def clip_visible(s: str, w: int) -> str:
+    """Clip ``s`` to ``w`` visible columns, appending ``ELLIPSIS`` + ``RESET`` if it overflows.
+
+    ``s`` returned unchanged when it already fits. Cuts on a visible-column
+    boundary via ``_ansi_byte_offset`` so embedded ANSI escapes survive intact.
+    ``w <= 0`` returns ``''`` -- there is no room for even the ellipsis itself,
+    so emitting one would make the result 1 column wider than the budget
+    (the caller's divider/border lands one column short).
+
+    When it does clip (``w >= 2``), the LAST column is always reserved as a
+    blank pad, not spent on the ellipsis -- every other cell in this row ends
+    ``' │'`` (a pad column before the divider/border), and a clipped cell
+    that ran its ellipsis flush to that column would end ``'…│'`` instead,
+    one column tighter than its neighbours (and, since ``ELLIPSIS`` is
+    East-Asian-ambiguous width, rendered 2 cols wide by some terminals --
+    doubly reason not to let it sit flush against a border). At ``w == 1``
+    there is no room for both the ellipsis and the pad, so the ellipsis alone
+    is returned.
+    """
+    if w <= 0:
+        return ''
+    if _visible_width(s) <= w:
+        return s
+    if w == 1:
+        return f'{ELLIPSIS}{RESET}'
+    cut = _ansi_byte_offset(s, w - 2)
+    return f'{s[:cut]}{ELLIPSIS}{RESET} '
 
 
 def strike(s: str) -> str:

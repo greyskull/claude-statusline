@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Keep in sync with pyproject.toml's [project] version — pyproject isn't
 # shipped with the runtime copy under ~/.claude, so the value lives here too.
-VERSION    = '0.9.0'
+VERSION    = '0.9.1'
 # Bumped by any future on-disk relayout under yas/; stamped into
 # state/version.json by yas.migrate so a future migration can detect and
 # convert an older layout.
@@ -124,6 +124,7 @@ DEFAULT_TOKEN_WINDOW = 60.0
 DEFAULT_THEME        = 'claude-dark'
 DEFAULT_SHOW_DAY_STATS = True
 DEFAULT_SHOW_TOOL_USES = False
+DEFAULT_SHOW_TOKENS_OVER_TIME = False
 DEFAULT_JUSTIFY        = False
 DEFAULT_LABELS         = False
 # Context-state word (ported from Dumbometer, MIT). Opt-in: off by default so
@@ -223,6 +224,25 @@ TOPROW_JUSTIFY_OUTER_CAP = 8
 # into the compact context line (losing the cost/rate row entirely, not just
 # the lines).
 LINES_SEGMENT_MIN_WIDTH = 103
+# Upper bound, in visible columns, on the "skills + plugins" content fed into
+# the tokens/cost row's trailing column (`tokens_cost`'s `trailing_content`).
+# That column shares the row with the tokens/lines/cost segments, so it never
+# gets anywhere near a full row's width -- pre-clipping to this fixed,
+# realistic-widest cap (rather than the box's own width-3) keeps
+# `tokens_cost`'s own include/shed gate satisfiable even at very wide boxes:
+# without a fixed cap, clipping to `width - 3` makes the trailing content's
+# measured width scale with the box itself, so the row's own min-width-with-
+# leader gate (tokens + cost + trailing + vseps <= box_width) could never be
+# satisfied for a long plugin/skill list at ANY width.
+PLUGINS_TRAILING_MAX_W = 300
+
+# Minimum trailing-column width `tokens_cost` requires before it will include
+# the "skills + plugins" column at all (few content cols + the ellipsis
+# glyph). The column is included once this minimum fits, then clipped to
+# whatever wider (or narrower) space is actually free -- gating on the full
+# measured `trailing_content` width instead would shed the whole column for
+# any list wider than the free space, rather than truncating it.
+PLUGINS_TRAILING_MIN_W = 8
 
 # Minimum gap between the narrow tasks-header's left cluster (glyph + done/total)
 # and its right-anchored active-task timer. The timer is flush to the content
