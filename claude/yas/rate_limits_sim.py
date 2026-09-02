@@ -5,6 +5,14 @@ where Claude Code doesn't supply real `rate_limits.{five_hour,seven_day}`
 values, a user can define a budget/window/anchor per bucket and this module
 derives a used_percentage + resets_at pair, in the same shape as the real
 payload (yas.session.RateBucket), from the RateLimitLog history.
+
+`anchor = 'rolling'` is an account-wide window anchored at first activity
+(RateLimitLog.window_anchor): the first tick after a quiet period opens the
+window, it runs for `window_seconds`, every concurrent session shares that
+same window (they all read the same account-wide log), and once `now` passes
+its end the next activity opens a fresh one. This is what makes resets_at
+actually count down instead of perpetually reporting "window_seconds from
+now". `anchor = 'fixed'` is unchanged: aligned to a cron schedule.
 """
 
 from __future__ import annotations
@@ -62,11 +70,14 @@ def _clamp_pct(used: int, budget: int) -> float:
 
 
 def _rolling_bucket(rule: 'RateLimitRule', session_id: str, now: float) -> RateBucket:
-    window_start = now - rule.window_seconds
-    used = RateLimitLog.usage_since(session_id, window_start)
+    # Anchored at first account-wide activity, not at `now` -- see
+    # RateLimitLog.window_anchor. Every concurrent session shares the same
+    # log, so they all derive the identical (window_start, resets_at) pair.
+    window_start = RateLimitLog.window_anchor(rule.window_seconds, now)
+    used = RateLimitLog.usage_since(window_start)
     return RateBucket(
         used_percentage = _clamp_pct(used, rule.budget),
-        resets_at        = int(now + rule.window_seconds),
+        resets_at        = int(window_start + rule.window_seconds),
     )
 
 
@@ -77,7 +88,7 @@ def _fixed_bucket(rule: 'RateLimitRule', session_id: str, now: float) -> RateBuc
     window_start_dt = sched.prev_at_or_before(now_dt)
     reset_dt        = sched.next_after(now_dt)
     window_start = max(window_start_dt.timestamp(), now - MAX_LOOKBACK_SECONDS)
-    used = RateLimitLog.usage_since(session_id, window_start)
+    used = RateLimitLog.usage_since(window_start)
     return RateBucket(
         used_percentage = _clamp_pct(used, rule.budget),
         resets_at        = int(reset_dt.timestamp()),

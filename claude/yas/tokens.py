@@ -312,39 +312,96 @@ class RateLimitLog:
             pass
 
     @classmethod
-    def usage_since(cls, session_id: str, window_start: float) -> int:
-        """Tokens accrued by `session_id` since `window_start`.
+    def usage_since(cls, window_start: float) -> int:
+        """Tokens accrued across ALL sessions since `window_start`.
 
-        Computed as the cumulative total at the newest sample minus the
-        cumulative total at the oldest sample whose timestamp is >=
-        window_start (i.e. the first sample already inside the window). A
-        single sample (or none) inside the window yields 0 — there's no
-        earlier baseline to diff against yet.
+        5h/7d rate limits are account-wide, not per-session, so this sums a
+        per-session delta rather than diffing a single session's log. Each
+        line is `ts session_id cumulative_tokens` (a per-session running
+        total), grouped by session_id:
+
+        - `baseline` is that session's last sample with ts < window_start,
+          or 0 if it has none (the session started inside the window, so all
+          of its usage counts).
+        - `latest` is that session's last sample overall, but only counted
+          if the session has at least one sample with ts >= window_start;
+          a session with no in-window samples contributes 0.
+        - contribution is `max(0, latest - baseline)`, clamped so a
+          truncated/reset cumulative counter can't go negative.
+
+        Returns the sum of contributions across sessions.
         """
-        if not session_id:
-            return 0
         log = rate_limit_log()
         if not log.exists():
             return 0
-        samples: list[tuple[float, int]] = []
+        by_session: dict[str, list[tuple[float, int]]] = {}
         try:
             for ln in log.read_text().splitlines():
                 parts = ln.split()
-                if len(parts) != 3 or parts[1] != session_id:
+                if len(parts) != 3:
                     continue
                 try:
-                    samples.append((float(parts[0]), int(parts[2])))
+                    ts, cumulative = float(parts[0]), int(parts[2])
+                except ValueError:
+                    continue
+                by_session.setdefault(parts[1], []).append((ts, cumulative))
+        except OSError:
+            return 0
+        total = 0
+        for samples in by_session.values():
+            samples.sort()
+            before = [s for s in samples if s[0] < window_start]
+            in_window = [s for s in samples if s[0] >= window_start]
+            if not in_window:
+                continue
+            baseline = before[-1][1] if before else 0
+            latest = samples[-1][1]
+            total += max(0, latest - baseline)
+        return total
+
+    @classmethod
+    def window_anchor(cls, window_seconds: float, now: float) -> float:
+        """Anchor of the current account-wide rolling window.
+
+        A rolling window opens at the first activity that is not already
+        inside a live window, runs for the full `window_seconds` regardless
+        of how idle it goes, and is shared by every concurrent session
+        (this drives both `_rolling_bucket`'s usage_since and its resets_at,
+        so they always agree). Walks the account-wide timestamps, sorted
+        ascending, advancing past each window that has already elapsed:
+
+        - No samples at all -> the window starts now.
+        - Otherwise the earliest sample opens the first window; while `now`
+          is at or past that window's end, jump to the next sample at or
+          after the end (the first activity of the next window). If no such
+          sample exists, the window lapsed with nothing after it -> anchor
+          at `now`.
+        """
+        log = rate_limit_log()
+        if not log.exists():
+            return now
+        timestamps: list[float] = []
+        try:
+            for ln in log.read_text().splitlines():
+                parts = ln.split()
+                if len(parts) != 3:
+                    continue
+                try:
+                    timestamps.append(float(parts[0]))
                 except ValueError:
                     continue
         except OSError:
-            return 0
-        if not samples:
-            return 0
-        samples.sort()
-        in_window = [s for s in samples if s[0] >= window_start]
-        if len(in_window) < 2:
-            return 0
-        return max(0, in_window[-1][1] - in_window[0][1])
+            return now
+        if not timestamps:
+            return now
+        timestamps.sort()
+        window_start = timestamps[0]
+        while now >= window_start + window_seconds:
+            next_start = next((ts for ts in timestamps if ts >= window_start + window_seconds), None)
+            if next_start is None:
+                return now
+            window_start = next_start
+        return window_start
 
 
 # ---------------------------------------------------------------------------

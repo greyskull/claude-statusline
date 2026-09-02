@@ -124,6 +124,9 @@
 #
 # budget: int > 0; token budget for the window.
 # window: duration string like "5h" or "7d".
-# anchor: "rolling" (now-window .. now) or "fixed" (aligned to a cron `epoch`).
+# anchor: "rolling" (account-wide window anchored at first activity after a
+#         quiet period, shared by every concurrent session -- resets_at counts
+#         down for `window` and then the next tick's activity opens a fresh
+#         window) or "fixed" (aligned to a cron `epoch`).
 # epoch:  standard 5-field cron expression; required when anchor = "fixed",
 #         forbidden when anchor = "rolling".
