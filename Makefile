@@ -80,8 +80,10 @@ mon/run:
 # usage:
 # VERSION=0.X.Y make version/bump
 version/bump:
-	# update plugin.json
-	sed -i 's/$(shell uv version --short)/$(VERSION)/g' .claude-plugin/plugin.json
+	# update plugin.json -- anchored on the "version" key rather than the old
+	# value, so a plugin.json that has already drifted still gets corrected
+	# (a by-value substitution silently no-ops once it stops matching).
+	sed -i -E 's/^([[:space:]]*)"version"[[:space:]]*:.*/\1"version": "$(VERSION)"/' .claude-plugin/plugin.json
 	# update the runtime copy (claude/yas/constants.py isn't pip/uv-installed --
 	# ops/install.sh runs the loose files directly, so this can't read the
 	# version via importlib.metadata and has to carry its own literal).
