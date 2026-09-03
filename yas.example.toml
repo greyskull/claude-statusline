@@ -119,11 +119,64 @@
 # stdin payload as before (or `∞`/omitted if that's absent too). No default —
 # both are unset unless you add them.
 #
+# The signal driving this is each session's LIFETIME transcript totals
+# (input, cache_creation, cache_read, output tokens, summed across every
+# assistant message) -- monotonic for the life of a session, unlike the raw
+# payload's context_window fields, which only describe the single most
+# recent request and can DROP on /compact or /clear. When summing a
+# session's usage within a window, the four components are weighted before
+# being added together -- see [rate_limits.weights] below for the weights
+# and where they come from.
+#
 # five_hour = { budget = 44_000_000, window = "5h", anchor = "rolling" }
 # seven_day = { budget = 440_000_000, window = "7d", anchor = "fixed", epoch = "0 0 * * 0" }
 #
 # budget: int > 0; token budget for the window.
 # window: duration string like "5h" or "7d".
-# anchor: "rolling" (now-window .. now) or "fixed" (aligned to a cron `epoch`).
+# anchor: "rolling" (account-wide window anchored at first activity not
+#         already inside a live window, shared by every concurrent session --
+#         it runs its FULL `window` length regardless of idle time, and
+#         resets_at counts down until it actually elapses, at which point the
+#         next tick's activity opens a fresh window) or "fixed" (aligned to a
+#         cron `epoch`).
 # epoch:  standard 5-field cron expression; required when anchor = "fixed",
 #         forbidden when anchor = "rolling".
+
+# [rate_limits.weights]
+# Per-component weights applied when summing a [rate_limits] bucket's
+# usage (input/cache_creation/cache_read/output tokens). Independent of
+# the five_hour/seven_day rules above -- this table alone, with no bucket
+# rule defined, is valid but inert. Every key is optional; an omitted key
+# keeps its built-in default shown below, so a config with no
+# [rate_limits.weights] table at all behaves byte-identically to today.
+#
+# Defaults are derived from the public API's per-token PRICING ratios
+# (https://platform.claude.com/docs/en/about-claude/pricing#model-pricing):
+# a 5-minute cache write is 1.25x base input, a cache read is 0.1x, and
+# output is uniformly 5x base input across every current model (Opus 5
+# $5/$25, Sonnet 5 $2/$10, Haiku 4.5 $1/$5, Fable 5 $10/$50, Opus 4.1
+# $15/$75) -- hence output = 5.0 below, not 1.0. This is a proxy, NOT a
+# documented fact: Anthropic does not publish how a Max subscription's
+# 5h/7d rate-limit windows actually weight cache or output tokens, and a
+# quota that counted raw tokens (rather than $ cost) would weight output
+# at 1.0 -- that mismatch is exactly why this table is configurable.
+#
+# Two caveats from that same pricing page:
+#   - cache_creation = 1.25 is the 5-MINUTE cache write price; a 1-HOUR
+#     cache write is priced at 2x base input instead. YAS detects 1h
+#     caching in the transcript (`ephemeral_1h_input_tokens`, see
+#     `_cache_1h` in claude/yas/info/transcript.py) but doesn't split the
+#     cache-creation token count by TTL, so a single weight can't tell the
+#     two apart -- if you rely on 1h caching, consider raising this toward
+#     2.0.
+#   - cache_read = 0.1 holds for every model EXCEPT Claude Fable 5.1 and
+#     Claude Mythos 5.1, where cache reads are priced at 0.025x instead.
+#
+# cache_read is the one that matters most in practice: a full cached-prefix
+# re-read happens on effectively every turn, so at 1.0 it would dominate a
+# bucket's usage almost entirely.
+#
+# input          = 1.0
+# cache_creation = 1.25
+# cache_read     = 0.1
+# output         = 5.0

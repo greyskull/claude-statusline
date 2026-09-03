@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from yas.constants import CACHE_TTL_1H_SECONDS, CACHE_TTL_SECONDS
+
+if TYPE_CHECKING:
+    from yas.info.parsecache import TranscriptCache
 
 
 class TranscriptUsage:
@@ -40,6 +45,27 @@ class TranscriptUsage:
                 other.output_tokens, other.cache_anchor_epoch, other.cache_ttl)
 
     __hash__ = None  # type: ignore[assignment]
+
+    def __add__(self, other: 'TranscriptUsage') -> TranscriptUsage:
+        """Sum the four token counters; keep the LATEST cache anchor.
+
+        `cache_anchor_epoch` is a "when was the prompt cache last touched"
+        signal, not an accumulator -- the most recent write across main +
+        subagent transcripts is the one that determines the live TTL
+        countdown, so we take whichever side has the larger epoch (its
+        paired `cache_ttl` travels with it), not a sum.
+        """
+        if not isinstance(other, TranscriptUsage):
+            return NotImplemented
+        newer = self if self.cache_anchor_epoch >= other.cache_anchor_epoch else other
+        return TranscriptUsage(
+            input_tokens                = self.input_tokens + other.input_tokens,
+            cache_creation_input_tokens = self.cache_creation_input_tokens + other.cache_creation_input_tokens,
+            cache_read_input_tokens     = self.cache_read_input_tokens + other.cache_read_input_tokens,
+            output_tokens               = self.output_tokens + other.output_tokens,
+            cache_anchor_epoch          = newer.cache_anchor_epoch,
+            cache_ttl                   = newer.cache_ttl,
+        )
 
     def __repr__(self) -> str:
         return (f'TranscriptUsage(input_tokens={self.input_tokens}, '
@@ -117,6 +143,72 @@ class TranscriptUsage:
             cache_anchor_epoch          = cache_anchor_epoch,
             cache_ttl                   = cache_ttl,
         )
+
+    @classmethod
+    def from_session(
+        cls,
+        transcript_path: str,
+        *,
+        cache: 'TranscriptCache | None' = None,
+        main_usage: 'TranscriptUsage | None' = None,
+    ) -> TranscriptUsage:
+        """Main transcript usage PLUS every subagent transcript for this session.
+
+        Subagent usage is persisted in a sibling directory next to the main
+        transcript (`<session>.jsonl` -> `<session>/subagents/agent-*.jsonl`),
+        not in the main transcript itself -- a coordinator-heavy session can
+        burn several times more tokens in subagents than on the main thread,
+        so `from_transcript` alone drastically undercounts true burn. Mirrors
+        the discovery rule `RunningSubagents.from_session` already uses
+        (yas.info.subagents) rather than re-deriving it.
+
+        Applies NO sidechain filter to the subagent files -- every record in
+        them is `isSidechain: true`, so filtering would zero their entire
+        contribution (see the warning in yas.info.toolcounts). `message.id`
+        values are disjoint across files, so summing each file's own
+        last-write-wins result is safe without cross-file dedup.
+
+        `main_usage`, when supplied, is used instead of re-parsing
+        `transcript_path` -- callers (e.g. `SessionView.rate_limit_usage`)
+        that already hold a cached `transcript_usage` for the same file pass
+        it through so a render doesn't parse the (often large) main
+        transcript twice.
+
+        Returns main-only when `transcript_path` is empty or the
+        `subagents/` sibling directory doesn't exist -- never crashes, never
+        assumes the on-disk layout.
+        """
+        total = main_usage if main_usage is not None else cls.from_transcript(transcript_path)
+        if not transcript_path:
+            return total
+        subdir = Path(transcript_path).with_suffix('') / 'subagents'
+        if not subdir.is_dir():
+            return total
+        for jsonl in sorted(subdir.glob('agent-*.jsonl')):
+            total += cls._from_transcript_cached(str(jsonl), cache)
+        return total
+
+    @classmethod
+    def _from_transcript_cached(cls, path: str, cache: 'TranscriptCache | None') -> TranscriptUsage:
+        """`from_transcript`, routed through `cache` when supplied.
+
+        A render can touch several subagent files (~1.4 MB combined on a
+        coordinator-heavy session); without caching that's a full re-parse
+        every tick. Keyed by path + (mtime, size), same staleness contract
+        as the other TranscriptCache consumers (e.g. `toolcounts.py`).
+        """
+        if cache is None:
+            return cls.from_transcript(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return cls.from_transcript(path)
+        cached = cache.get_usage(path, st)
+        if cached is not None:
+            return cached
+        usage = cls.from_transcript(path)
+        cache.put_usage(path, st, usage)
+        return usage
 
     @property
     def billed_in(self) -> int:
