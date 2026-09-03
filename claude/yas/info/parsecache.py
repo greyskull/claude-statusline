@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from yas.info.subagents import _Notification
+    from yas.info.transcript import TranscriptUsage
 
 from yas.constants import (
     TRANSCRIPT_CACHE_VERSION,
@@ -309,6 +310,53 @@ class TranscriptCache:
             keys = sorted(counts_map.keys())
             for old_key in keys[:-TRANSCRIPT_CACHE_SUBKEY_MAX]:
                 del counts_map[old_key]
+
+    def get_usage(self, path: str, st: os.stat_result) -> 'TranscriptUsage | None':
+        """Return a cached TranscriptUsage for `path`, or None on miss/stale.
+
+        Whole-file result, validated by exact (mtime, size) match like
+        get_parse/get_counts. Used by `TranscriptUsage.from_session` to avoid
+        re-parsing each subagent transcript on every render tick.
+        """
+        entry = self._entry(path, st)
+        if entry is None:
+            return None
+
+        stored = entry.get('usage')
+        if not isinstance(stored, list) or len(stored) != 6:
+            return None
+
+        from yas.info.transcript import TranscriptUsage
+        try:
+            return TranscriptUsage(
+                input_tokens                = int(stored[0]),
+                cache_creation_input_tokens = int(stored[1]),
+                cache_read_input_tokens     = int(stored[2]),
+                output_tokens               = int(stored[3]),
+                cache_anchor_epoch          = float(stored[4]),
+                cache_ttl                   = int(stored[5]),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def put_usage(self, path: str, st: os.stat_result, usage: 'TranscriptUsage') -> None:
+        """Cache a TranscriptUsage for `path`, stamped with (mtime, size)."""
+        if path not in self._entries:
+            self._entries[path] = {}
+
+        entry = self._entries[path]
+        entry['mtime'] = st.st_mtime
+        entry['size']  = st.st_size
+        entry['seen']  = time.time()
+        entry['usage'] = [
+            usage.input_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.output_tokens,
+            usage.cache_anchor_epoch,
+            usage.cache_ttl,
+        ]
+        self._dirty = True
 
     def _notif_to_json(self, n: '_Notification') -> list[object]:
         """Convert a _Notification to a JSON-serializable list.

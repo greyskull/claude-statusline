@@ -34,13 +34,21 @@ def _apply_rate_limit_sim(info: dict[str, object], cfg: Config, usage: Transcrip
 
     `usage` is the session's lifetime transcript totals (input,
     cache_creation, cache_read, output), summed once by `TranscriptUsage.
-    from_transcript` and threaded in by the caller -- NOT re-derived from
+    from_session` (main thread + every subagent transcript -- see that
+    method's docstring) and threaded in by the caller -- NOT re-derived from
     the raw payload's context_window totals, which are only the most recent
     request's composition (a context-size gauge, not a lifetime sum; see
     RateLimitLog's docstring for why that distinction matters). The caller
     is responsible for parsing the transcript exactly once per render and
     handing the result here as well as into SessionView, rather than this
     function parsing it again.
+
+    NOTE: switching this call site from `from_transcript` (main-only) to
+    `from_session` (main + subagents) raises every session's reported
+    cumulative usage several-fold on coordinator-heavy sessions (measured
+    3-4x billed-input on one real session) -- any `budget`/threshold already
+    tuned against the old main-only numbers in `[rate_limits]` config needs
+    recalibrating after this change.
     """
     from yas.rate_limits_sim import simulate_rate_limits
     session_id = _as_str(info.get('session_id')) or 'unknown'
@@ -161,7 +169,7 @@ def main(t0: float | None = None) -> None:
         session     = SessionInfo.from_dict(info)
         parse_cache = TranscriptCache.load(session.session_id) if cfg.transcript_cache else None
         view        = SessionView(session, cfg, cache=parse_cache)
-        session.rate_limits = _apply_rate_limit_sim(info, cfg, view.transcript_usage)
+        session.rate_limits = _apply_rate_limit_sim(info, cfg, view.rate_limit_usage)
 
     # Write payload so the multi-session observer can index it. Keyed by
     # session_id and overwritten in place under yas/state/sessions/, so the

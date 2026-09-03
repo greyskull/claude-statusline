@@ -120,6 +120,23 @@ class SessionView:
         return TranscriptUsage.from_transcript(self.session.transcript_path)
 
     @cached_property
+    def rate_limit_usage(self) -> TranscriptUsage:
+        """Main + every subagent transcript's usage, for the rate-limit simulator only.
+
+        Deliberately separate from `transcript_usage`: the cost row and other
+        token displays stay main-thread-only (today's semantics), while the
+        Bedrock-style 5h/7d bucket simulator needs the true session-wide burn
+        -- a coordinator-heavy session can spend several times more tokens in
+        subagents than on the main thread. See yas.info.transcript.
+        TranscriptUsage.from_session.
+        """
+        return TranscriptUsage.from_session(
+            self.session.transcript_path,
+            cache=self.parse_cache,
+            main_usage=self.transcript_usage,
+        )
+
+    @cached_property
     def changes(self) -> list[tuple[str, int, int]]:
         return OpenSpec.from_cwd(self.session.cwd, max_depth=self.cfg.openspec_scan_depth).changes
 
