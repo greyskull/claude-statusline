@@ -161,6 +161,38 @@ def test_two_sessions_share_the_same_anchored_window() -> None:
     assert out_a.used_percentage == out_b.used_percentage
 
 
+def test_idle_ticks_after_a_lapsed_window_do_not_open_a_new_window() -> None:
+    """Regression guard for the bug dedupe fixes: before dedupe, every tick
+    (including idle heartbeats that repeat the same cumulative value) was
+    appended to the log, so an idle session's heartbeat could anchor a brand
+    new window having spent zero tokens. With dedupe, unchanged ticks never
+    reach the log, so a lapsed window with only idle activity since must
+    still fall back to `now` (RateLimitLog.window_anchor's "lapsed with
+    nothing after it" case) rather than anchoring on an idle heartbeat."""
+    session_id = 'sess-idle'
+    window = 5 * 3600
+    rule = RateLimitRule(budget=1000, window_seconds=window, anchor='rolling', epoch=None)
+    real = RateLimits()
+
+    # Opens a window at t=0 with real usage.
+    simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=100, now=0.0)
+    # The window has fully lapsed by t=window+100. Every tick since is an
+    # idle heartbeat repeating the same cumulative value -- these must not
+    # land on disk, and must not anchor a fresh window.
+    now = window + 100.0
+    for t in (window + 20.0, window + 60.0, now):
+        out = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=100, now=t)
+
+    # A window opened by a zero-spend idle heartbeat would anchor at one of
+    # those idle timestamps; instead it must fall back to `now` (no activity
+    # since the lapsed window) and report zero usage. `now` is quantized to
+    # the minute before it reaches the anchor logic (see rate_limits_sim's
+    # _BUCKET_SECONDS), so compare against that same quantized value.
+    quantized_now = int(now // 60) * 60
+    assert out.five_hour.resets_at == quantized_now + window
+    assert out.five_hour.used_percentage == 0.0
+
+
 def test_regression_guard_update_interval_is_60s_not_300s(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guards against the minute cache regressing to the shared 300s
     CACHE_TTL_SECONDS: advancing the clock by 61s (> 60, < 300) must still

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import time
+from bisect import bisect_left
 from typing import Any, TYPE_CHECKING
 
 from yas.constants import tokens_log, token_rate_log, rate_limit_log, render_log
@@ -283,36 +284,98 @@ class RateLimitLog:
     """
 
     @classmethod
-    def record(cls, session_id: str, cumulative_tokens: int, keep_seconds: float) -> None:
+    def record(
+        cls,
+        session_id:        str,
+        cumulative_tokens: int,
+        keep_seconds:      float,
+        now:               float | None = None,
+    ) -> dict[str, list[tuple[float, int]]]:
+        """Append this tick's sample -- but only when it actually changes
+        this session's cumulative total. Measured on a real log, ~96% of
+        ticks are idle heartbeats repeating the previous value; appending
+        those forced a full read-parse-rewrite of a 300KB+ file every
+        render for nothing. A session's very first sample is always
+        written (including `cumulative_tokens == 0`), since there's no
+        previous value to compare against.
+
+        Returns the parsed `by_session` structure (see `_parse`), with
+        this tick's sample folded in when one was written, so
+        `simulate_rate_limits` can thread it straight into
+        `_rolling_bucket`/`_fixed_bucket` instead of those re-parsing the
+        file that was just read here -- the log is parsed once per render,
+        not once per record() call plus once per bucket.
+        """
         if not session_id:
-            return
-        log = rate_limit_log()
-        now = time.time()
-        rows: list[str] = []
-        if log.exists():
-            try:
-                for ln in log.read_text().splitlines():
-                    parts = ln.split()
-                    if len(parts) != 3:
-                        continue
-                    try:
-                        ts = float(parts[0])
-                    except ValueError:
-                        continue
-                    if now - ts > keep_seconds:
-                        continue
-                    rows.append(ln)
-            except OSError:
-                pass
-        rows.append(f'{now:.3f} {session_id} {cumulative_tokens}')
+            return cls._parse()
+        t = now if now is not None else time.time()
+        by_session = cls._parse()
+        samples = by_session.get(session_id)
+        if samples and samples[-1][1] == cumulative_tokens:
+            return by_session  # unchanged since the last sample -- skip the write
+        by_session.setdefault(session_id, []).append((t, cumulative_tokens))
+        # Pruning only runs on a tick that actually writes -- the common
+        # (unchanged) tick above returns before this, so most renders never
+        # pay for a full prune-rewrite; only the ~4% of ticks with a real
+        # change do.
+        for sid in list(by_session):
+            pruned = [(ts, v) for ts, v in by_session[sid] if t - ts <= keep_seconds]
+            if pruned:
+                by_session[sid] = pruned
+            else:
+                del by_session[sid]
         try:
+            log = rate_limit_log()
             log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text('\n'.join(rows) + '\n')
+            lines = [
+                f'{ts:.3f} {sid} {v}'
+                for sid, samples in by_session.items()
+                for ts, v in samples
+            ]
+            log.write_text('\n'.join(lines) + '\n')
         except OSError:
             pass
+        return by_session
 
     @classmethod
-    def usage_since(cls, window_start: float) -> int:
+    def _parse(cls) -> dict[str, list[tuple[float, int]]]:
+        """Read and parse the log exactly once: session_id -> sorted
+        [(ts, cumulative_tokens), ...]. Tolerates malformed lines (skipped)
+        and a missing/unreadable log (empty dict), matching the tolerance
+        `usage_since`/`window_anchor` used to apply per-call.
+
+        Both `usage_since` and `window_anchor` derive from this same parsed
+        structure, and `record()` reuses it too -- so a whole render parses
+        the log at most once (record's dedupe check) and reuses that
+        `by_session` for both `_rolling_bucket`/`_fixed_bucket`, instead of
+        parsing once per record() call plus once per bucket.
+        """
+        log = rate_limit_log()
+        if not log.exists():
+            return {}
+        by_session: dict[str, list[tuple[float, int]]] = {}
+        try:
+            for ln in log.read_text().splitlines():
+                parts = ln.split()
+                if len(parts) != 3:
+                    continue
+                try:
+                    ts, cumulative = float(parts[0]), int(parts[2])
+                except ValueError:
+                    continue
+                by_session.setdefault(parts[1], []).append((ts, cumulative))
+        except OSError:
+            return {}
+        for samples in by_session.values():
+            samples.sort()
+        return by_session
+
+    @classmethod
+    def usage_since(
+        cls,
+        window_start: float,
+        by_session:   dict[str, list[tuple[float, int]]] | None = None,
+    ) -> int:
         """Tokens accrued across ALL sessions since `window_start`.
 
         5h/7d rate limits are account-wide, not per-session, so this sums a
@@ -329,38 +392,32 @@ class RateLimitLog:
         - contribution is `max(0, latest - baseline)`, clamped so a
           truncated/reset cumulative counter can't go negative.
 
-        Returns the sum of contributions across sessions.
+        Returns the sum of contributions across sessions. `by_session` lets
+        a caller that already parsed the log (e.g. `simulate_rate_limits`,
+        via `RateLimitLog.record`) reuse that parse instead of re-reading
+        the file; omit it to parse fresh.
         """
-        log = rate_limit_log()
-        if not log.exists():
-            return 0
-        by_session: dict[str, list[tuple[float, int]]] = {}
-        try:
-            for ln in log.read_text().splitlines():
-                parts = ln.split()
-                if len(parts) != 3:
-                    continue
-                try:
-                    ts, cumulative = float(parts[0]), int(parts[2])
-                except ValueError:
-                    continue
-                by_session.setdefault(parts[1], []).append((ts, cumulative))
-        except OSError:
-            return 0
+        if by_session is None:
+            by_session = cls._parse()
         total = 0
         for samples in by_session.values():
-            samples.sort()
-            before = [s for s in samples if s[0] < window_start]
-            in_window = [s for s in samples if s[0] >= window_start]
-            if not in_window:
-                continue
-            baseline = before[-1][1] if before else 0
+            # samples is sorted by ts (see _parse); bisect straight to the
+            # boundary instead of building two filtered copies per session.
+            cut = bisect_left(samples, (window_start, -1))
+            if cut >= len(samples):
+                continue  # nothing at/after window_start -> contributes 0
+            baseline = samples[cut - 1][1] if cut > 0 else 0
             latest = samples[-1][1]
             total += max(0, latest - baseline)
         return total
 
     @classmethod
-    def window_anchor(cls, window_seconds: float, now: float) -> float:
+    def window_anchor(
+        cls,
+        window_seconds: float,
+        now:             float,
+        by_session:      dict[str, list[tuple[float, int]]] | None = None,
+    ) -> float:
         """Anchor of the current account-wide rolling window.
 
         A rolling window opens at the first activity that is not already
@@ -376,31 +433,24 @@ class RateLimitLog:
           after the end (the first activity of the next window). If no such
           sample exists, the window lapsed with nothing after it -> anchor
           at `now`.
+
+        `by_session` lets a caller that already parsed the log (e.g.
+        `simulate_rate_limits`, via `RateLimitLog.record`) reuse that parse
+        instead of re-reading the file; omit it to parse fresh.
         """
-        log = rate_limit_log()
-        if not log.exists():
-            return now
-        timestamps: list[float] = []
-        try:
-            for ln in log.read_text().splitlines():
-                parts = ln.split()
-                if len(parts) != 3:
-                    continue
-                try:
-                    timestamps.append(float(parts[0]))
-                except ValueError:
-                    continue
-        except OSError:
-            return now
+        if by_session is None:
+            by_session = cls._parse()
+        timestamps = sorted(ts for samples in by_session.values() for ts, _ in samples)
         if not timestamps:
             return now
-        timestamps.sort()
         window_start = timestamps[0]
+        i = 0  # single ordered walk over timestamps -- advance past, never rescan
         while now >= window_start + window_seconds:
-            next_start = next((ts for ts in timestamps if ts >= window_start + window_seconds), None)
-            if next_start is None:
+            while i < len(timestamps) and timestamps[i] < window_start + window_seconds:
+                i += 1
+            if i >= len(timestamps):
                 return now
-            window_start = next_start
+            window_start = timestamps[i]
         return window_start
 
 

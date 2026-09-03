@@ -7,12 +7,13 @@ derives a used_percentage + resets_at pair, in the same shape as the real
 payload (yas.session.RateBucket), from the RateLimitLog history.
 
 `anchor = 'rolling'` is an account-wide window anchored at first activity
-(RateLimitLog.window_anchor): the first tick after a quiet period opens the
-window, it runs for `window_seconds`, every concurrent session shares that
-same window (they all read the same account-wide log), and once `now` passes
-its end the next activity opens a fresh one. This is what makes resets_at
-actually count down instead of perpetually reporting "window_seconds from
-now". `anchor = 'fixed'` is unchanged: aligned to a cron schedule.
+(RateLimitLog.window_anchor): the window opens at the first activity not
+already inside a live window, runs for its FULL `window_seconds` regardless
+of how idle it goes, every concurrent session shares that same window (they
+all read the same account-wide log), and only advances once `now` actually
+passes its end. This is what makes resets_at actually count down instead of
+perpetually reporting "window_seconds from now". `anchor = 'fixed'` is
+unchanged: aligned to a cron schedule.
 """
 
 from __future__ import annotations
@@ -69,33 +70,51 @@ def _clamp_pct(used: int, budget: int) -> float:
     return round(max(0.0, min(100.0, pct)), 2)
 
 
-def _rolling_bucket(rule: 'RateLimitRule', session_id: str, now: float) -> RateBucket:
+def _rolling_bucket(
+    rule:        'RateLimitRule',
+    session_id:  str,
+    now:         float,
+    by_session:  dict[str, list[tuple[float, int]]] | None = None,
+) -> RateBucket:
     # Anchored at first account-wide activity, not at `now` -- see
     # RateLimitLog.window_anchor. Every concurrent session shares the same
     # log, so they all derive the identical (window_start, resets_at) pair.
-    window_start = RateLimitLog.window_anchor(rule.window_seconds, now)
-    used = RateLimitLog.usage_since(window_start)
+    # `by_session` lets a caller that already parsed the log (record(), via
+    # simulate_rate_limits) reuse that parse instead of re-reading the file.
+    window_start = RateLimitLog.window_anchor(rule.window_seconds, now, by_session)
+    used         = RateLimitLog.usage_since(window_start, by_session)
     return RateBucket(
         used_percentage = _clamp_pct(used, rule.budget),
         resets_at        = int(window_start + rule.window_seconds),
     )
 
 
-def _fixed_bucket(rule: 'RateLimitRule', session_id: str, now: float) -> RateBucket:
+def _fixed_bucket(
+    rule:        'RateLimitRule',
+    session_id:  str,
+    now:         float,
+    by_session:  dict[str, list[tuple[float, int]]] | None = None,
+) -> RateBucket:
     assert rule.epoch is not None  # enforced at config-load time
     sched   = CronSchedule.parse(rule.epoch)
     now_dt  = datetime.fromtimestamp(now)
     window_start_dt = sched.prev_at_or_before(now_dt)
     reset_dt        = sched.next_after(now_dt)
     window_start = max(window_start_dt.timestamp(), now - MAX_LOOKBACK_SECONDS)
-    used = RateLimitLog.usage_since(window_start)
+    used = RateLimitLog.usage_since(window_start, by_session)
     return RateBucket(
         used_percentage = _clamp_pct(used, rule.budget),
         resets_at        = int(reset_dt.timestamp()),
     )
 
 
-def _synth_bucket(rule: 'RateLimitRule', session_id: str, bucket_name: str, now: float) -> RateBucket:
+def _synth_bucket(
+    rule:        'RateLimitRule',
+    session_id:  str,
+    bucket_name: str,
+    now:         float,
+    by_session:  dict[str, list[tuple[float, int]]] | None = None,
+) -> RateBucket:
     minute = int(now // _BUCKET_SECONDS)
     key     = (session_id, bucket_name)
     cached  = _bucket_cache.get(key)
@@ -104,9 +123,9 @@ def _synth_bucket(rule: 'RateLimitRule', session_id: str, bucket_name: str, now:
 
     minute_start = minute * _BUCKET_SECONDS  # quantized `now`: stable resets_at + window basis all render this minute
     if rule.anchor == 'fixed':
-        bucket = _fixed_bucket(rule, session_id, minute_start)
+        bucket = _fixed_bucket(rule, session_id, minute_start, by_session)
     else:
-        bucket = _rolling_bucket(rule, session_id, minute_start)
+        bucket = _rolling_bucket(rule, session_id, minute_start, by_session)
     _bucket_cache[key] = (minute, bucket)
     return bucket
 
@@ -123,17 +142,24 @@ def simulate_rate_limits(
     A bucket absent from `rules` passes its real value through untouched
     (today's behaviour: 5h renders unlimited, 7d is omitted, when Claude Code
     supplies nothing). `cumulative_tokens` is this tick's running session
-    total (billed_in + cache_read + out) and is appended to RateLimitLog
-    before any bucket is computed, so this tick's usage is itself counted
-    towards the trailing window.
+    total (billed_in + cache_read + out) and is recorded to RateLimitLog
+    before any bucket is computed -- but only when it actually differs from
+    this session's last recorded value (RateLimitLog.record dedupes idle
+    heartbeats), so a fresh tick's real usage is still counted towards the
+    trailing window even though most ticks write nothing.
+
+    `record()` parses the log to do that dedupe check, and returns the
+    parsed (and, when it wrote, updated) `by_session` structure; that same
+    structure is threaded into `_synth_bucket` so the log is parsed once per
+    render rather than once for the record and again per bucket.
     """
     if not rules:
         return real_rate_limits
     t = now if now is not None else time.time()
     keep_seconds = max(rule.window_seconds for rule in rules.values()) * 2
     keep_seconds = min(keep_seconds, MAX_LOOKBACK_SECONDS) + 3600  # small safety margin
-    RateLimitLog.record(session_id, cumulative_tokens, keep_seconds=keep_seconds)
+    by_session = RateLimitLog.record(session_id, cumulative_tokens, keep_seconds=keep_seconds, now=t)
 
-    five_hour = _synth_bucket(rules['five_hour'], session_id, 'five_hour', t) if 'five_hour' in rules else real_rate_limits.five_hour
-    seven_day = _synth_bucket(rules['seven_day'], session_id, 'seven_day', t) if 'seven_day' in rules else real_rate_limits.seven_day
+    five_hour = _synth_bucket(rules['five_hour'], session_id, 'five_hour', t, by_session) if 'five_hour' in rules else real_rate_limits.five_hour
+    seven_day = _synth_bucket(rules['seven_day'], session_id, 'seven_day', t, by_session) if 'seven_day' in rules else real_rate_limits.seven_day
     return RateLimits(five_hour=five_hour, seven_day=seven_day)
