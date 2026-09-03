@@ -136,6 +136,22 @@ TRANSCRIPT_CACHE_VERSION   = 1
 TRANSCRIPT_CACHE_KEEP_SECONDS = 86400.0  # 24 h — comfortably beyond ABANDONED_HORIZON_SECONDS = 1800
 TRANSCRIPT_CACHE_SUBKEY_MAX = 4          # max sub-keys retained per transcript per result kind
 DEFAULT_TRANSCRIPT_CACHE   = True
+# Default per-component weights for the [rate_limits] simulator's usage sum
+# (yas.tokens.RateLimitLog.usage_since). Mirror the public API's per-token
+# PRICING ratios (https://platform.claude.com/docs/en/about-claude/pricing#model-pricing):
+# a 5-minute cache write is 1.25x base input, a cache read is 0.1x, and
+# output is uniformly 5x base input across every current model (Opus 5
+# $5/$25, Sonnet 5 $2/$10, Haiku 4.5 $1/$5, Fable 5 $10/$50, Opus 4.1
+# $15/$75) -- hence output=5.0 here, not 1.0. This is a borrowed assumption,
+# NOT a documented fact: Anthropic does not publish how a Max subscription's
+# 5h/7d rate-limit windows actually weight cache or output tokens, and a
+# quota that counted raw tokens (rather than $ cost) would weight output at
+# 1.0. Overridable per-key via [rate_limits.weights] in yas.toml; see
+# yas.config.RateLimitWeights.
+DEFAULT_RATE_LIMIT_WEIGHT_INPUT          = 1.0
+DEFAULT_RATE_LIMIT_WEIGHT_CACHE_CREATION = 1.25
+DEFAULT_RATE_LIMIT_WEIGHT_CACHE_READ     = 0.1
+DEFAULT_RATE_LIMIT_WEIGHT_OUTPUT         = 5.0
 NARROW_WIDTH = 55
 MEDIUM_WIDTH = 80
 # Box width at/above which the wide layout's workflow cohort pairs agents into

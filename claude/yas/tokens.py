@@ -12,11 +12,15 @@ import time
 from bisect import bisect_left
 from typing import Any, TYPE_CHECKING
 
-from yas.constants import tokens_log, token_rate_log, rate_limit_log, render_log
+from yas.constants import (
+    tokens_log, token_rate_log, rate_limit_log, render_log,
+    DEFAULT_RATE_LIMIT_WEIGHT_INPUT, DEFAULT_RATE_LIMIT_WEIGHT_CACHE_CREATION,
+    DEFAULT_RATE_LIMIT_WEIGHT_CACHE_READ, DEFAULT_RATE_LIMIT_WEIGHT_OUTPUT,
+)
 from yas.session import Model
 
 if TYPE_CHECKING:
-    pass
+    from yas.config import RateLimitWeights
 
 
 # ---------------------------------------------------------------------------
@@ -273,17 +277,16 @@ class TokenRate:
 # RateLimitLog
 # ---------------------------------------------------------------------------
 
-#: Per-component weights applied by `RateLimitLog.usage_since` when summing
-#: a window's consumption. These mirror the public API's per-token *pricing*
-#: ratios for cache-creation (1.25x) and cache-read (0.1x) relative to a
-#: plain input/output token -- but that is a borrowed assumption, NOT a
-#: documented fact: Anthropic does not publish how Max's 5h/7d rate-limit
-#: windows weight cache tokens internally. Treat these as our best guess,
-#: not ground truth, and revisit if observed usage% drifts from reality.
-RATE_LIMIT_WEIGHT_INPUT          = 1.0
-RATE_LIMIT_WEIGHT_CACHE_CREATION = 1.25
-RATE_LIMIT_WEIGHT_CACHE_READ     = 0.1
-RATE_LIMIT_WEIGHT_OUTPUT         = 1.0
+#: Default per-component weights applied by `RateLimitLog.usage_since` when
+#: summing a window's consumption, used when a caller doesn't pass an
+#: explicit `weights` (a `yas.config.RateLimitWeights`, user-tunable via
+#: `[rate_limits.weights]` in yas.toml). Sourced from constants.py so the
+#: default is defined in exactly one place; see the docstring there for the
+#: pricing-ratio rationale and its caveats.
+RATE_LIMIT_WEIGHT_INPUT          = DEFAULT_RATE_LIMIT_WEIGHT_INPUT
+RATE_LIMIT_WEIGHT_CACHE_CREATION = DEFAULT_RATE_LIMIT_WEIGHT_CACHE_CREATION
+RATE_LIMIT_WEIGHT_CACHE_READ     = DEFAULT_RATE_LIMIT_WEIGHT_CACHE_READ
+RATE_LIMIT_WEIGHT_OUTPUT         = DEFAULT_RATE_LIMIT_WEIGHT_OUTPUT
 
 
 class RateLimitLog:
@@ -410,6 +413,7 @@ class RateLimitLog:
         cls,
         window_start: float,
         by_session:   dict[str, list[tuple[float, int, int, int, int]]] | None = None,
+        weights:      'RateLimitWeights | None' = None,
     ) -> int:
         """Weighted tokens accrued across ALL sessions since `window_start`.
 
@@ -429,8 +433,13 @@ class RateLimitLog:
           this also means a `/compact` or `/clear`, which drops the
           transcript's lifetime sums, can never register as *negative*
           usage; it just stops contributing until the totals climb again.
-        - contributions are weighted by RATE_LIMIT_WEIGHT_* (see there for
-          the pricing-ratio assumption) and summed into that session's total.
+        - contributions are weighted by `weights` (a `RateLimitWeights` --
+          see `yas.config.RateLimitWeights` and its yas.toml
+          `[rate_limits.weights]` knob for the pricing-ratio assumption)
+          and summed into that session's total. `weights=None` (the
+          default, used by every caller that hasn't resolved a Config) falls
+          back to the module-level RATE_LIMIT_WEIGHT_* constants, i.e.
+          today's hardcoded behaviour.
 
         Returns the sum of weighted contributions across sessions, rounded
         to the nearest int. `by_session` lets a caller that already parsed
@@ -440,6 +449,15 @@ class RateLimitLog:
         """
         if by_session is None:
             by_session = cls._parse()
+        if weights is None:
+            w_input, w_cache_creation, w_cache_read, w_output = (
+                RATE_LIMIT_WEIGHT_INPUT, RATE_LIMIT_WEIGHT_CACHE_CREATION,
+                RATE_LIMIT_WEIGHT_CACHE_READ, RATE_LIMIT_WEIGHT_OUTPUT,
+            )
+        else:
+            w_input, w_cache_creation, w_cache_read, w_output = (
+                weights.input, weights.cache_creation, weights.cache_read, weights.output,
+            )
         total = 0.0
         for samples in by_session.values():
             # samples is sorted by ts (see _parse); bisect straight to the
@@ -453,10 +471,10 @@ class RateLimitLog:
                 max(0, latest[j] - baseline[j]) for j in range(4)
             )
             total += (
-                d_input          * RATE_LIMIT_WEIGHT_INPUT
-                + d_cache_creation * RATE_LIMIT_WEIGHT_CACHE_CREATION
-                + d_cache_read     * RATE_LIMIT_WEIGHT_CACHE_READ
-                + d_output         * RATE_LIMIT_WEIGHT_OUTPUT
+                d_input          * w_input
+                + d_cache_creation * w_cache_creation
+                + d_cache_read     * w_cache_read
+                + d_output         * w_output
             )
         return round(total)
 

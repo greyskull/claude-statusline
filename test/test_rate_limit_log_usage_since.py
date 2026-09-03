@@ -111,13 +111,24 @@ def test_a_context_size_drop_can_no_longer_read_as_negative_usage(tmp_home: Path
 
 def test_weighted_components_are_combined_per_the_documented_ratios(tmp_home: Path) -> None:
     # input=100 (x1.0) + cache_creation=100 (x1.25) + cache_read=100 (x0.1)
-    # + output=100 (x1.0) = 100 + 125 + 10 + 100 = 335.
+    # + output=100 (x5.0, the pricing-derived default) = 100 + 125 + 10 + 500 = 735.
     _write(
         tmp_home,
         '0 sess-a 0 0 0 0',
         '200 sess-a 100 100 100 100',
     )
-    assert RateLimitLog.usage_since(window_start=50) == 335
+    assert RateLimitLog.usage_since(window_start=50) == 735
+
+
+def test_explicit_weights_override_the_defaults(tmp_home: Path) -> None:
+    from yas.config import RateLimitWeights
+    _write(
+        tmp_home,
+        '0 sess-a 0 0 0 0',
+        '200 sess-a 100 100 100 100',
+    )
+    weights = RateLimitWeights(input=1.0, cache_creation=1.0, cache_read=1.0, output=1.0)
+    assert RateLimitLog.usage_since(window_start=50, weights=weights) == 400
 
 
 def test_cache_read_is_weighted_far_lower_than_input(tmp_home: Path) -> None:

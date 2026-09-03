@@ -12,11 +12,13 @@ deduped by message id) -- monotonic for the life of a session, unlike the
 raw payload's context_window fields, which describe only the most recent
 request and can silently DROP on /compact or /clear. `RateLimitLog` records
 the four components separately per tick and `usage_since` (yas.tokens)
-combines them with a fixed per-component weighting (see
-RATE_LIMIT_WEIGHT_* in yas.tokens) before summing a window's usage --
-those weights mirror the public API's cache-pricing ratios but are an
-explicit ASSUMPTION, since Anthropic does not document how the 5h/7d
-windows actually weight cache tokens.
+combines them with a per-component weighting (a `yas.config.
+RateLimitWeights`, resolved once by the caller and threaded down as
+`weights`; falls back to RATE_LIMIT_WEIGHT_* in yas.tokens when omitted)
+before summing a window's usage -- those weights mirror the public API's
+cache/output pricing ratios but are an explicit ASSUMPTION, since Anthropic
+does not document how the 5h/7d windows actually weight cache or output
+tokens. Tunable per-key via `[rate_limits.weights]` in yas.toml.
 
 `anchor = 'rolling'` is an account-wide window anchored at first activity
 (RateLimitLog.window_anchor): the window opens at the first activity not
@@ -38,7 +40,7 @@ from yas.session import RateBucket, RateLimits
 from yas.tokens import RateLimitLog
 
 if False:  # TYPE_CHECKING without importing yas.config here (no cycle risk, but keep it lazy)
-    from yas.config import RateLimitRule
+    from yas.config import RateLimitRule, RateLimitWeights
 
 
 # Fixed-anchor cron periods are expected to roughly match the configured
@@ -87,6 +89,7 @@ def _rolling_bucket(
     session_id:  str,
     now:         float,
     by_session:  dict[str, list[tuple[float, int, int, int, int]]] | None = None,
+    weights:     'RateLimitWeights | None' = None,
 ) -> RateBucket:
     # Anchored at first account-wide activity, not at `now` -- see
     # RateLimitLog.window_anchor. Every concurrent session shares the same
@@ -94,7 +97,7 @@ def _rolling_bucket(
     # `by_session` lets a caller that already parsed the log (record(), via
     # simulate_rate_limits) reuse that parse instead of re-reading the file.
     window_start = RateLimitLog.window_anchor(rule.window_seconds, now, by_session)
-    used         = RateLimitLog.usage_since(window_start, by_session)
+    used         = RateLimitLog.usage_since(window_start, by_session, weights)
     return RateBucket(
         used_percentage = _clamp_pct(used, rule.budget),
         resets_at        = int(window_start + rule.window_seconds),
@@ -106,6 +109,7 @@ def _fixed_bucket(
     session_id:  str,
     now:         float,
     by_session:  dict[str, list[tuple[float, int, int, int, int]]] | None = None,
+    weights:     'RateLimitWeights | None' = None,
 ) -> RateBucket:
     assert rule.epoch is not None  # enforced at config-load time
     sched   = CronSchedule.parse(rule.epoch)
@@ -113,7 +117,7 @@ def _fixed_bucket(
     window_start_dt = sched.prev_at_or_before(now_dt)
     reset_dt        = sched.next_after(now_dt)
     window_start = max(window_start_dt.timestamp(), now - MAX_LOOKBACK_SECONDS)
-    used = RateLimitLog.usage_since(window_start, by_session)
+    used = RateLimitLog.usage_since(window_start, by_session, weights)
     return RateBucket(
         used_percentage = _clamp_pct(used, rule.budget),
         resets_at        = int(reset_dt.timestamp()),
@@ -126,6 +130,7 @@ def _synth_bucket(
     bucket_name: str,
     now:         float,
     by_session:  dict[str, list[tuple[float, int, int, int, int]]] | None = None,
+    weights:     'RateLimitWeights | None' = None,
 ) -> RateBucket:
     minute = int(now // _BUCKET_SECONDS)
     key     = (session_id, bucket_name)
@@ -135,9 +140,9 @@ def _synth_bucket(
 
     minute_start = minute * _BUCKET_SECONDS  # quantized `now`: stable resets_at + window basis all render this minute
     if rule.anchor == 'fixed':
-        bucket = _fixed_bucket(rule, session_id, minute_start, by_session)
+        bucket = _fixed_bucket(rule, session_id, minute_start, by_session, weights)
     else:
-        bucket = _rolling_bucket(rule, session_id, minute_start, by_session)
+        bucket = _rolling_bucket(rule, session_id, minute_start, by_session, weights)
     _bucket_cache[key] = (minute, bucket)
     return bucket
 
@@ -151,6 +156,7 @@ def simulate_rate_limits(
     cache_read_tokens:      int,
     output_tokens:          int,
     now:                    float | None = None,
+    weights:                'RateLimitWeights | None' = None,
 ) -> RateLimits:
     """Override real_rate_limits' buckets with synthesised ones per `rules`.
 
@@ -181,6 +187,6 @@ def simulate_rate_limits(
         keep_seconds=keep_seconds, now=t,
     )
 
-    five_hour = _synth_bucket(rules['five_hour'], session_id, 'five_hour', t, by_session) if 'five_hour' in rules else real_rate_limits.five_hour
-    seven_day = _synth_bucket(rules['seven_day'], session_id, 'seven_day', t, by_session) if 'seven_day' in rules else real_rate_limits.seven_day
+    five_hour = _synth_bucket(rules['five_hour'], session_id, 'five_hour', t, by_session, weights) if 'five_hour' in rules else real_rate_limits.five_hour
+    seven_day = _synth_bucket(rules['seven_day'], session_id, 'seven_day', t, by_session, weights) if 'seven_day' in rules else real_rate_limits.seven_day
     return RateLimits(five_hour=five_hour, seven_day=seven_day)

@@ -45,6 +45,7 @@ def _apply_rate_limit_sim(info: dict[str, object], cfg: Config, usage: Transcrip
     synth  = simulate_rate_limits(
         session_id, cfg.rate_limit_rules, real,
         usage.input_tokens, usage.cache_creation_input_tokens, usage.cache_read_input_tokens, usage.output_tokens,
+        weights=cfg.rate_limit_weights,
     )
     info['rate_limits'] = {
         'five_hour': {'used_percentage': synth.five_hour.used_percentage, 'resets_at': synth.five_hour.resets_at},

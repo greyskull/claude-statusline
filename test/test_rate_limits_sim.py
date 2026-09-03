@@ -11,6 +11,7 @@ single-cumulative-number tests they're descended from."""
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -107,13 +108,62 @@ def test_single_sample_in_window_with_no_baseline_counts_in_full() -> None:
 
 
 def test_weighted_components_feed_the_bucket_percentage() -> None:
-    # cache_creation (x1.25) and cache_read (x0.1) are weighted differently
-    # from input/output (x1.0): 100*1.0 + 100*1.25 + 100*0.1 + 100*1.0 = 335.
+    # cache_creation (x1.25), cache_read (x0.1), and output (x5.0, the
+    # pricing-derived default) are weighted differently from input (x1.0):
+    # 100*1.0 + 100*1.25 + 100*0.1 + 100*5.0 = 735.
     session_id = 'sess-weighted'
     now = time.time()
     rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
     out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 100, 100, 100, 100, now=now)
-    assert out.five_hour.used_percentage == pytest.approx(33.5, abs=0.01)
+    assert out.five_hour.used_percentage == pytest.approx(73.5, abs=0.01)
+
+
+def test_custom_weights_change_the_bucket_percentage() -> None:
+    """An explicit `weights` overrides the pricing-derived defaults end-to-end."""
+    from yas.config import RateLimitWeights
+    session_id = 'sess-custom-weighted'
+    now = time.time()
+    rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
+    weights = RateLimitWeights(input=1.0, cache_creation=1.0, cache_read=1.0, output=1.0)
+    out = simulate_rate_limits(
+        session_id, {'five_hour': rule}, RateLimits(), 100, 100, 100, 100, now=now, weights=weights)
+    assert out.five_hour.used_percentage == pytest.approx(40.0, abs=0.01)
+
+
+def test_config_sourced_cache_read_weight_visibly_changes_used_percentage(tmp_path: Path) -> None:
+    """End-to-end: a [rate_limits.weights] cache_read override in yas.toml
+    changes the resulting bucket's used_percentage, exercising the full
+    Config.load() -> cfg.rate_limit_weights -> simulate_rate_limits path
+    rather than constructing a RateLimitWeights by hand.
+
+    Both percentages are derived from the SAME recorded sample (rate limits
+    are account-wide, so a second `simulate_rate_limits` call for a second
+    session would double-count into the shared log) -- only the weights
+    passed to `RateLimitLog.usage_since` differ between the two assertions.
+    """
+    from yas.config import Config
+
+    (tmp_path / 'yas.toml').write_text(
+        '[rate_limits.weights]\n'
+        'cache_read = 1.0\n'  # default is 0.1 -- a 10x change should show up
+    )
+    cfg = Config.load(env={}, config_dir=tmp_path)
+    assert not cfg.errors
+
+    session_id = 'sess-cfg-weighted'
+    now = time.time()
+    rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
+
+    # One recorded sample: cache_read=100, everything else 0.
+    simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 0, 0, 100, 0, now=now)
+
+    window_start = 0.0
+    default_used    = RateLimitLog.usage_since(window_start)
+    configured_used = RateLimitLog.usage_since(window_start, weights=cfg.rate_limit_weights)
+
+    assert default_used == 10       # 100 * 0.1 (built-in default)
+    assert configured_used == 100   # 100 * 1.0 (yas.toml override)
+    assert configured_used != default_used
 
 
 def test_same_minute_calls_are_stable_and_skip_recompute(monkeypatch: pytest.MonkeyPatch) -> None:

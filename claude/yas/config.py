@@ -31,6 +31,10 @@ from yas.constants import (
     DEFAULT_LABELS,
     DEFAULT_MAX_WIDTH,
     DEFAULT_OPENSPEC_SCAN_DEPTH,
+    DEFAULT_RATE_LIMIT_WEIGHT_INPUT,
+    DEFAULT_RATE_LIMIT_WEIGHT_CACHE_CREATION,
+    DEFAULT_RATE_LIMIT_WEIGHT_CACHE_READ,
+    DEFAULT_RATE_LIMIT_WEIGHT_OUTPUT,
     DEFAULT_SOFT_LIMIT,
     DEFAULT_TOKEN_WINDOW,
     DEFAULT_THEME,
@@ -394,6 +398,54 @@ def _parse_rate_limits(raw: object, errors: list[str], debug: list[str]) -> dict
     return out
 
 
+class RateLimitWeights(NamedTuple):
+    input:          float
+    cache_creation: float
+    cache_read:     float
+    output:         float
+
+
+DEFAULT_RATE_LIMIT_WEIGHTS = RateLimitWeights(
+    input=DEFAULT_RATE_LIMIT_WEIGHT_INPUT,
+    cache_creation=DEFAULT_RATE_LIMIT_WEIGHT_CACHE_CREATION,
+    cache_read=DEFAULT_RATE_LIMIT_WEIGHT_CACHE_READ,
+    output=DEFAULT_RATE_LIMIT_WEIGHT_OUTPUT,
+)
+
+
+def _parse_weight(raw: object, label: str) -> float:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f'{label} must be a number')
+    x = float(raw)
+    if x < 0:
+        raise ValueError(f'{label} must be >= 0')
+    return x
+
+
+def _parse_rate_limit_weights(raw: object, errors: list[str], debug: list[str]) -> RateLimitWeights:
+    """Validate the [rate_limits.weights] table into a RateLimitWeights.
+
+    Every key is optional; an omitted key keeps its DEFAULT_RATE_LIMIT_WEIGHTS
+    value. A key that's present but invalid (non-numeric or negative) falls
+    back to its default too, same as every other yas.toml knob -- the
+    rejection is recorded per-key rather than discarding the whole table."""
+    if not isinstance(raw, dict):
+        return DEFAULT_RATE_LIMIT_WEIGHTS
+    values = {}
+    for key, default in DEFAULT_RATE_LIMIT_WEIGHTS._asdict().items():
+        if key not in raw:
+            values[key] = default
+            continue
+        label = f'rate_limits.weights.{key}'
+        try:
+            values[key] = _parse_weight(raw[key], label)
+        except ValueError as e:
+            errors.append(label)
+            debug.append(f'{label}: {e}')
+            values[key] = default
+    return RateLimitWeights(**values)
+
+
 def _parse_context_thresholds(raw: object, origin: str) -> tuple[int, ...]:
     """Exactly 4 strictly-ascending ints in 1..99 (band starts for levels 2-5).
 
@@ -422,7 +474,7 @@ class Config:
         'show_day_stats', 'context_state', 'context_labels', 'context_thresholds',
         'show_render_time', 'show_tool_uses', 'show_tokens_over_time', 'soft_limit_models',
         'openspec_scan_depth', 'show_icons', 'transcript_cache', 'rate_limit_rules',
-        'errors', 'debug_lines',
+        'rate_limit_weights', 'errors', 'debug_lines',
     )
 
     max_width:          int
@@ -447,6 +499,7 @@ class Config:
     show_icons:         bool
     transcript_cache:   bool
     rate_limit_rules:   dict[str, RateLimitRule]
+    rate_limit_weights: RateLimitWeights
     errors:             tuple[str, ...]
     debug_lines:        tuple[str, ...]
 
@@ -474,6 +527,7 @@ class Config:
         show_icons:         bool = True,
         transcript_cache:   bool = DEFAULT_TRANSCRIPT_CACHE,
         rate_limit_rules:   dict[str, RateLimitRule] | None = None,
+        rate_limit_weights: RateLimitWeights = DEFAULT_RATE_LIMIT_WEIGHTS,
         errors:             tuple[str, ...] = (),
         debug_lines:        tuple[str, ...] = (),
     ) -> None:
@@ -500,6 +554,7 @@ class Config:
         s(self, 'show_icons', show_icons)
         s(self, 'transcript_cache', transcript_cache)
         s(self, 'rate_limit_rules', rate_limit_rules if rate_limit_rules is not None else {})
+        s(self, 'rate_limit_weights', rate_limit_weights)
         s(self, 'errors', errors)
         s(self, 'debug_lines', debug_lines)
 
@@ -522,6 +577,7 @@ class Config:
                 f'openspec_scan_depth={self.openspec_scan_depth}, '
                 f'show_icons={self.show_icons}, transcript_cache={self.transcript_cache}, '
                 f'rate_limit_rules={self.rate_limit_rules!r}, '
+                f'rate_limit_weights={self.rate_limit_weights!r}, '
                 f'errors={self.errors!r}, debug_lines={self.debug_lines!r})')
 
     @classmethod
@@ -659,6 +715,8 @@ class Config:
 
         rate_limits_table = _table('rate_limits')
         rate_limit_rules = _parse_rate_limits(rate_limits_table, errors, debug)
+        rate_limit_weights = _parse_rate_limit_weights(
+            rate_limits_table.get('weights'), errors, debug)
 
         return cls(
             max_width=max_width,
@@ -683,6 +741,7 @@ class Config:
             show_icons=show_icons,
             transcript_cache=transcript_cache,
             rate_limit_rules=rate_limit_rules,
+            rate_limit_weights=rate_limit_weights,
             errors=tuple(errors),
             debug_lines=tuple(debug),
         )
