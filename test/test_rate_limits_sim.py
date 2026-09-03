@@ -42,15 +42,16 @@ def test_rolling_bucket_sums_history_within_window(monkeypatch: pytest.MonkeyPat
     first_sample_ts = 1_700_000_000.0
     monkeypatch.setattr(time, 'time', lambda: first_sample_ts)
     # Two samples 100s apart, both inside a 5h window, and no earlier
-    # (pre-window) sample for this session -> baseline is 0, so the *full*
-    # latest cumulative value (5000) counts, not the 1000->5000 delta.
+    # (pre-window) sample for this session -> baseline is the session's
+    # first IN-WINDOW sample (1000), so only the 1000->5000 growth counts,
+    # not the full 5000 latest cumulative.
     RateLimitLog.record(session_id, 1000, 0, 0, 0, keep_seconds=6 * 3600)
     rule = RateLimitRule(budget=8000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
     real = RateLimits()
     monkeypatch.setattr(time, 'time', lambda: first_sample_ts + 100)
     out = simulate_rate_limits(session_id, {'five_hour': rule}, real, 5000, 0, 0, 0, now=first_sample_ts + 100)
     # resets_at is anchored at the *first* sample's timestamp, not `now`.
-    assert out.five_hour.used_percentage == pytest.approx(5000 / 8000 * 100, abs=0.01)
+    assert out.five_hour.used_percentage == pytest.approx(4000 / 8000 * 100, abs=0.01)
     assert out.five_hour.resets_at == int(first_sample_ts + 5 * 3600)
 
 
@@ -95,16 +96,17 @@ def test_absent_key_falls_back_to_real_seven_day() -> None:
     assert out.seven_day == real.seven_day
 
 
-def test_single_sample_in_window_with_no_baseline_counts_in_full() -> None:
+def test_single_sample_in_window_with_no_baseline_contributes_zero() -> None:
     session_id = 'sess-one-sample'
     now = time.time()
     rule = RateLimitRule(budget=1_000_000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
     # No prior RateLimitLog.record call for this session -> only one sample
     # (the one taken inside simulate_rate_limits itself) ever lands in the
-    # window, with no pre-window baseline -> it counts in full (session
-    # started inside the window).
+    # window, with no pre-window baseline -> that sample itself becomes the
+    # baseline (accepted first-sample undercount), so it contributes 0
+    # rather than its full cumulative.
     out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 999_999, 0, 0, 0, now=now)
-    assert out.five_hour.used_percentage == pytest.approx(999_999 / 1_000_000 * 100, abs=0.01)
+    assert out.five_hour.used_percentage == pytest.approx(0.0, abs=0.01)
 
 
 def test_weighted_components_feed_the_bucket_percentage() -> None:
@@ -113,8 +115,12 @@ def test_weighted_components_feed_the_bucket_percentage() -> None:
     # 100*1.0 + 100*1.25 + 100*0.1 + 100*5.0 = 735.
     session_id = 'sess-weighted'
     now = time.time()
+    # A zero baseline sample first, so the (100,100,100,100) sample taken by
+    # simulate_rate_limits below is a real in-window DELTA rather than
+    # landing as the session's own (baseline-excluded) first sample.
+    RateLimitLog.record(session_id, 0, 0, 0, 0, keep_seconds=6 * 3600)
     rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
-    out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 100, 100, 100, 100, now=now)
+    out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 100, 100, 100, 100, now=now + 60)
     assert out.five_hour.used_percentage == pytest.approx(73.5, abs=0.01)
 
 
@@ -123,10 +129,11 @@ def test_custom_weights_change_the_bucket_percentage() -> None:
     from yas.config import RateLimitWeights
     session_id = 'sess-custom-weighted'
     now = time.time()
+    RateLimitLog.record(session_id, 0, 0, 0, 0, keep_seconds=6 * 3600)
     rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
     weights = RateLimitWeights(input=1.0, cache_creation=1.0, cache_read=1.0, output=1.0)
     out = simulate_rate_limits(
-        session_id, {'five_hour': rule}, RateLimits(), 100, 100, 100, 100, now=now, weights=weights)
+        session_id, {'five_hour': rule}, RateLimits(), 100, 100, 100, 100, now=now + 60, weights=weights)
     assert out.five_hour.used_percentage == pytest.approx(40.0, abs=0.01)
 
 
@@ -154,8 +161,11 @@ def test_config_sourced_cache_read_weight_visibly_changes_used_percentage(tmp_pa
     now = time.time()
     rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
 
-    # One recorded sample: cache_read=100, everything else 0.
-    simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 0, 0, 100, 0, now=now)
+    # A zero baseline sample first, so the cache_read=100 sample below is a
+    # real in-window delta rather than the session's own (baseline-excluded)
+    # first sample.
+    RateLimitLog.record(session_id, 0, 0, 0, 0, keep_seconds=6 * 3600)
+    simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 0, 0, 100, 0, now=now + 60)
 
     window_start = 0.0
     default_used    = RateLimitLog.usage_since(window_start)

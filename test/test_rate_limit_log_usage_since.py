@@ -27,10 +27,13 @@ def test_two_sessions_in_window_deltas_are_summed(tmp_home: Path) -> None:
     assert RateLimitLog.usage_since(window_start=50) == 5000
 
 
-def test_session_starting_inside_window_counts_first_sample_in_full(tmp_home: Path) -> None:
+def test_session_starting_inside_window_baselines_at_its_first_sample(tmp_home: Path) -> None:
     _write(tmp_home, '200 sess-new 45572 0 0 0')
-    # No pre-window sample for sess-new -> baseline is 0, full value counts.
-    assert RateLimitLog.usage_since(window_start=100) == 45572
+    # No pre-window sample for sess-new -> baseline is its first in-window
+    # sample, not zero. A brand-new session's very first sample IS its
+    # lifetime cumulative at first render, so it contributes 0 here -- the
+    # accepted, bounded undercount documented on usage_since.
+    assert RateLimitLog.usage_since(window_start=100) == 0
 
 
 def test_pre_window_sample_is_diffed_not_first_in_window_sample(tmp_home: Path) -> None:
@@ -72,9 +75,13 @@ def test_legacy_three_field_lines_are_skipped(tmp_home: Path) -> None:
     _write(
         tmp_home,
         '0 sess-a 156905',        # legacy line -- skipped
-        '200 sess-a 1000 0 0 0',  # only real sample -> counts in full (no baseline)
+        '200 sess-a 1000 0 0 0',  # only real (6-field) sample -> baselined at itself
     )
-    assert RateLimitLog.usage_since(window_start=50) == 1000
+    # With the legacy line skipped, sess-a has exactly one 6-field sample and
+    # no pre-window sample -> baseline is that sample itself, so it
+    # contributes 0 (the same accepted first-sample undercount as any other
+    # session with no pre-window history).
+    assert RateLimitLog.usage_since(window_start=50) == 0
 
 
 def test_missing_log_returns_zero(tmp_home: Path) -> None:
@@ -129,6 +136,73 @@ def test_explicit_weights_override_the_defaults(tmp_home: Path) -> None:
     )
     weights = RateLimitWeights(input=1.0, cache_creation=1.0, cache_read=1.0, output=1.0)
     assert RateLimitLog.usage_since(window_start=50, weights=weights) == 400
+
+
+def test_stale_first_sample_only_charges_in_window_growth(tmp_home: Path) -> None:
+    # Regression guard for the baseline-zero over-count: a session's first
+    # RETAINED sample falls inside the window but carries a large lifetime
+    # cumulative that mostly accrued BEFORE the window. Only growth observed
+    # after that first in-window sample should count, not the whole thing.
+    _write(
+        tmp_home,
+        '150 sess-a 0 0 8_990_000 0',   # first retained sample, inside window
+        '200 sess-a 0 0 8_991_000 0',   # growth of 1000 inside the window
+    )
+    from yas.config import RateLimitWeights
+    weights = RateLimitWeights(input=1.0, cache_creation=1.0, cache_read=1.0, output=1.0)
+    # Old (buggy) behaviour would charge the full 8,991,000. Correct
+    # behaviour charges only the 1000 of observed in-window growth.
+    assert RateLimitLog.usage_since(window_start=100, weights=weights) == 1000
+
+
+def test_cut_greater_than_zero_baseline_is_unchanged(tmp_home: Path) -> None:
+    # Regression guard: when a genuine pre-window sample exists, the
+    # baseline path (cut > 0) must be untouched by the cut==0 fix.
+    _write(
+        tmp_home,
+        '50 sess-a 900 0 0 0',    # pre-window baseline
+        '150 sess-a 1200 0 0 0',  # in-window
+        '250 sess-a 1500 0 0 0',  # latest
+    )
+    assert RateLimitLog.usage_since(window_start=100) == 600
+
+
+def test_session_with_every_sample_pre_window_contributes_exactly_zero(tmp_home: Path) -> None:
+    _write(
+        tmp_home,
+        '10 sess-stale 100_000 0 0 0',
+        '20 sess-stale 200_000 0 0 0',
+    )
+    # cut == len(samples) -> the existing "continue" path; genuinely zero
+    # because cumulative-at-window-start equals cumulative-now.
+    assert RateLimitLog.usage_since(window_start=1000) == 0
+
+
+def test_window_roll_is_smooth_not_a_cliff(tmp_home: Path) -> None:
+    # An active-then-idle session must not cause used_percentage to step
+    # down by its whole share the instant the window anchor passes its last
+    # sample -- it should already have stopped contributing NEW growth well
+    # before that, so the roll is smooth rather than a single big drop.
+    from yas.config import RateLimitWeights
+    weights = RateLimitWeights(input=1.0, cache_creation=1.0, cache_read=1.0, output=1.0)
+    _write(
+        tmp_home,
+        '0   sess-active 0 0 0 0',
+        '100 sess-active 1000 0 0 0',
+        '200 sess-active 2000 0 0 0',
+        '300 sess-active 2000 0 0 0',  # session goes idle -- no more growth
+    )
+    # Sample the window advancing past each of this session's samples one
+    # at a time; usage must never jump back UP and each step's drop must be
+    # small (bounded by the gap between adjacent samples), never the whole
+    # 2000 total disappearing at once.
+    values = [
+        RateLimitLog.usage_since(window_start=ws, weights=weights)
+        for ws in (0, 50, 100, 150, 200, 250, 300, 350)
+    ]
+    assert values == sorted(values, reverse=True)  # monotonically non-increasing
+    drops = [values[i] - values[i + 1] for i in range(len(values) - 1)]
+    assert max(drops) < 2000  # no single step drops the session's entire share
 
 
 def test_cache_read_is_weighted_far_lower_than_input(tmp_home: Path) -> None:

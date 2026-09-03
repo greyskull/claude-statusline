@@ -488,12 +488,26 @@ class RateLimitLog:
         line is `ts session_id input cache_creation cache_read output` (each
         component a per-session running total), grouped by session_id:
 
-        - `baseline` is that session's last sample with ts < window_start
-          (all-zero if it has none -- the session started inside the
-          window, so all of its usage counts).
+        - `baseline` is that session's last sample with ts < window_start.
+          If there is no such sample, the session's *lifetime* cumulative
+          at that point is unknown -- charging the window with `(0,0,0,0)`
+          would attribute however much of that lifetime total had already
+          accrued *before* the window (possibly hours of it) to this
+          window instead. So in that case the baseline is the session's
+          first in-window sample: only growth actually observed inside the
+          window counts. Trade-off, accepted deliberately: a genuinely
+          new session's very first sample -- which is itself its
+          cumulative at first render, not zero -- is excluded from its own
+          window contribution. That undercount is bounded by one sample's
+          worth of usage; the old zero-baseline's overcount was unbounded
+          (a session's entire lifetime).
         - `latest` is that session's last sample overall, but only counted
           if the session has at least one sample with ts >= window_start;
-          a session with no in-window samples contributes 0.
+          a session with no in-window samples contributes 0. With the
+          baseline rule above this is exactly correct rather than a
+          discontinuity: if every sample predates the window, the
+          cumulative at window-start equals the cumulative now, so the
+          true delta is zero anyway.
         - per-component contribution is `max(0, latest - baseline)`,
           clamped so a truncated/reset running total can't go negative --
           this also means a `/compact` or `/clear`, which drops the
@@ -531,7 +545,7 @@ class RateLimitLog:
             cut = bisect_left(samples, (window_start,))
             if cut >= len(samples):
                 continue  # nothing at/after window_start -> contributes 0
-            baseline = samples[cut - 1][1:] if cut > 0 else (0, 0, 0, 0)
+            baseline = samples[cut - 1][1:] if cut > 0 else samples[cut][1:]
             latest = samples[-1][1:]
             d_input, d_cache_creation, d_cache_read, d_output = (
                 max(0, latest[j] - baseline[j]) for j in range(4)
