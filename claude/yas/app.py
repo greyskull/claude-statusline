@@ -21,12 +21,16 @@ from yas.tokens import RenderTiming, TickRecord, TokenLog, TokenRate, compute_da
 from yas.info.transcript import TranscriptUsage
 
 
-def _apply_rate_limit_sim(info: dict[str, object], cfg: Config, usage: TranscriptUsage) -> None:
-    """Overwrite info['rate_limits'] with synthesised buckets per cfg.rate_limit_rules.
+def _apply_rate_limit_sim(info: dict[str, object], cfg: Config, usage: TranscriptUsage) -> RateLimits:
+    """Overwrite info['rate_limits'] with synthesised buckets per cfg.rate_limit_rules,
+    and return the same buckets as a `RateLimits` so the caller can also thread them
+    onto the `SessionInfo` the renderer actually reads.
 
     Mutates `info` in place, before it is written to the per-session payload
     (see `main`), so the statusline and the `mon` TUI read the same
-    already-synthesised values rather than deriving them independently.
+    already-synthesised values rather than deriving them independently. Returning
+    the `RateLimits` (rather than making the caller re-derive it from `info`) keeps
+    there being exactly one synthesis call per render.
 
     `usage` is the session's lifetime transcript totals (input,
     cache_creation, cache_read, output), summed once by `TranscriptUsage.
@@ -51,6 +55,7 @@ def _apply_rate_limit_sim(info: dict[str, object], cfg: Config, usage: Transcrip
         'five_hour': {'used_percentage': synth.five_hour.used_percentage, 'resets_at': synth.five_hour.resets_at},
         'seven_day': {'used_percentage': synth.seven_day.used_percentage, 'resets_at': synth.seven_day.resets_at},
     }
+    return synth
 
 
 def record_tick(session: SessionInfo, usage: TranscriptUsage) -> TickRecord:
@@ -144,13 +149,19 @@ def main(t0: float | None = None) -> None:
     # threaded into `render` below (`view=view`) so that one parse -- paid by
     # `view.transcript_usage` here -- is reused for both the simulator and
     # the normal session view, instead of `render` parsing the transcript
-    # again from scratch.
+    # again from scratch. `_apply_rate_limit_sim` only mutates `info` (the raw
+    # dict written to the payload below); the synthesised buckets it returns
+    # are reattached to `view.session` here too, since `view.session` was
+    # already snapshotted from the pre-synthesis `info` and `render` reads
+    # `view.session.rate_limits` directly -- without this, the renderer would
+    # see the all-zero real buckets and draw the "unlimited" glyph instead of
+    # the synthesised percentage.
     view: SessionView | None = None
     if cfg.rate_limit_rules:
         session     = SessionInfo.from_dict(info)
         parse_cache = TranscriptCache.load(session.session_id) if cfg.transcript_cache else None
         view        = SessionView(session, cfg, cache=parse_cache)
-        _apply_rate_limit_sim(info, cfg, view.transcript_usage)
+        session.rate_limits = _apply_rate_limit_sim(info, cfg, view.transcript_usage)
 
     # Write payload so the multi-session observer can index it. Keyed by
     # session_id and overwritten in place under yas/state/sessions/, so the

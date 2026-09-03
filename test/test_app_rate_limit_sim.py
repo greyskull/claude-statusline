@@ -149,6 +149,40 @@ def test_render_and_rate_limit_sim_parse_the_transcript_exactly_once(tmp_home: P
     assert calls == [str(transcript)]  # exactly one parse for the whole render
 
 
+def test_rate_limit_sim_result_reaches_the_rendered_output_not_just_the_payload(tmp_home: Path, monkeypatch) -> None:
+    """Regression for the ordering bug where `_apply_rate_limit_sim` mutated
+    only `info` (used for the persisted payload) while `render` drew from a
+    `SessionInfo` snapshotted before the mutation -- so with all-zero real
+    buckets in the raw payload, the renderer saw used_percentage=0/resets_at=0
+    and drew GLYPH_UNLIMITED ('inf') on both rows instead of a percentage,
+    even though rate_limit_rules were configured precisely to avoid that."""
+    from yas.constants import GLYPH_UNLIMITED
+
+    transcript = tmp_home / 'transcript.jsonl'
+    _write_transcript(transcript, [('msg-1', 100_000, 0, 0, 0)])
+    info = _rig(tmp_home, monkeypatch, transcript)
+    # _rig's yas.toml only configures five_hour; add seven_day too, since an
+    # unconfigured bucket legitimately renders GLYPH_UNLIMITED and would
+    # otherwise mask the bug this test targets.
+    (tmp_home / '.claude' / 'yas.toml').write_text(
+        '[rate_limits]\n'
+        'five_hour = { budget = 1_000_000_000, window = "5h", anchor = "rolling" }\n'
+        'seven_day = { budget = 1_000_000_000, window = "7d", anchor = "rolling" }\n'
+    )
+    # The raw payload's rate_limits are all-zero, exactly the shape that
+    # falsely reads as "unlimited" if the renderer sees pre-synthesis data.
+    info['rate_limits'] = {
+        'five_hour': {'used_percentage': 0, 'resets_at': 0},
+        'seven_day': {'used_percentage': 0, 'resets_at': 0},
+    }
+    monkeypatch.setattr(app.sys, 'stdin', io.StringIO(json.dumps(info)))
+
+    app.main()
+
+    rendered = app.sys.stdout.getvalue()
+    assert GLYPH_UNLIMITED not in rendered
+
+
 def test_rate_limit_sim_result_is_written_into_the_persisted_session_payload(tmp_home: Path, monkeypatch) -> None:
     from yas.constants import session_payload_path
 
