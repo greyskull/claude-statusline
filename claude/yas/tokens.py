@@ -8,8 +8,10 @@ Imports:
 from __future__ import annotations
 
 import functools
+import os
 import time
 from bisect import bisect_left
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from yas.constants import (
@@ -305,8 +307,18 @@ class RateLimitLog:
 
     Older 3-field lines (`ts session_id cumulative_tokens`) are a different,
     incompatible signal -- see `_parse` -- and are skipped on read rather
-    than migrated.
+    than migrated. They ARE preserved on disk: `record()` only ever
+    appends the new sample, and compaction (see `_compact`) filters raw
+    lines by their leading timestamp regardless of field count, so legacy
+    lines age out of the log via retention, exactly as documented, instead
+    of being destroyed by the next write.
     """
+
+    #: `O_EXCL` lock filename, next to the log, guarding compaction so
+    #: concurrent writers never interleave a compaction's tmp-write +
+    #: rename with another process's read of the log. A lock older than
+    #: this is assumed abandoned (crashed holder) and removable.
+    _COMPACT_LOCK_STALE_SECONDS = 300.0
 
     @classmethod
     def record(
@@ -343,28 +355,82 @@ class RateLimitLog:
         if samples and samples[-1][1:] == sample:
             return by_session  # unchanged since the last sample -- skip the write
         by_session.setdefault(session_id, []).append((t, *sample))
-        # Pruning only runs on a tick that actually writes -- the common
-        # (unchanged) tick above returns before this, so most renders never
-        # pay for a full prune-rewrite; only the ~4% of ticks with a real
-        # change do.
-        for sid in list(by_session):
-            pruned = [row for row in by_session[sid] if t - row[0] <= keep_seconds]
-            if pruned:
-                by_session[sid] = pruned
-            else:
-                del by_session[sid]
         try:
             log = rate_limit_log()
             log.parent.mkdir(parents=True, exist_ok=True)
-            lines = [
-                f'{ts:.3f} {sid} {i} {cc} {cr} {o}'
-                for sid, rows in by_session.items()
-                for ts, i, cc, cr, o in rows
-            ]
-            log.write_text('\n'.join(lines) + '\n')
+            line = f'{t:.3f} {session_id} {input_tokens} {cache_creation_tokens} {cache_read_tokens} {output_tokens}\n'
+            with open(log, 'a') as f:
+                f.write(line)
+            cls._maybe_compact(log, t, keep_seconds)
         except OSError:
             pass
         return by_session
+
+    @classmethod
+    def _maybe_compact(cls, log: Path, now: float, keep_seconds: float) -> None:
+        """Prune rows older than `keep_seconds`, but only when doing so
+        would actually remove something -- i.e. the oldest row in the file
+        predates the retention window. Most ticks are a no-op here, so the
+        common append-only path above never pays for a full rewrite.
+
+        Guarded by an `O_EXCL` lock file so concurrent writers never race a
+        compaction's read against another process's append/compaction; on
+        `FileExistsError` this tick just skips compaction (the append
+        already landed) rather than blocking. A stale lock (older than
+        `_COMPACT_LOCK_STALE_SECONDS`, i.e. its holder crashed without
+        cleaning up) is treated as removable so compaction isn't wedged
+        forever.
+        """
+        try:
+            raw = log.read_text()
+        except OSError:
+            return
+        oldest_ts = None
+        for ln in raw.splitlines():
+            parts = ln.split(None, 1)
+            if not parts:
+                continue
+            try:
+                ts = float(parts[0])
+            except ValueError:
+                continue
+            if oldest_ts is None or ts < oldest_ts:
+                oldest_ts = ts
+        if oldest_ts is None or now - oldest_ts <= keep_seconds:
+            return  # nothing would be pruned -- skip the rewrite entirely
+        lock = log.with_suffix(log.suffix + '.lock')
+        try:
+            if lock.exists() and now - lock.stat().st_mtime > cls._COMPACT_LOCK_STALE_SECONDS:
+                lock.unlink()  # abandoned lock from a crashed holder
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            return  # another process is compacting (or holds a fresh lock) -- skip
+        except OSError:
+            return
+        try:
+            raw = log.read_text()  # re-read under the lock -- another writer may have appended
+            kept = []
+            for ln in raw.splitlines():
+                parts = ln.split(None, 1)
+                if not parts:
+                    continue
+                try:
+                    ts = float(parts[0])
+                except ValueError:
+                    continue  # unparseable leading field -- drop rather than keep forever
+                if now - ts <= keep_seconds:
+                    kept.append(ln)
+            tmp = log.with_suffix(log.suffix + '.tmp')
+            tmp.write_text('\n'.join(kept) + ('\n' if kept else ''))
+            os.replace(tmp, log)
+        except OSError:
+            pass
+        finally:
+            try:
+                lock.unlink()
+            except OSError:
+                pass
 
     @classmethod
     def _parse(cls) -> dict[str, list[tuple[float, int, int, int, int]]]:
