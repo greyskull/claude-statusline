@@ -119,6 +119,17 @@
 # stdin payload as before (or `∞`/omitted if that's absent too). No default —
 # both are unset unless you add them.
 #
+# The signal driving this is each session's LIFETIME transcript totals
+# (input, cache_creation, cache_read, output tokens, summed across every
+# assistant message) -- monotonic for the life of a session, unlike the raw
+# payload's context_window fields, which only describe the single most
+# recent request and can DROP on /compact or /clear. When summing a
+# session's usage within a window, the four components are weighted before
+# being added together (input 1.0, cache_creation 1.25, cache_read 0.1,
+# output 1.0) -- these mirror the public API's cache-pricing ratios, but
+# Anthropic does NOT document how Max's 5h/7d windows actually weight cache
+# tokens internally, so treat this as a reasonable assumption, not a fact.
+#
 # five_hour = { budget = 44_000_000, window = "5h", anchor = "rolling" }
 # seven_day = { budget = 440_000_000, window = "7d", anchor = "fixed", epoch = "0 0 * * 0" }
 #

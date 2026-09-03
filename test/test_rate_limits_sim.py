@@ -1,6 +1,12 @@
 """Tests for yas.rate_limits_sim: rolling/fixed bucket derivation, override of
 real values, and absent-key fallback (RateLimitLog is exercised directly
-against a tmp_path-patched runtime dir via the `tmp_home` fixture)."""
+against a tmp_path-patched runtime dir via the `tmp_home` fixture).
+
+All the *_tokens components below use `input_tokens` for the whole amount
+(cache_creation/cache_read/output left at 0) unless a test is specifically
+about weighting -- RATE_LIMIT_WEIGHT_INPUT is 1.0, so that keeps these
+tests' expected percentages numerically identical to the pre-refactor
+single-cumulative-number tests they're descended from."""
 
 from __future__ import annotations
 
@@ -26,7 +32,7 @@ def _isolated_runtime(tmp_home: object) -> None:
 
 def test_absent_rules_passes_real_values_through_unchanged() -> None:
     real = RateLimits(five_hour=RateBucket(used_percentage=12.0, resets_at=999))
-    out = simulate_rate_limits('sess-a', {}, real, cumulative_tokens=1000)
+    out = simulate_rate_limits('sess-a', {}, real, 1000, 0, 0, 0)
     assert out is real
 
 
@@ -37,11 +43,11 @@ def test_rolling_bucket_sums_history_within_window(monkeypatch: pytest.MonkeyPat
     # Two samples 100s apart, both inside a 5h window, and no earlier
     # (pre-window) sample for this session -> baseline is 0, so the *full*
     # latest cumulative value (5000) counts, not the 1000->5000 delta.
-    RateLimitLog.record(session_id, 1000, keep_seconds=6 * 3600)
+    RateLimitLog.record(session_id, 1000, 0, 0, 0, keep_seconds=6 * 3600)
     rule = RateLimitRule(budget=8000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
     real = RateLimits()
     monkeypatch.setattr(time, 'time', lambda: first_sample_ts + 100)
-    out = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=5000, now=first_sample_ts + 100)
+    out = simulate_rate_limits(session_id, {'five_hour': rule}, real, 5000, 0, 0, 0, now=first_sample_ts + 100)
     # resets_at is anchored at the *first* sample's timestamp, not `now`.
     assert out.five_hour.used_percentage == pytest.approx(5000 / 8000 * 100, abs=0.01)
     assert out.five_hour.resets_at == int(first_sample_ts + 5 * 3600)
@@ -50,18 +56,18 @@ def test_rolling_bucket_sums_history_within_window(monkeypatch: pytest.MonkeyPat
 def test_rolling_bucket_clamps_to_100_percent() -> None:
     session_id = 'sess-clamp'
     now = time.time()
-    RateLimitLog.record(session_id, 0, keep_seconds=6 * 3600)
+    RateLimitLog.record(session_id, 0, 0, 0, 0, keep_seconds=6 * 3600)
     rule = RateLimitRule(budget=100, window_seconds=5 * 3600, anchor='rolling', epoch=None)
-    out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), cumulative_tokens=10_000, now=now + 60)
+    out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 10_000, 0, 0, 0, now=now + 60)
     assert out.five_hour.used_percentage == 100.0
 
 
 def test_fixed_bucket_reset_is_next_cron_firing() -> None:
     session_id = 'sess-fixed'
     now = time.time()
-    RateLimitLog.record(session_id, 0, keep_seconds=8 * 86400)
+    RateLimitLog.record(session_id, 0, 0, 0, 0, keep_seconds=8 * 86400)
     rule = RateLimitRule(budget=1000, window_seconds=7 * 86400, anchor='fixed', epoch='0 0 * * 0')
-    out = simulate_rate_limits(session_id, {'seven_day': rule}, RateLimits(), cumulative_tokens=500, now=now)
+    out = simulate_rate_limits(session_id, {'seven_day': rule}, RateLimits(), 500, 0, 0, 0, now=now)
     # resets_at is a real epoch int strictly after `now`.
     assert isinstance(out.seven_day.resets_at, int)
     assert out.seven_day.resets_at > now
@@ -70,10 +76,10 @@ def test_fixed_bucket_reset_is_next_cron_firing() -> None:
 def test_override_replaces_real_value_even_when_present() -> None:
     session_id = 'sess-override'
     now = time.time()
-    RateLimitLog.record(session_id, 0, keep_seconds=6 * 3600)
+    RateLimitLog.record(session_id, 0, 0, 0, 0, keep_seconds=6 * 3600)
     real = RateLimits(five_hour=RateBucket(used_percentage=77.0, resets_at=123))
     rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
-    out = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=200, now=now + 30)
+    out = simulate_rate_limits(session_id, {'five_hour': rule}, real, 200, 0, 0, 0, now=now + 30)
     assert out.five_hour != real.five_hour
     assert out.five_hour.resets_at != 123
 
@@ -81,10 +87,10 @@ def test_override_replaces_real_value_even_when_present() -> None:
 def test_absent_key_falls_back_to_real_seven_day() -> None:
     session_id = 'sess-partial'
     now = time.time()
-    RateLimitLog.record(session_id, 0, keep_seconds=6 * 3600)
+    RateLimitLog.record(session_id, 0, 0, 0, 0, keep_seconds=6 * 3600)
     real = RateLimits(seven_day=RateBucket(used_percentage=42.0, resets_at=555))
     rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
-    out = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=200, now=now + 30)
+    out = simulate_rate_limits(session_id, {'five_hour': rule}, real, 200, 0, 0, 0, now=now + 30)
     assert out.seven_day == real.seven_day
 
 
@@ -96,8 +102,18 @@ def test_single_sample_in_window_with_no_baseline_counts_in_full() -> None:
     # (the one taken inside simulate_rate_limits itself) ever lands in the
     # window, with no pre-window baseline -> it counts in full (session
     # started inside the window).
-    out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), cumulative_tokens=999_999, now=now)
+    out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 999_999, 0, 0, 0, now=now)
     assert out.five_hour.used_percentage == pytest.approx(999_999 / 1_000_000 * 100, abs=0.01)
+
+
+def test_weighted_components_feed_the_bucket_percentage() -> None:
+    # cache_creation (x1.25) and cache_read (x0.1) are weighted differently
+    # from input/output (x1.0): 100*1.0 + 100*1.25 + 100*0.1 + 100*1.0 = 335.
+    session_id = 'sess-weighted'
+    now = time.time()
+    rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
+    out = simulate_rate_limits(session_id, {'five_hour': rule}, RateLimits(), 100, 100, 100, 100, now=now)
+    assert out.five_hour.used_percentage == pytest.approx(33.5, abs=0.01)
 
 
 def test_same_minute_calls_are_stable_and_skip_recompute(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,8 +131,8 @@ def test_same_minute_calls_are_stable_and_skip_recompute(monkeypatch: pytest.Mon
     real_usage_since = RateLimitLog.usage_since
     monkeypatch.setattr(RateLimitLog, 'usage_since', staticmethod(lambda *a, **kw: (calls.append(1), real_usage_since(*a, **kw))[1]))
 
-    first  = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=200, now=minute_start + 5)
-    second = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=9_000, now=minute_start + 45)
+    first  = simulate_rate_limits(session_id, {'five_hour': rule}, real, 200, 0, 0, 0, now=minute_start + 5)
+    second = simulate_rate_limits(session_id, {'five_hour': rule}, real, 9_000, 0, 0, 0, now=minute_start + 45)
 
     assert first.five_hour.used_percentage == second.five_hour.used_percentage
     assert first.five_hour.resets_at == second.five_hour.resets_at
@@ -134,8 +150,8 @@ def test_minute_rollover_recomputes_percentage_but_resets_at_stays_anchored() ->
     rule = RateLimitRule(budget=1000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
     real = RateLimits()
 
-    first  = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=100, now=minute_start + 5)
-    second = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=800, now=minute_start + 60)
+    first  = simulate_rate_limits(session_id, {'five_hour': rule}, real, 100, 0, 0, 0, now=minute_start + 5)
+    second = simulate_rate_limits(session_id, {'five_hour': rule}, real, 800, 0, 0, 0, now=minute_start + 60)
 
     assert second.five_hour.used_percentage != first.five_hour.used_percentage
     assert second.five_hour.resets_at == first.five_hour.resets_at
@@ -149,8 +165,8 @@ def test_two_sessions_share_the_same_anchored_window() -> None:
     directly (rather than through simulate_rate_limits, which would append a
     fresh record per call and make the log states diverge between the two
     calls) so both buckets are computed against one fixed, shared log."""
-    RateLimitLog.record('sess-a', 1_000, keep_seconds=6 * 3600)
-    RateLimitLog.record('sess-b', 2_500, keep_seconds=6 * 3600)
+    RateLimitLog.record('sess-a', 1_000, 0, 0, 0, keep_seconds=6 * 3600)
+    RateLimitLog.record('sess-b', 2_500, 0, 0, 0, keep_seconds=6 * 3600)
     rule = RateLimitRule(budget=10_000, window_seconds=5 * 3600, anchor='rolling', epoch=None)
 
     now = time.time() + 300
@@ -175,13 +191,13 @@ def test_idle_ticks_after_a_lapsed_window_do_not_open_a_new_window() -> None:
     real = RateLimits()
 
     # Opens a window at t=0 with real usage.
-    simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=100, now=0.0)
+    simulate_rate_limits(session_id, {'five_hour': rule}, real, 100, 0, 0, 0, now=0.0)
     # The window has fully lapsed by t=window+100. Every tick since is an
     # idle heartbeat repeating the same cumulative value -- these must not
     # land on disk, and must not anchor a fresh window.
     now = window + 100.0
     for t in (window + 20.0, window + 60.0, now):
-        out = simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=100, now=t)
+        out = simulate_rate_limits(session_id, {'five_hour': rule}, real, 100, 0, 0, 0, now=t)
 
     # A window opened by a zero-spend idle heartbeat would anchor at one of
     # those idle timestamps; instead it must fall back to `now` (no activity
@@ -207,7 +223,7 @@ def test_regression_guard_update_interval_is_60s_not_300s(monkeypatch: pytest.Mo
     real_usage_since = RateLimitLog.usage_since
     monkeypatch.setattr(RateLimitLog, 'usage_since', staticmethod(lambda *a, **kw: (calls.append(1), real_usage_since(*a, **kw))[1]))
 
-    simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=100, now=minute_start)
-    simulate_rate_limits(session_id, {'five_hour': rule}, real, cumulative_tokens=800, now=minute_start + 61)
+    simulate_rate_limits(session_id, {'five_hour': rule}, real, 100, 0, 0, 0, now=minute_start)
+    simulate_rate_limits(session_id, {'five_hour': rule}, real, 800, 0, 0, 0, now=minute_start + 61)
 
     assert len(calls) == 2  # would be 1 if the TTL were 300s instead of 60s

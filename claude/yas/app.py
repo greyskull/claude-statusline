@@ -21,27 +21,31 @@ from yas.tokens import RenderTiming, TickRecord, TokenLog, TokenRate, compute_da
 from yas.info.transcript import TranscriptUsage
 
 
-def _apply_rate_limit_sim(info: dict[str, object], cfg: Config) -> None:
+def _apply_rate_limit_sim(info: dict[str, object], cfg: Config, usage: TranscriptUsage) -> None:
     """Overwrite info['rate_limits'] with synthesised buckets per cfg.rate_limit_rules.
 
     Mutates `info` in place, before it is written to the per-session payload
     (see `main`), so the statusline and the `mon` TUI read the same
     already-synthesised values rather than deriving them independently.
-    `cumulative_tokens` comes straight off the raw payload's context_window
-    totals (already present, no transcript parse needed) so this can run
-    ahead of SessionInfo/SessionView construction.
+
+    `usage` is the session's lifetime transcript totals (input,
+    cache_creation, cache_read, output), summed once by `TranscriptUsage.
+    from_transcript` and threaded in by the caller -- NOT re-derived from
+    the raw payload's context_window totals, which are only the most recent
+    request's composition (a context-size gauge, not a lifetime sum; see
+    RateLimitLog's docstring for why that distinction matters). The caller
+    is responsible for parsing the transcript exactly once per render and
+    handing the result here as well as into SessionView, rather than this
+    function parsing it again.
     """
     from yas.rate_limits_sim import simulate_rate_limits
     session_id = _as_str(info.get('session_id')) or 'unknown'
-    ctx = info.get('context_window')
-    ctx = ctx if isinstance(ctx, dict) else {}
-    total_in  = ctx.get('total_input_tokens', 0)
-    total_out = ctx.get('total_output_tokens', 0)
-    cumulative_tokens = (int(total_in) if isinstance(total_in, (int, float)) else 0) \
-        + (int(total_out) if isinstance(total_out, (int, float)) else 0)
     rl_raw = info.get('rate_limits')
     real   = RateLimits.from_dict(rl_raw if isinstance(rl_raw, dict) else {})
-    synth  = simulate_rate_limits(session_id, cfg.rate_limit_rules, real, cumulative_tokens)
+    synth  = simulate_rate_limits(
+        session_id, cfg.rate_limit_rules, real,
+        usage.input_tokens, usage.cache_creation_input_tokens, usage.cache_read_input_tokens, usage.output_tokens,
+    )
     info['rate_limits'] = {
         'five_hour': {'used_percentage': synth.five_hour.used_percentage, 'resets_at': synth.five_hour.resets_at},
         'seven_day': {'used_percentage': synth.seven_day.used_percentage, 'resets_at': synth.seven_day.resets_at},
@@ -67,19 +71,25 @@ def resolve_theme(cli_name: str | None) -> Theme:
     return THEMES.get(Config.load().theme, CLAUDE_DARK)
 
 
-def render(session_info: dict[str, object], width: int, *, bg_shift: str = 'warm', theme: Theme | None = None, glyph_mode: str | None = None, single_width: bool | None = None, timing: str = '') -> str:
+def render(session_info: dict[str, object], width: int, *, bg_shift: str = 'warm', theme: Theme | None = None, glyph_mode: str | None = None, single_width: bool | None = None, timing: str = '', view: SessionView | None = None) -> str:
+    """`view`, when supplied, is an already-constructed SessionView -- used by
+    `main` so the transcript it lazily parses (`view.transcript_usage`) is
+    reused rather than parsed again here; external callers (tests, `mon`)
+    leave it None and get a fresh SessionInfo/Config/SessionView built from
+    `session_info` as before."""
     if width < MIN_WIDTH:
         return ''
-    session     = SessionInfo.from_dict(session_info)
+    session     = view.session if view is not None else SessionInfo.from_dict(session_info)
     r           = Renderer(bg_shift=bg_shift, theme=theme)
-    cfg         = Config.load()
-    parse_cache = TranscriptCache.load(session.session_id) if cfg.transcript_cache else None
+    cfg         = view.cfg if view is not None else Config.load()
+    parse_cache = view.parse_cache if view is not None else (TranscriptCache.load(session.session_id) if cfg.transcript_cache else None)
     if glyph_mode is None:
         glyph_mode = cfg.glyph_mode
     if single_width is None:
         single_width = cfg.single_width
     soft_limit = cfg.soft_limit_for(session.model.id, session.model.display_name)
-    view       = SessionView(session, cfg, cache=parse_cache)
+    if view is None:
+        view = SessionView(session, cfg, cache=parse_cache)
     if width < NARROW_WIDTH:
         spec = build_narrow(view, width, r, soft_limit)
     elif width < MEDIUM_WIDTH:
@@ -126,8 +136,20 @@ def main(t0: float | None = None) -> None:
     theme    = THEMES.get(cfg.theme, CLAUDE_DARK)
 
     info = json.loads(sys.stdin.read())
+    # A SessionView is only built here (ahead of `render`) when the rate-limit
+    # simulator needs its transcript_usage -- building it unconditionally
+    # would force a transcript parse on every render, including narrow/medium
+    # layouts that otherwise never touch the transcript. When built, it's
+    # threaded into `render` below (`view=view`) so that one parse -- paid by
+    # `view.transcript_usage` here -- is reused for both the simulator and
+    # the normal session view, instead of `render` parsing the transcript
+    # again from scratch.
+    view: SessionView | None = None
     if cfg.rate_limit_rules:
-        _apply_rate_limit_sim(info, cfg)
+        session     = SessionInfo.from_dict(info)
+        parse_cache = TranscriptCache.load(session.session_id) if cfg.transcript_cache else None
+        view        = SessionView(session, cfg, cache=parse_cache)
+        _apply_rate_limit_sim(info, cfg, view.transcript_usage)
 
     # Write payload so the multi-session observer can index it. Keyed by
     # session_id and overwritten in place under yas/state/sessions/, so the
@@ -161,6 +183,6 @@ def main(t0: float | None = None) -> None:
     else:
         width = max(MIN_WIDTH, min(cfg.max_width, raw_tw - 6))
 
-    sys.stdout.write(render(info, width, bg_shift=bg_shift, theme=theme, glyph_mode=cfg.glyph_mode, single_width=cfg.single_width, timing=timing))
+    sys.stdout.write(render(info, width, bg_shift=bg_shift, theme=theme, glyph_mode=cfg.glyph_mode, single_width=cfg.single_width, timing=timing, view=view))
     if cfg.show_render_time:
         RenderTiming.write(session_id, (time.perf_counter() - t0) * 1000.0)

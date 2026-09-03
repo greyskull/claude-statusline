@@ -6,6 +6,18 @@ values, a user can define a budget/window/anchor per bucket and this module
 derives a used_percentage + resets_at pair, in the same shape as the real
 payload (yas.session.RateBucket), from the RateLimitLog history.
 
+The input signal is each session's LIFETIME transcript usage (yas.info.
+transcript.TranscriptUsage's input/cache_creation/cache_read/output sums,
+deduped by message id) -- monotonic for the life of a session, unlike the
+raw payload's context_window fields, which describe only the most recent
+request and can silently DROP on /compact or /clear. `RateLimitLog` records
+the four components separately per tick and `usage_since` (yas.tokens)
+combines them with a fixed per-component weighting (see
+RATE_LIMIT_WEIGHT_* in yas.tokens) before summing a window's usage --
+those weights mirror the public API's cache-pricing ratios but are an
+explicit ASSUMPTION, since Anthropic does not document how the 5h/7d
+windows actually weight cache tokens.
+
 `anchor = 'rolling'` is an account-wide window anchored at first activity
 (RateLimitLog.window_anchor): the window opens at the first activity not
 already inside a live window, runs for its FULL `window_seconds` regardless
@@ -74,7 +86,7 @@ def _rolling_bucket(
     rule:        'RateLimitRule',
     session_id:  str,
     now:         float,
-    by_session:  dict[str, list[tuple[float, int]]] | None = None,
+    by_session:  dict[str, list[tuple[float, int, int, int, int]]] | None = None,
 ) -> RateBucket:
     # Anchored at first account-wide activity, not at `now` -- see
     # RateLimitLog.window_anchor. Every concurrent session shares the same
@@ -93,7 +105,7 @@ def _fixed_bucket(
     rule:        'RateLimitRule',
     session_id:  str,
     now:         float,
-    by_session:  dict[str, list[tuple[float, int]]] | None = None,
+    by_session:  dict[str, list[tuple[float, int, int, int, int]]] | None = None,
 ) -> RateBucket:
     assert rule.epoch is not None  # enforced at config-load time
     sched   = CronSchedule.parse(rule.epoch)
@@ -113,7 +125,7 @@ def _synth_bucket(
     session_id:  str,
     bucket_name: str,
     now:         float,
-    by_session:  dict[str, list[tuple[float, int]]] | None = None,
+    by_session:  dict[str, list[tuple[float, int, int, int, int]]] | None = None,
 ) -> RateBucket:
     minute = int(now // _BUCKET_SECONDS)
     key     = (session_id, bucket_name)
@@ -131,22 +143,28 @@ def _synth_bucket(
 
 
 def simulate_rate_limits(
-    session_id:         str,
-    rules:               dict[str, 'RateLimitRule'],
-    real_rate_limits:    RateLimits,
-    cumulative_tokens:   int,
-    now:                 float | None = None,
+    session_id:            str,
+    rules:                  dict[str, 'RateLimitRule'],
+    real_rate_limits:       RateLimits,
+    input_tokens:           int,
+    cache_creation_tokens:  int,
+    cache_read_tokens:      int,
+    output_tokens:          int,
+    now:                    float | None = None,
 ) -> RateLimits:
     """Override real_rate_limits' buckets with synthesised ones per `rules`.
 
     A bucket absent from `rules` passes its real value through untouched
     (today's behaviour: 5h renders unlimited, 7d is omitted, when Claude Code
-    supplies nothing). `cumulative_tokens` is this tick's running session
-    total (billed_in + cache_read + out) and is recorded to RateLimitLog
-    before any bucket is computed -- but only when it actually differs from
-    this session's last recorded value (RateLimitLog.record dedupes idle
-    heartbeats), so a fresh tick's real usage is still counted towards the
-    trailing window even though most ticks write nothing.
+    supplies nothing). The four *_tokens args are this tick's lifetime
+    transcript totals (yas.info.transcript.TranscriptUsage's input,
+    cache_creation, cache_read, and output sums -- monotonic across a
+    session, unlike the raw payload's context_window gauge) and are
+    recorded to RateLimitLog before any bucket is computed -- but only when
+    at least one component actually differs from this session's last
+    recorded sample (RateLimitLog.record dedupes idle heartbeats), so a
+    fresh tick's real usage is still counted towards the trailing window
+    even though most ticks write nothing.
 
     `record()` parses the log to do that dedupe check, and returns the
     parsed (and, when it wrote, updated) `by_session` structure; that same
@@ -158,7 +176,10 @@ def simulate_rate_limits(
     t = now if now is not None else time.time()
     keep_seconds = max(rule.window_seconds for rule in rules.values()) * 2
     keep_seconds = min(keep_seconds, MAX_LOOKBACK_SECONDS) + 3600  # small safety margin
-    by_session = RateLimitLog.record(session_id, cumulative_tokens, keep_seconds=keep_seconds, now=t)
+    by_session = RateLimitLog.record(
+        session_id, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+        keep_seconds=keep_seconds, now=t,
+    )
 
     five_hour = _synth_bucket(rules['five_hour'], session_id, 'five_hour', t, by_session) if 'five_hour' in rules else real_rate_limits.five_hour
     seven_day = _synth_bucket(rules['seven_day'], session_id, 'seven_day', t, by_session) if 'seven_day' in rules else real_rate_limits.seven_day
